@@ -104,6 +104,126 @@ __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __rest
     if (mixed16) mixed16[i] = bf(s);
     if (mixed_h) mixed_h[i] = hf(s);
 }
+// The read's up projection (lo16 . w_up^T, BF16 in, FP32 sums over K = 320) with gr_mix_r_kernel as its epilogue
+// (upstream's gr_upmix_cuda_kernel, cffe31d4): `gated` (T x 10240 FP32) is neither written nor read back.  A block: 128
+// tokens x 32 columns x the 4 streams, K in slices of 32 (cp.async, double-buffered); 8 warps of 32 tokens x 16 columns
+// x 4 streams on mma.m16n8k16 (ldmatrix), K summed in order as cuBLAS's kernels do (gr_upmix_parity checks the T where
+// cuBLAS takes such a kernel); a lane then mixes its (token, column) pairs of all 4 streams in registers in
+// gr_mix_r_kernel's order.  PF: the epilogue's R rows are asked into L2 at the start, where the L2 holds those of the
+// blocks in flight (the 5070 Ti's 48 MB: 1.71x the pair at 2048 tokens against 1.41x without; on the 3090's 6 MB it
+// costs 8%).  The last tile's missing rows are zeros (a cp.async of 0 bytes): read from one row, they ran 2-3x slower.
+constexpr int UM_BM = 128, UM_BD = 32, UM_KC = 32, UM_LD = UM_KC + 8;   // tokens, columns a stream, k a slice, a row
+__device__ __forceinline__ void um_cp16(void* s, const void* g, unsigned bytes = 16) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g),
+                 "r"(bytes));
+}
+__device__ __forceinline__ void um_ldm4(unsigned (&r)[4], const void* p) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"((unsigned) __cvta_generic_to_shared(p)));
+}
+__device__ __forceinline__ void um_mma(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+                 "{%0,%1,%2,%3};\n"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+template <bool PF>
+__global__ void __launch_bounds__(256, 2) gr_upmix_kernel(const uint16_t* __restrict__ lo16, const uint16_t* __restrict__ wu,
+                                                          const float* __restrict__ R, const float* __restrict__ rs,
+                                                          const float* __restrict__ w, float* __restrict__ mixed,
+                                                          uint16_t* __restrict__ mixed16, uint16_t* __restrict__ mixed_h,
+                                                          int64_t T) {
+    __shared__ __align__(16) uint16_t sA[2][UM_BM][UM_LD];
+    __shared__ __align__(16) uint16_t sB[2][HC * UM_BD][UM_LD];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
+    // column tiles fastest: the blocks in flight share a token tile (its lo16 rows stay in L2)
+    const int64_t t0 = (int64_t) blockIdx.y * UM_BM;
+    const int d0 = blockIdx.x * UM_BD;
+    if (PF)
+        for (int i = tid; i < UM_BM * HC; i += 256) {
+            const int64_t t = t0 + i / HC;
+            if (t < T) asm volatile("prefetch.global.L2 [%0];" ::"l"(R + t * D + (i % HC) * N + d0));
+        }
+    auto stage = [&](int kc, int buf) {
+        for (int i = tid; i < UM_BM * (UM_KC / 8); i += 256) {
+            const int r = i / (UM_KC / 8), q = i % (UM_KC / 8);
+            const bool in = t0 + r < T;
+            um_cp16(&sA[buf][r][q * 8], lo16 + (in ? t0 + r : 0) * LR + kc * UM_KC + q * 8, in ? 16 : 0);
+        }
+        for (int i = tid; i < HC * UM_BD * (UM_KC / 8); i += 256) {
+            const int r = i / (UM_KC / 8), q = i % (UM_KC / 8);
+            um_cp16(&sB[buf][r][q * 8], wu + ((int64_t) (r / UM_BD) * N + d0 + r % UM_BD) * LR + kc * UM_KC + q * 8);
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    };
+    float acc[2][HC][2][4];
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int c = 0; c < HC; ++c)
+#pragma unroll
+            for (int s = 0; s < 2; ++s)
+#pragma unroll
+                for (int i = 0; i < 4; ++i) acc[mt][c][s][i] = 0.0f;
+    constexpr int NK = LR / UM_KC;
+    stage(0, 0);
+    for (int kc = 0; kc < NK; ++kc) {
+        const int buf = kc & 1;
+        if (kc + 1 < NK) {
+            stage(kc + 1, buf ^ 1);
+            asm volatile("cp.async.wait_group 1;\n" ::);
+        } else {
+            asm volatile("cp.async.wait_group 0;\n" ::);
+        }
+        __syncthreads();
+#pragma unroll
+        for (int ks = 0; ks < UM_KC / 16; ++ks) {
+            unsigned a[2][4];
+#pragma unroll
+            for (int mt = 0; mt < 2; ++mt) um_ldm4(a[mt], &sA[buf][wm * 32 + mt * 16 + (lane & 15)][ks * 16 + (lane >> 4) * 8]);
+#pragma unroll
+            for (int c = 0; c < HC; ++c) {
+                unsigned b[4];   // b[0..1]: columns 0-7 of the warp's 16, b[2..3]: 8-15 (k 0-7, 8-15 each)
+                um_ldm4(b, &sB[buf][c * UM_BD + wn * 16 + (lane & 7) + ((lane >> 4) << 3)][ks * 16 + ((lane >> 3) & 1) * 8]);
+#pragma unroll
+                for (int mt = 0; mt < 2; ++mt) {
+                    um_mma(acc[mt][c][0], a[mt], b[0], b[1]);
+                    um_mma(acc[mt][c][1], a[mt], b[2], b[3]);
+                }
+            }
+        }
+        __syncthreads();   // every read of `buf` before stage(kc + 2) refills it
+    }
+#pragma unroll
+    for (int mt = 0; mt < 2; ++mt)
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int64_t t = t0 + wm * 32 + mt * 16 + (lane >> 2) + h * 8;
+            if (t >= T) continue;
+#pragma unroll
+            for (int s = 0; s < 2; ++s) {
+                const int d = d0 + wn * 16 + s * 8 + (lane & 3) * 2;
+                float sm[2] = {0.0f, 0.0f};
+#pragma unroll
+                for (int c = 0; c < HC; ++c) {
+                    const float2 r2 = *reinterpret_cast<const float2*>(R + t * D + c * N + d);
+                    const float2 w2 = *reinterpret_cast<const float2*>(w + c * N + d);
+                    const float rsc = rs[t * HC + c];
+                    const float x0 = r2.x * rsc * w2.x, x1 = r2.y * rsc * w2.y;   // gr_mix_r_kernel's order
+                    sm[0] = fmaf(x0, sigm(acc[mt][c][s][h * 2 + 0]), sm[0]);
+                    sm[1] = fmaf(x1, sigm(acc[mt][c][s][h * 2 + 1]), sm[1]);
+                }
+                sm[0] /= (float) HC;
+                sm[1] /= (float) HC;
+                if (mixed) *reinterpret_cast<float2*>(mixed + t * N + d) = make_float2(sm[0], sm[1]);
+                if (mixed16)
+                    *reinterpret_cast<uint32_t*>(mixed16 + t * N + d) = (uint32_t) bf(sm[0]) | ((uint32_t) bf(sm[1]) << 16);
+                if (mixed_h)
+                    *reinterpret_cast<uint32_t*>(mixed_h + t * N + d) = (uint32_t) hf(sm[0]) | ((uint32_t) hf(sm[1]) << 16);
+            }
+        }
+}
 // gr_write_kernel for one row (t, c), then gr_norm_rs_kernel's reduction over it with the next read's norm weights:
 // the same thread-to-element mapping (256 threads, stride 256) and block_sum, so rs and the BF16 image are the same
 // bits, and R is not read back
@@ -822,6 +942,26 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
     gr_mix_r_kernel<<<blocks_for(T * N), 256, 0, (cudaStream_t) stream>>>(R, rs, w_norm, gated, mixed, mixed16, T,
                                                                           mixed_h);
     check("gr_mix_r");
+}
+void gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const float* rs, const float* w_norm,
+              float* mixed, uint16_t* mixed16, int64_t T, void* stream, uint16_t* mixed_h) {
+    if (T <= 0) return;
+    // per device: whether half its L2 holds the R tiles of two blocks an SM (0: not asked yet, 1: yes, 2: no)
+    static std::atomic<int> pf_of[64];
+    int dev = 0;
+    cudaGetDevice(&dev);
+    std::atomic<int>& pf = pf_of[dev & 63];
+    if (pf.load() == 0) {
+        int sms = 0, l2 = 0;
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+        cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, dev);
+        pf.store((int64_t) sms * 2 * UM_BM * HC * UM_BD * 4 <= (int64_t) l2 / 2 ? 1 : 2);
+    }
+    const dim3 grid(N / UM_BD, (unsigned) ((T + UM_BM - 1) / UM_BM));
+    const cudaStream_t s = (cudaStream_t) stream;
+    if (pf.load() == 1) gr_upmix_kernel<true><<<grid, 256, 0, s>>>(lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, T);
+    else gr_upmix_kernel<false><<<grid, 256, 0, s>>>(lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, T);
+    check("gr_upmix");
 }
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, const uint16_t* partial) {

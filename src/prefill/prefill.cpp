@@ -33,6 +33,9 @@ constexpr int64_t N = 2560, HC = 4, D = N * HC, LR = 320, K = 10, NE = 512;
 constexpr int64_t C = 10240, ZV = 6144, HV = 48;
 constexpr int64_t SUB = 2048;                 // tokens of a sub-chunk: everything but the routed experts
 constexpr int64_t SEL_BATCH = 256;            // queries per block-score launch
+// a hyper-connection read's up projection and mix in one kernel (gr_upmix) from this many tokens: bitwise the cuBLAS
+// GEMM + gr_mix_r pair from 185 on the 3090 and from 33 on the 5070 Ti (gr_upmix_parity), faster from ~128 / ~512
+constexpr int64_t UPMIX_MIN = 512;
 // A layer's quantized projections, dequantized to FP16 once for all its sub-chunks: the PLE key, or the mixer's
 // (GDN: qkv, gate, out; QSA: q, k, v, out) and the shared expert's
 constexpr int64_t W16 = std::max(D * N, std::max(C + ZV + ZV, 12288 + 512 + 512 + ZV) * N + 3 * 640 * N);
@@ -710,10 +713,16 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     }
                     if (!bf16_proj(m.gemm, wd, b.xn16, b.lo, P, sd, err, 0, hc16[half][0])) return false;
                     gr_silu(b.lo, b.lo16, P, m.cs);
-                    if (!bf16_proj(m.gemm, wu, b.lo16, b.gated, P, su, err, 0, hc16[half][1])) return false;
                     if (!bf16_proj(m.gemm, wi, b.xn16, inj, P, si, err)) return false;
-                    gr_mix_r(b.R + t0 * D, b.rs, (const float*) wn->data, b.gated, nullptr, b.mixed_bf, P, m.cs,
-                             mixed_h);
+                    const uint16_t* wu16 = hc16[half][1] ? hc16[half][1] : (const uint16_t*) wu->data;
+                    if (P >= UPMIX_MIN && wu->kind == core::WeightKind::Bf16InF32 && wu16 != nullptr) {
+                        gr_upmix(b.lo16, wu16, b.R + t0 * D, b.rs, (const float*) wn->data, nullptr, b.mixed_bf, P, m.cs,
+                                 mixed_h);
+                    } else {
+                        if (!bf16_proj(m.gemm, wu, b.lo16, b.gated, P, su, err, 0, hc16[half][1])) return false;
+                        gr_mix_r(b.R + t0 * D, b.rs, (const float*) wn->data, b.gated, nullptr, b.mixed_bf, P, m.cs,
+                                 mixed_h);
+                    }
                     if (half == 1) break;
 
                     if (!qsa) {

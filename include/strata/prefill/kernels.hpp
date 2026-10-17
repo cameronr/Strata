@@ -19,6 +19,10 @@ void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint1
 /// gr_mix with xn recomputed from R, rs and w_norm as gr_norm computes it (the same bits).
 void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
               int64_t T, void* stream, uint16_t* mixed_h = nullptr);
+/// The up projection (gated = lo16 . w_up^T, w_up BF16 [10240, 320]) and gr_mix_r in one kernel, `gated` never
+/// written: gr_mix_r's bits where cuBLAS sums K as the kernel does (gr_upmix_parity).  sm_80+.
+void gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const float* rs, const float* w_norm,
+              float* mixed, uint16_t* mixed16, int64_t T, void* stream, uint16_t* mixed_h = nullptr);
 /// gr_write, then gr_norm_rs of the written rows with the next read's norm weights, R read once.
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, const uint16_t* partial = nullptr);
