@@ -1617,6 +1617,14 @@ the pairs in which the switched arm won). They are here so you can try them on y
   gathered as before. Prompts with both GPUs (2026-10-18): gate/up in place against gathered IQ3_S 16K -1.0%, 64K
   -0.9%, UD-Q4_K_XL 16K -2.8%, 64K -4.2%; down in place too, against gate/up alone, IQ3_S -0.4 / -0.6 / -0.8% at 16K /
   64K / 131K tokens, UD-Q4_K_XL -2.3 / -2.6 / -1.2%.
+  With `--second-gpu` a GPU takes its experts in batches by row count, most first (upstream's `STRATA_MMQ_GROUP_SORT`
+  idea, for every batch): the first GPU and the second for its share, and `--prompt-split`'s second stage. MMQ's tile
+  width, which a batch's largest expert sets, then fits each batch's experts: the products' GPU time 15-43% below id
+  order's over the engine's own routing of 128-16K-token chunks (`mmq_expert_bench --dump`), and a batch's staging
+  copies go in one submission. Prompts with both GPUs (2026-10-18): IQ3_S -3.2 / -6.3 / -1.7 / -0.8 / -1.0% at 512 /
+  2K / 16K / 64K / 131K tokens; UD-Q4_K_XL -13.4 / -4.2 / -3.0 / -1.1 / -0.8%. Not bitwise: a token's experts add up
+  in the batches' order (KL against llama.cpp along its texts within the noise). One GPU alone keeps id order, where a
+  batch mixes cached and streamed experts and the copies into one staging slot overlap the products of the other.
 
 ## Thread placement: `--aux-cpus` (Linux, off by default)
 

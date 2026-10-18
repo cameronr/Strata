@@ -1,10 +1,11 @@
 // include/strata/prefill/experts.hpp - the prompt path's routed experts on one GPU.
 //
-// A prompt chunk uses nearly every expert of every layer.  Its experts go through in batches of consecutive ids: per
-// batch one staging copy for each run of adjacent arena blobs among the experts the GPU's cache does not hold, one
-// dequantization launch, one gather of the batch's rows, the two GEMMs of each expert with a SwiGLU between them, and
-// one ordered add of every row, times its routing weight, into its token's sum.  A token's experts add up in ascending
-// id order, whatever the batches.  A chunk uses many of the experts a layer streams, so they are copied ahead
+// A prompt chunk uses nearly every expert of every layer.  Its experts go through in batches of consecutive ones in the
+// order run_layer gets them (Prefill: by row count with a second GPU or an x16 link, else by id): per batch one
+// submission of staging copies, one for each run of adjacent arena blobs among the experts the GPU's cache does not
+// hold, one dequantization launch, one gather of the batch's rows, the two GEMMs of each expert with a SwiGLU between
+// them, and one ordered add of every row, times its routing weight, into its token's sum.  A token's experts add up in
+// the order of the batches.  A chunk uses many of the experts a layer streams, so they are copied ahead
 // (`prefetch_*`), the likeliest first, while the prompt path's dense work runs and before the routing is known; the
 // ones the routing picks that did not make it stream batch by batch.
 //

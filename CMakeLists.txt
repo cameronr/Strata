@@ -686,7 +686,7 @@ if(STRATA_NATIVE_EXPERTS)
     # the prompt path's routed-expert products by format at the engine's shapes (a bench, not a test)
     add_executable(mmq_expert_bench src/prefill/mmq_expert_bench.cpp)
     target_include_directories(mmq_expert_bench PRIVATE ${_strata_gg}/include)
-    target_link_libraries(mmq_expert_bench PRIVATE strata_mmq CUDA::cudart)
+    target_link_libraries(mmq_expert_bench PRIVATE strata_mmq strata_kernels CUDA::cudart)
     # upstream's fused int8 prompt experts for the native packs (moe_fused.cu, moe_fused_iq.cu; not in the engine)
     # against the MMQ path: the error against FP64 and both paths' times at the engine's chunks
     add_library(strata_fused STATIC src/prefill/moe_fused.cu src/prefill/moe_fused_iq.cu)

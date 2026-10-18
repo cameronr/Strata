@@ -901,7 +901,19 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 m.w2[h].clear();
                 m.off2[h].assign(1, 0);
             }
-            for (int32_t e = 0; e < NE; ++e) {
+            // the experts by their row count, most first, where a second GPU takes the experts this one lacks or
+            // this one copies most of its streamed experts ahead over an x16 link (a second stage): a batch of
+            // consecutive ones (experts.cpp) is then of experts of a size, and MMQ's tile width, which the batch's
+            // largest sets, fits them all (the products' GPU time 15-43% below id order's, mmq_expert_bench --dump;
+            // a token's experts add up in this order).  A main GPU alone keeps id order: there a batch mixes resident
+            // and streamed experts, so the copies into one staging slot overlap the products of the other, while by
+            // row count the resident ones, the most used, come first (its 16K IQ3_S prompt +2.6%)
+            std::vector<int32_t> by_rows((size_t) NE);
+            for (int32_t e = 0; e < NE; ++e) by_rows[(size_t) e] = e;
+            if (m.offload || m.fast_local)
+                std::stable_sort(by_rows.begin(), by_rows.end(),
+                                 [&](int32_t x, int32_t y) { return m.cnt[(size_t) x] > m.cnt[(size_t) y]; });
+            for (const int32_t e : by_rows) {
                 if (m.cnt[(size_t) e] == 0) continue;
                 const bool here = !m.offload || (m.host_res && m.cache && m.host_res[(size_t) l * NE + e] >= 0 &&
                                                  !m.shifted[(size_t) e]);

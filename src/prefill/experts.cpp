@@ -568,16 +568,21 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
     cudaEventRecord(m.up_done[ub], m.s);
     m.up_live[ub] = true;
     if (m.remote) cudaMemsetAsync(m.sum + t_begin * N, 0, (size_t) (t_end - t_begin) * N * 4, m.s);
-    // ---- staging: the streamed experts of batch b into slot b % SLOTS, a copy per run of adjacent arena blobs
+    // ---- staging: the streamed experts of batch b into slot b % SLOTS, a run of adjacent arena blobs one copy, the
+    // batch's copies one submission (copy_blobs: one interrupt a batch under WDDM, whatever the experts' ids)
+    std::vector<void*> st_dst;
+    std::vector<const void*> st_src;
+    std::vector<size_t> st_bytes;
     auto stage_batch = [&](size_t b) {
         const auto [j0, j1] = batches[b];
         const int sl = (int) (b % SLOTS);
-        bool any = false;
+        st_dst.clear();
+        st_src.clear();
+        st_bytes.clear();
+        bool pinned = true;
         for (size_t j = j0; j < j1;) {
             const int32_t e = experts[j];
             if (held(e) >= 0 || pre(e) >= 0) { ++j; continue; }
-            if (!any && m.live[sl]) cudaStreamWaitEvent(m.copy, m.used[sl], 0);   // its previous batch is dequantized
-            any = true;
             const uint8_t* b0 = m.src->blob(layer, e);
             uint8_t* dst = (uint8_t*) P[0 * E + j];
             size_t k = j + 1;   // the run: the next experts' blobs follow this one in the arena and in staging
@@ -585,15 +590,23 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
                 while (k < j1 && held(experts[k]) < 0 && pre(experts[k]) < 0 && m.src->pinned(layer, experts[k]) &&
                        m.src->blob(layer, experts[k]) == b0 + (k - j) * bb &&
                        (uint8_t*) P[0 * E + k] == dst + (k - j) * bb) ++k;
-            cudaMemcpyAsync(dst, b0, (k - j) * bb, cudaMemcpyHostToDevice, m.copy);   // pageable blobs: staged
+            pinned = pinned && m.src->pinned(layer, e);
+            st_dst.push_back(dst);
+            st_src.push_back(b0);
+            st_bytes.push_back((k - j) * bb);
             experts_streamed += (int64_t) (k - j);
             j = k;
         }
-        if (any) {
-            cudaEventRecord(m.copied[sl], m.copy);
-            m.live[sl] = true;
+        if (st_dst.empty()) return false;
+        if (m.live[sl]) cudaStreamWaitEvent(m.copy, m.used[sl], 0);   // its previous batch is read
+        if (!(pinned && core::copy_blobs(st_dst.data(), st_src.data(), st_bytes.data(), st_dst.size(), m.copy))) {
+            (void) cudaGetLastError();   // a batch the runtime refused, or pageable blobs (staged by the driver)
+            for (size_t i = 0; i < st_dst.size(); ++i)
+                cudaMemcpyAsync(st_dst[i], st_src[i], st_bytes[i], cudaMemcpyHostToDevice, m.copy);
         }
-        return any;
+        cudaEventRecord(m.copied[sl], m.copy);
+        m.live[sl] = true;
+        return true;
     };
     std::vector<char> has_stream(batches.size(), 0);
     if (!batches.empty()) has_stream[0] = stage_batch(0);
