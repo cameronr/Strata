@@ -16,11 +16,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -735,11 +737,13 @@ bool locate_experts_gguf(const std::vector<std::string>& shards, const strata::k
 }
 
 // `idx` (empty, or per (layer, expert)): an expert's place among its layer's blobs, -1 for one left out (only in VRAM,
-// `skipped` bytes in all)
+// `skipped` bytes in all).  `ready` (or null): called before a layer is read, until its place in `layer_base` exists
+// (false: stop, the load fails).
 LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::vector<GgufSpan>& spans,
                             const std::vector<uint8_t*>& layer_base, const strata::kernels::cpu::ExpertLayout& lay,
                             int threads, const std::function<void(int64_t)>& done = nullptr,
-                            const std::vector<int32_t>& idx = {}, uint64_t skipped = 0) {
+                            const std::vector<int32_t>& idx = {}, uint64_t skipped = 0,
+                            const std::function<bool(int64_t)>& ready = nullptr) {
     LoadStats st;
     st.layers = (uint64_t) lay.n_layers;
     const auto t0 = std::chrono::steady_clock::now();
@@ -778,6 +782,7 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
+            if (ready && !ready(l)) { bad = true; break; }
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
@@ -821,6 +826,7 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
+            if (ready && !ready(l)) { bad = true; break; }
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
@@ -983,34 +989,76 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         }
     }
 #endif
-    for (int64_t l = 0; !anon && l < n_layers; ++l) {
-        void* p = nullptr;
-        if (cudaHostAlloc(&p, (size_t) room[(size_t) l], cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess) {
+    // a pinned block per layer, in order; the layers past the first refusal in one pageable range (false: none)
+    bool reserve_failed = false;
+    auto place_layers = [&](const std::function<void(int64_t)>& placed) {
+        for (int64_t l = 0; l < n_layers; ++l) {
+            void* p = nullptr;
+            if (cudaHostAlloc(&p, (size_t) room[(size_t) l], cudaHostAllocPortable | cudaHostAllocMapped) != cudaSuccess) {
+                (void) cudaGetLastError();
+                for (int64_t m = l; m < n_layers; ++m) tail_bytes_ += room[(size_t) m];
+                tail_ = reserve_pageable(tail_bytes_);
+                if (tail_ == nullptr) {
+                    reserve_failed = true;
+                    placed(n_layers);
+                    return;
+                }
+                tail_note = strata::platform::lock_resident(tail_, tail_bytes_).note;
+                uint8_t* at = (uint8_t*) tail_;
+                for (int64_t m = l; m < n_layers; ++m) {
+                    layer_base_[(size_t) m] = at;
+                    at += room[(size_t) m];
+                }
+                placed(n_layers);
+                return;
+            }
+            blocks_.push_back((uint8_t*) p);
+            layer_base_[(size_t) l] = (uint8_t*) p;
+            void* d = nullptr;
+            layer_dev_[(size_t) l] = cudaHostGetDevicePointer(&d, p, 0) == cudaSuccess ? (const uint8_t*) d : nullptr;
             (void) cudaGetLastError();
-            for (int64_t m = l; m < n_layers; ++m) tail_bytes_ += room[(size_t) m];
-            tail_ = reserve_pageable(tail_bytes_);
-            if (tail_ == nullptr) {
+            pinned_total += room[(size_t) l];
+            placed(l + 1);
+        }
+    };
+    // From the GGUF, a layer is read as soon as its block exists: the blocks are allocated on a thread of their own
+    // (all of them first, 48 cudaHostAlloc blocks of 1-1.5 GiB, delayed the reads by 3.5 s on IQ3_S, 6 on UD-Q4_K_XL)
+    const bool overlap = !anon && from_gguf;
+    std::mutex placed_mu;
+    std::condition_variable placed_cv;
+    int64_t n_placed = 0;
+    std::thread placer;
+    if (!anon) {
+        layer_base_.assign((size_t) n_layers, nullptr);
+        layer_dev_.assign((size_t) n_layers, nullptr);
+        auto publish = [&](int64_t n) {
+            {
+                std::lock_guard<std::mutex> lk(placed_mu);
+                n_placed = n;
+            }
+            placed_cv.notify_all();
+        };
+        if (overlap) {
+            int dev0 = 0;
+            (void) cudaGetDevice(&dev0);
+            placer = std::thread([&, dev0] {
+                (void) cudaSetDevice(dev0);
+                place_layers(publish);
+            });
+        } else {
+            place_layers(publish);
+            if (reserve_failed) {
                 close();
                 err = "ArenaExpertSource: the arena could not be reserved (" + std::to_string(tail_bytes_) + " B)";
                 return false;
             }
-            tail_note = strata::platform::lock_resident(tail_, tail_bytes_).note;
-            uint8_t* at = (uint8_t*) tail_;
-            for (int64_t m = l; m < n_layers; ++m) {
-                layer_base_.push_back(at);
-                layer_dev_.push_back(nullptr);
-                at += room[(size_t) m];
-            }
-            break;
         }
-        blocks_.push_back((uint8_t*) p);
-        layer_base_.push_back((uint8_t*) p);
-        void* d = nullptr;
-        layer_dev_.push_back(cudaHostGetDevicePointer(&d, p, 0) == cudaSuccess ? (const uint8_t*) d : nullptr);
-        (void) cudaGetLastError();
-        pinned_total += room[(size_t) l];
     }
-    if (!anon) pinned_layers_ = (int64_t) blocks_.size();
+    auto layer_ready = [&](int64_t l) {
+        std::unique_lock<std::mutex> lk(placed_mu);
+        placed_cv.wait(lk, [&] { return n_placed > l; });
+        return !reserve_failed;
+    };
     if (const char* v = std::getenv("STRATA_LOAD_THREADS"); v != nullptr && std::atoi(v) > 0) threads = std::atoi(v);
     // the anonymous arena: each layer page-locked by the thread that read it, as soon as it is in place (the
     // registrations overlap the other layers' reads, and the pages are not left to the swap meanwhile)
@@ -1027,9 +1075,17 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             (void) cudaGetLastError();
     };
     const LoadStats st =
-        from_gguf ? load_experts_gguf(gguf_, spans, layer_base_, lay, threads, on_layer, idx_, vram_only_bytes_)
+        from_gguf ? load_experts_gguf(gguf_, spans, layer_base_, lay, threads, on_layer, idx_, vram_only_bytes_,
+                                      overlap ? std::function<bool(int64_t)>(layer_ready) : nullptr)
                   : load_experts_ranges(path, layer_base_, loff, lbytes, threads, /*chunk=*/8u << 20,
                                         [&](uint64_t l) { on_layer((int64_t) l); });
+    if (placer.joinable()) placer.join();
+    if (!anon) pinned_layers_ = (int64_t) blocks_.size();
+    if (reserve_failed) {
+        close();
+        err = "ArenaExpertSource: the arena could not be reserved (" + std::to_string(tail_bytes_) + " B)";
+        return false;
+    }
     if (st.bytes != want) {
         for (int64_t l = 0; l < n_layers; ++l)
             if (reg_ok[(size_t) l]) (void) cudaHostUnregister(layer_base_[(size_t) l]);
