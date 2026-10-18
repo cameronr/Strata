@@ -12,6 +12,7 @@
 #define GGML_COMMON_DECL_CUDA
 #define GGML_COMMON_IMPL_CUDA
 #include "ggml-common.h"
+#include "strata/kernels/dp4a.hpp"
 #include <type_traits>
 
 namespace strata::kernels {
@@ -481,7 +482,7 @@ __device__ __forceinline__ float vec_dot_q6_K_q8_1(const void* __restrict__ vbq,
         const int sc = scales[4 * i];
         const int vil = (vl >> (4 * i)) & 0x0F0F0F0F;
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
-        const int vi = __vsubss4((vil | vih), 0x20202020);   // (vil | vih) - 32
+        const int vi = strata_q6_quants(vil, vih);   // (vil | vih) - 32
         sumf += d8 * (ggml_cuda_dp4a(vi, u, 0) * sc);
     }
     return __half2float(bq6_K->d) * sumf;

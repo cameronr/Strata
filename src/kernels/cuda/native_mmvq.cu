@@ -603,7 +603,7 @@ __device__ __forceinline__ float q6_q8_dot_impl(int vl, int vh, const int* __res
         const int sc = scales[4 * i];
         const int vil = (vl >> (4 * i)) & 0x0f0f0f0f;
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
-        const int vi = __vsubss4(vil | vih, 0x20202020);
+        const int vi = strata_q6_quants(vil, vih);
         sumf += d8[i] * (STRATA_DP4A(vi, u[i], 0) * sc);
     }
     return d * sumf;
@@ -1215,7 +1215,7 @@ struct IlQ6K {
             sc[i] = r.scales[4 * i];
             const int vil = (r.vl >> (4 * i)) & 0x0f0f0f0f;
             const int vih = ((r.vh >> (4 * i)) << 4) & 0x30303030;
-            vi[i] = __vsubss4(vil | vih, 0x20202020);
+            vi[i] = strata_q6_quants(vil, vih);
         }
 #pragma unroll
         for (int c = 0; c < NC; ++c) {
