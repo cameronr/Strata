@@ -1769,17 +1769,17 @@ thinking / after a 16K prompt / an edit quoting its prompt):
   RTX 3090 here (2.6 against 3.7 s), so a layer of the chunk takes it about as long whole as the 3090 with help. Split
   at layer 26, through the API with the prompt cache off (two servers each way): IQ3_S prompts of 32K / 64K / 128K
   tokens 3,130 / 3,320 / 3,240 -> 3,880 / 4,740 / 5,030 t/s (1.24 / 1.43 / 1.55x), UD-Q4_K_XL 3,170 / 3,410 / 3,330 ->
-  3,590 / 4,420 / 4,780 (1.13 / 1.30 / 1.43x). The best layer moves with the engine and the prompt's length, so measure
-  it on the pair: on 2026-10-18 (generate mode) IQ3_S split at 23 read 32K / 64K / 128K prompts 10.8 / 10.6 / 6.4%
-  faster than at 26 (its loan 0.3 GiB larger), UD-Q4_K_XL at 24 5% faster at 32K and alike at 64K-128K, at 27-28 2-8%
-  slower. The answers after them as fast for IQ3_S, 2-5% slower over 400 tokens for UD-Q4_K_XL (its larger loan refills
-  while the first windows run). Shorter prompts are not split. Costs: 0.7 GiB more pinned RAM (a chunk's residual and a
-  staging buffer), ~0.3 GiB of the second GPU's VRAM outside its cache, and during a split prompt 6-8 GiB of its cache
-  lent (64K-128K tokens: IQ3_S 6.0-6.5 GiB, UD-Q4_K_XL 7.7-8.1). The second GPU's kernels and its FP32 expert sums (its
-  shares of the first GPU's layers return FP16) round otherwise: after a 131K-token prompt, along llama.cpp's text, KL
-  against llama.cpp 3.0e-3 split and 4.1e-3 not (5 of 300 argmaxes moved, all near-ties); the same prompt read in two
-  requests gives the same logits as in one. This PC's configs set 23 (IQ3_S) and 26 (UD-Q4_K_XL); the examples leave it
-  out, as it depends on the pair of GPUs.
+  3,590 / 4,420 / 4,780 (1.13 / 1.30 / 1.43x). The best layer moves with the engine and the setup, so measure it on the
+  pair, through the server: on 2026-10-18 generate mode (without the server's --kv-grow) put IQ3_S's best at 23 (32K /
+  64K / 128K prompts 10.8 / 10.6 / 6.4% faster than at 26), while through the API 23 was 4.3 / 2.9 / 2.3% slower than
+  26; UD-Q4_K_XL at 27-28 2-8% slower. The answers after them as fast for IQ3_S, 2-5% slower over 400 tokens for
+  UD-Q4_K_XL (its larger loan refills while the first windows run). Shorter prompts are not split. Costs: 0.7 GiB more
+  pinned RAM (a chunk's residual and a staging buffer), ~0.3 GiB of the second GPU's VRAM outside its cache, and during
+  a split prompt 6-8 GiB of its cache lent (64K-128K tokens: IQ3_S 6.0-6.3 GiB, UD-Q4_K_XL 7.7-8.1). The second GPU's
+  kernels and its FP32 expert sums (its shares of the first GPU's layers return FP16) round otherwise: after a
+  131K-token prompt, along llama.cpp's text, KL against llama.cpp 3.0e-3 split and 4.1e-3 not (5 of 300 argmaxes moved,
+  all near-ties); the same prompt read in two requests gives the same logits as in one. This PC's configs set 26; the
+  examples leave it out, as it depends on the pair of GPUs.
 - **`--dump-draft-data DIR` (`--serve`): training data for the draft layer.** Per request, in `DIR/req<k>.*`: every
   position's final residual row (FP16; the prompt's from the batched path, which then reads every prompt part whatever
   `--feed-max`, without `--prompt-split`), a record a position (its token, the next one, and from a verify window the
