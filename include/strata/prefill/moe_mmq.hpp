@@ -2,7 +2,7 @@
 // kernels (ggml-cuda mmq.cuh, MIT): the weights stay quantized and the activations are rounded to q8_1, the
 // products run on int8 tensor cores.  The dequantize-to-FP16 + cuBLAS path wrote ~10 MB of FP16 per expert and
 // multiplied in FP16; this reads the ~1.4-2 MB expert once.  A group of experts is multiplied in one launch per
-// product: its gate/up where each blob lies (Product::tab), its down gathered into one buffer (`gather_*`).
+// product, each expert's matrices read where its blob lies (Product::tab), or gathered into one buffer (`gather_*`).
 #pragma once
 
 #include <cstddef>
@@ -50,10 +50,17 @@ struct Product {
     int64_t ld_dst = 0;
 };
 
-/// Product::tab can read a [w_rows, w_cols] matrix of `ggml_type` in place: this build has its pointer-table MMQ
-/// (moe_mmq_tab.cuh: the gate/up types of the configs' files), the rows a multiple of 128, and MMQ's k loop reads
-/// no block past a row (w_cols a multiple of 256: gate/up's 2,560; down's 640 runs past the last row's end).
+/// Product::tab can read [w_rows, w_cols] matrices of `ggml_type` in place: this build has its pointer-table MMQ
+/// for the type (moe_mmq_tab.cuh: the gate/up and down types of the configs' files) and the rows are a multiple of
+/// 128.  The matrix needs tab_overread bytes after it.
 bool tab_takes(int ggml_type, int64_t w_rows, int64_t w_cols);
+/// Bytes past a matrix of w_cols columns that MMQ's k loop reads on the current device: its steps (256 values for
+/// the configs' types) run past each row's end, the last row's past the matrix (down's 640 columns: 128 values,
+/// Q8_0 136 bytes).  They meet zero activations, so any finite values do (zero_after).  0 for gate/up's 2,560.
+size_t tab_overread(int ggml_type, int64_t w_cols);
+/// Zeroes `bytes` (a multiple of 4) at each of the n <= kGatherGroupMax addresses (4-byte aligned): the bytes a
+/// product reads past each matrix it reads in place.
+void zero_after(uint8_t* const* at, int n, size_t bytes, void* stream);
 
 /// The launch context (llama.cpp's MMQ keeps a small scratch pool for its stream-k fixup).  One per prompt path.
 class Context {

@@ -10,6 +10,7 @@
 #include "moe_mmq_tab.hpp"   // declarations: the kernels are in the per-type mmq-tab-*.cu TUs
 #endif
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -290,6 +291,10 @@ bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, con
         STRATA_TAB_CASE(GGML_TYPE_IQ4_XS);
         STRATA_TAB_CASE(GGML_TYPE_Q4_K);
         STRATA_TAB_CASE(GGML_TYPE_Q5_K);
+        STRATA_TAB_CASE(GGML_TYPE_Q2_0);
+        STRATA_TAB_CASE(GGML_TYPE_IQ4_NL);
+        STRATA_TAB_CASE(GGML_TYPE_Q5_1);
+        STRATA_TAB_CASE(GGML_TYPE_Q8_0);
 #undef STRATA_TAB_CASE
         default: return false;
     }
@@ -299,12 +304,49 @@ bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, con
 
 bool tab_takes(int t, int64_t w_rows, int64_t w_cols) {
 #if defined(STRATA_MMQ_TAB)
-    // MMQ's k loop takes 256 or 512 values a step (MMQ_ITER_K, MMQ_ITER_K_FP4)
-    return w_rows % 128 == 0 && w_cols % 512 == 0 && run_tab(nullptr, (ggml_type) t, mmq_args{}, mmq_x_tab{}, nullptr);
+    return w_rows % 128 == 0 && w_cols % ggml_blck_size((ggml_type) t) == 0 &&
+           run_tab(nullptr, (ggml_type) t, mmq_args{}, mmq_x_tab{}, nullptr);
 #else
     (void) t; (void) w_rows; (void) w_cols;
     return false;
 #endif
+}
+
+size_t tab_overread(int t, int64_t w_cols) {
+    // the k loop's step (K_vram) for every tile width the launch may pick (fallback = false, the tab kernels' only)
+    const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+    const int64_t qk = ggml_blck_size((ggml_type) t), bpr = w_cols / qk;
+    int64_t most = 0;
+    for (int J = 8; J <= 128; J += 8) {
+        const ggml_cuda_mmq_config c = ggml_cuda_mmq_get_config((ggml_type) t, J, false, cc);
+        if (c.type == GGML_TYPE_COUNT) continue;
+        const int64_t bpi = c.K_vram / qk;
+        most = std::max<int64_t>(most, (bpr + bpi - 1) / bpi * bpi - bpr);
+    }
+    return (size_t) most * ggml_type_size((ggml_type) t);
+}
+
+namespace {
+struct ZeroArgs {
+    uint32_t* at[kGatherGroupMax];
+};
+__global__ void zero_after_kernel(ZeroArgs za, int words) {
+    if ((int) threadIdx.x < words) za.at[blockIdx.x][threadIdx.x] = 0;
+}
+}  // namespace
+
+void zero_after(uint8_t* const* at, int n, size_t bytes, void* stream) {
+    if (n <= 0 || bytes == 0) return;
+    if (n > kGatherGroupMax || bytes % 4 != 0 || bytes > 4096) {
+        std::fprintf(stderr, "prefill mmq: zero_after takes up to %d places of up to 4096 bytes in words\n",
+                     kGatherGroupMax);
+        std::exit(1);
+    }
+    ZeroArgs za{};
+    for (int q = 0; q < n; ++q) za.at[q] = (uint32_t*) at[q];
+    const int words = (int) (bytes / 4);
+    zero_after_kernel<<<(unsigned) n, (unsigned) ((words + 31) / 32 * 32), 0, (cudaStream_t) stream>>>(za, words);
+    ck(cudaGetLastError(), "zero_after");
 }
 
 void Context::run(const Product& p, void* stream) {

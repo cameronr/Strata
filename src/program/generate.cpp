@@ -2161,7 +2161,7 @@ int main(int argc, char** argv) {
         size_t free_room = free_b > ((size_t) o.vram_reserve_mib << 20) ? free_b - ((size_t) o.vram_reserve_mib << 20) : 0;
         const uint64_t cap = std::min<uint64_t>(budget, (uint64_t) free_room);
         for (const auto& pr : profile) {
-            const uint64_t b = (lay.blob_bytes(pr.first) + 255) / 256 * 256;
+            const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
             if (used + b > cap) break;
             used += b;
             sized_slots.push_back((int64_t) lay.blob_bytes(pr.first));
@@ -2203,8 +2203,9 @@ int main(int argc, char** argv) {
             if (!sized_slots.empty()) {
                 int64_t used = 0;
                 size_t keep = 0;
-                while (keep < sized_slots.size() && used + (sized_slots[keep] + 255) / 256 * 256 <= keep_bytes)
-                    used += (sized_slots[keep++] + 255) / 256 * 256;
+                while (keep < sized_slots.size() &&
+                       used + strata::core::ExpertCache::slot_stride(sized_slots[keep]) <= keep_bytes)
+                    used += strata::core::ExpertCache::slot_stride(sized_slots[keep++]);
                 sized_slots.resize(keep);
                 o.expert_cache = (int) keep;
             } else {
@@ -2250,7 +2251,7 @@ int main(int argc, char** argv) {
             const uint64_t budget = (uint64_t) (gib * 1073741824.0);
             uint64_t used = 0;
             for (size_t i = from; i < to; ++i) {
-                const uint64_t b = (lay.blob_bytes(profile[i].first) + 255) / 256 * 256;
+                const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(profile[i].first));
                 if (used + b > budget) break;
                 used += b;
                 out.push_back(profile[i]);
@@ -3000,7 +3001,7 @@ int main(int argc, char** argv) {
             for (size_t i = (size_t) prefilled; i < profile.size(); ++i) {
                 const auto& pr = profile[i];
                 if (host_res[(size_t) (pr.first * g.n_expert + pr.second)] >= 0) continue;   // the first GPU holds it
-                const uint64_t b = (lay.blob_bytes(pr.first) + 255) / 256 * 256;
+                const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
                 if (used + b > budget) break;
                 used += b;
                 sizes.push_back((int64_t) lay.blob_bytes(pr.first));
@@ -3008,7 +3009,8 @@ int main(int argc, char** argv) {
             }
             {   // the rest in empty slots (without the adaptive tier only the prompt path's loans use them)
                 uint64_t round = 0;
-                for (int64_t l = 0; l < g.n_layers; ++l) round += (lay.blob_bytes(l) + 255) / 256 * 256;
+                for (int64_t l = 0; l < g.n_layers; ++l)
+                    round += (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l));
                 for (uint64_t q = (budget - used) / round; q > 0; --q)
                     for (int64_t l = 0; l < g.n_layers; ++l) {
                         sizes.push_back((int64_t) lay.blob_bytes(l));
@@ -3031,7 +3033,7 @@ int main(int argc, char** argv) {
                 bool pins_short = false;
                 for (uint64_t cut = 0; !sizes.empty() && cut < reserve - free_b + (64ull << 20);) {
                     if (empty2.empty() && pre.size() <= pin2.size()) { pins_short = true; break; }   // pins stay
-                    cut += ((uint64_t) sizes.back() + 255) / 256 * 256;
+                    cut += (uint64_t) strata::core::ExpertCache::slot_stride(sizes.back());
                     sizes.pop_back();
                     if (!empty2.empty()) empty2.pop_back();
                     else pre.pop_back();
@@ -3110,7 +3112,7 @@ int main(int argc, char** argv) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         uint64_t stride = 0;
         for (int64_t l = 0; l < lay.n_layers; ++l)
-            stride = std::max<uint64_t>(stride, ((uint64_t) lay.blob_bytes(l) + 255) & ~(uint64_t) 255);
+            stride = std::max<uint64_t>(stride, (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)));
         // (with pinned experts and the second GPU's share of the prompt path, no layer streams here: the loan is its
         // buffers alone, Prefill::bytes_for)
         const uint64_t worst_pre = !pin1.empty() && off ? 0 : stride * (uint64_t) g.n_expert;
@@ -3307,7 +3309,7 @@ int main(int argc, char** argv) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         uint64_t stride = 0;
         for (int64_t l = 0; l < g.n_layers; ++l)
-            stride = std::max<uint64_t>(stride, ((uint64_t) lay.blob_bytes(l) + 255) & ~(uint64_t) 255);
+            stride = std::max<uint64_t>(stride, (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)));
         std::vector<int64_t> held1((size_t) g.n_layers, 0), held12((size_t) g.n_layers, 0);
         for (const auto& pr : pin1) { ++held1[(size_t) pr.first]; ++held12[(size_t) pr.first]; }
         for (const auto& pr : pin2) ++held12[(size_t) pr.first];
@@ -3534,7 +3536,8 @@ int main(int argc, char** argv) {
                     if (!cold.empty() && cold.back().first < heat(oi)) {
                         vi = cold.back().second;
                         const int32_t vs = host_res[(size_t) vi];
-                        if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) < (uint64_t) lay.blob_bytes(layer) ||
+                        if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) <
+                                (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(layer)) ||
                             cudaMemcpy(xcache.device_slot(vs), xcache.device_slot((int32_t) kvg.lo),
                                        (size_t) lay.blob_bytes(layer), cudaMemcpyDeviceToDevice) != cudaSuccess)
                             vi = -1;
@@ -3627,7 +3630,9 @@ int main(int argc, char** argv) {
                 for (; pi < profile.size(); ++pi) {
                     const int32_t l = profile[pi].first, e = profile[pi].second;
                     const size_t i = (size_t) l * (size_t) g.n_expert + (size_t) e;
-                    if (host_res[i] >= 0 || (uint64_t) lay.blob_bytes(l) > room) continue;
+                    if (host_res[i] >= 0 ||
+                        (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)) > room)
+                        continue;
                     const uint8_t* b = srcp->blob(l, e);
                     if (b == nullptr) continue;
                     cudaMemcpyAsync(xcache.device_slot((int32_t) s), b, (size_t) lay.blob_bytes(l),

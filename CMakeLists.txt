@@ -648,9 +648,9 @@ if(STRATA_NATIVE_EXPERTS)
       target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
     # MMQ with a pointer per expert (src/prefill/moe_mmq_tab.cuh, upstream's copy of mmq.cuh's scheduler): the prompt
-    # experts' gate/up read in place.  The copy mirrors mmq.cuh from mul_mat_q_process_tile through mul_mat_q_case;
-    # another llama.cpp tree (another fingerprint of that text) leaves it out, and the experts are gathered as before.
-    # The gate/up types of ISTA-DASLab's IQ3_S and unsloth's UD-Q4_K_XL files, one TU each.
+    # experts read in place.  The copy mirrors mmq.cuh from mul_mat_q_process_tile through mul_mat_q_case; another
+    # llama.cpp tree (another fingerprint of that text) leaves it out, and the experts are gathered as before.  The
+    # gate/up and down types of ISTA-DASLab's IQ3_S and unsloth's UD-Q4_K_XL files, one TU each.
     file(READ ${_strata_mmq}/mmq.cuh _strata_mmq_src)
     string(REPLACE "\r\n" "\n" _strata_mmq_src "${_strata_mmq_src}")
     string(FIND "${_strata_mmq_src}" "static __device__ __forceinline__ void mul_mat_q_process_tile" _strata_tab_a)
@@ -665,7 +665,7 @@ if(STRATA_NATIVE_EXPERTS)
     unset(_strata_tab_region)
     if(_strata_tab_hash STREQUAL "36e4dc716c504470ec09cc0852d29a6ac5eace257f6e5e72db3805ca4f043eb0")   # 3cf03257
       set(_strata_tab_cuh ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/moe_mmq_tab.cuh)
-      foreach(_t iq2_s iq3_xxs iq3_s iq4_xs q4_k q5_k)
+      foreach(_t iq2_s iq3_xxs iq3_s iq4_xs q4_k q5_k q2_0 iq4_nl q5_1 q8_0)
         string(TOUPPER ${_t} _strata_tab_T)
         configure_file(src/prefill/mmq_tab_instance.cu.in ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu @ONLY)
         target_sources(strata_mmq PRIVATE ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu)

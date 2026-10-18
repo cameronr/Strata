@@ -52,6 +52,11 @@ struct Alloc {
 };
 
 size_t blob_cap() { return ((size_t) strata::kernels::cpu::expert_layout().max_blob + 255) & ~(size_t) 255; }
+// a blob's bytes in the copy-ahead area: the cache slots' stride, the room after it for the bytes the down product
+// reads past its matrix (run_layer)
+uint64_t area_stride(int64_t layer) {
+    return (uint64_t) core::ExpertCache::slot_stride((int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer));
+}
 
 // the pinned upload block: NPTR x n_expert pointers, then the adds (at most 3 per row, 2 per expert) with each
 // batch's row bounds (2 per expert), rows, weights
@@ -139,9 +144,9 @@ struct ExpertRunner::Impl {
         float* d = a.take<float>((size_t) ROWS * N, ok);
         uint16_t* dq_gu = a.take<uint16_t>((size_t) G * FF2 * N, ok);
         uint16_t* dq_d = a.take<uint16_t>((size_t) G * N * FF, ok);
-        uint8_t* stage[SLOTS] = {};
+        uint8_t* stage[SLOTS] = {};   // G blobs and the room after the last for down's over-read (run_layer)
         if (streams)
-            for (auto& p : stage) p = a.take<uint8_t>((size_t) G * blob_cap(), ok);
+            for (auto& p : stage) p = a.take<uint8_t>((size_t) G * blob_cap() + core::ExpertCache::kSlotGuard, ok);
         void** ptrs = a.take<void*>((size_t) NPTR * (size_t) n_expert, ok);
         *ws = a.take<uint8_t>(GEMM_WS, ok);
         const bool q = mmq_any();
@@ -315,7 +320,7 @@ uint64_t ExpertRunner::prefetch_need(const int32_t* res, const int32_t* skip, in
     const auto& lay = strata::kernels::cpu::expert_layout();
     uint64_t most = 0;
     for (int64_t l = 0; l < lay.n_layers; ++l) {
-        const size_t stride = ((size_t) lay.blob_bytes(l) + 255) & ~(size_t) 255;
+        const uint64_t stride = area_stride(l);
         uint64_t sum = 0;
         int64_t held = 0;   // by the other GPU (`skip`): --prompt-shift's share of them streams here too
         for (int64_t e = 0; e < n_expert; ++e) {
@@ -345,9 +350,7 @@ bool ExpertRunner::prefetch_begin(int64_t layer, int64_t chunk, const std::vecto
         if (!(res && res[e] >= 0)) m.pre_list.push_back(e);
     m.pre_gate = m.pre_live;
     if (m.fast) return true;   // in pieces while the prompt path waits for the GPU (prefetch_next)
-    const auto& lay = strata::kernels::cpu::expert_layout();
-    const uint64_t stride = ((uint64_t) lay.blob_bytes(layer) + 255) & ~255ull;
-    m.pre_list.resize(std::min<size_t>(m.pre_list.size(), (size_t) (m.pre_end / stride)));
+    m.pre_list.resize(std::min<size_t>(m.pre_list.size(), (size_t) (m.pre_end / area_stride(layer))));
     std::sort(m.pre_list.begin(), m.pre_list.end());
     while (prefetch_left())
         if (!prefetch_next(err)) return false;
@@ -357,8 +360,7 @@ bool ExpertRunner::prefetch_begin(int64_t layer, int64_t chunk, const std::vecto
 bool ExpertRunner::prefetch_left() const {
     const Impl& m = *impl_;
     if (m.pre_layer < 0 || m.pre_next >= m.pre_list.size()) return false;
-    const auto& lay = strata::kernels::cpu::expert_layout();
-    return m.pre_at + (((uint64_t) lay.blob_bytes(m.pre_layer) + 255) & ~255ull) <= m.pre_end;
+    return m.pre_at + area_stride(m.pre_layer) <= m.pre_end;
 }
 
 int ExpertRunner::prefetch_pending() const {
@@ -374,9 +376,8 @@ bool ExpertRunner::prefetch_next(std::string& err) {
     if (!prefetch_left()) return true;
     OnDevice on(m.dev, m.main, m.remote);
     const int64_t layer = m.pre_layer;
-    const auto& lay = strata::kernels::cpu::expert_layout();
-    const size_t bb = (size_t) lay.blob_bytes(layer);
-    const size_t stride = (bb + 255) & ~(size_t) 255;
+    const size_t bb = (size_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
+    const size_t stride = (size_t) area_stride(layer);
     if (m.pre_gate) {   // the previous layer's batches have read the area
         // pieces go out once they have: a copy queued behind a wait holds up every copy queued after it on this GPU's
         // copy engine (another stage's too, prefill/split.hpp); the main GPU's, all queued at once, wait there
@@ -398,17 +399,10 @@ bool ExpertRunner::prefetch_next(std::string& err) {
         const int32_t e = m.pre_list[m.pre_next++];
         const uint8_t* b = m.src->blob(layer, e);
         if (b == nullptr) { err = "prompt experts: the expert source has no blob"; return false; }
-        uint8_t* d = m.pre + m.pre_at;
         pinned = pinned && m.src->pinned(layer, e);
-        // a blob that follows the previous one in the arena and in the area extends its copy
-        if (!dst.empty() && stride == bb && (const uint8_t*) srcs.back() + bytes.back() == b &&
-            (uint8_t*) dst.back() + bytes.back() == d)
-            bytes.back() += bb;
-        else {
-            dst.push_back(d);
-            srcs.push_back(b);
-            bytes.push_back(bb);
-        }
+        dst.push_back(m.pre + m.pre_at);
+        srcs.push_back(b);
+        bytes.push_back(bb);
         m.pre_off[(size_t) e] = (int64_t) m.pre_at;
         m.pre_grp[(size_t) e] = m.pre_pieces;
         m.pre_at += stride;
@@ -468,9 +462,16 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
     const bool use_mmq = m.mmq_ctx != nullptr && mmq_layer(f);
     const size_t gub = use_mmq ? mmq::matrix_bytes(f.gu_type, FF2, N) : 0;
     const size_t db = use_mmq ? mmq::matrix_bytes(f.d_type, N, FF) : 0;
-    // gate/up read in place by the MMQ (a blob starts with them: [gate | up | down]), down gathered: its 640 columns
-    // take MMQ's k loop past each row's end, and past the last row the blobs end without slack
-    const bool gu_tab = use_mmq && f.up_off * 2 == gub && mmq::tab_takes(f.gu_type, FF2, N);
+    // gate/up and down read in place by the MMQ, the blob being [gate | up | down] in its matrix bytes.  Down's 640
+    // columns take MMQ's k loop `over` bytes past the matrix (tab_overread), whose values must be finite: they are
+    // zeroed before each batch's down product, in the room each place keeps after a blob (a cache slot's guard, the
+    // copy-ahead area's stride, the end of a staging slot) or in the start of the next blob staged, whose gate/up
+    // product has run by then
+    const bool gu_tab = use_mmq && f.up_off * 2 == gub && mmq::tab_takes(f.gu_type, FF2, N) &&
+                        mmq::tab_overread(f.gu_type, N) == 0;
+    const size_t over = gu_tab && f.down_off == gub && f.down_off + db == bb && mmq::tab_takes(f.d_type, N, FF)
+                            ? mmq::tab_overread(f.d_type, FF) : SIZE_MAX;
+    const bool d_tab = over <= (size_t) core::ExpertCache::kSlotGuard;
     auto held = [&](int32_t e) -> int32_t {
         return m.res && m.cache ? m.res[(size_t) layer * (size_t) m.n_expert + (size_t) e] : -1;
     };
@@ -611,12 +612,17 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         const int64_t r0 = off[j0], rows = off[j1] - r0;
         const bool q = use_mmq && rows <= ROWS;   // an expert with more rows is multiplied in pieces, in FP16
         const bool in_place = q && gu_tab;
+        bool d_place = in_place && d_tab;   // down too, where each cache slot has the room (a uniform one may not)
+        for (size_t j = j0; d_place && j < j1; ++j)
+            if (const int32_t slot = held(experts[j]); slot >= 0)
+                d_place = m.cache->slot_offset(slot + 1) - m.cache->slot_offset(slot) >= bb + over;
         if (q) {
             // the batch's GGUF blocks side by side in the dequantization buffers' place (MMQ reads the experts at
-            // one stride), a zeroed tail after them; one launch for the batch (G <= kGatherGroupMax).  In place:
-            // down alone
+            // one stride), a zeroed tail after them; one launch for the batch (G <= kGatherGroupMax).  Gate/up in
+            // place: down alone; both in place: none
             const size_t half = in_place ? 0 : gub / 2;
-            if (!mmq::gather_native_group((const uint8_t* const*) (P + 0 * E + j0), n, f.up_off, half, f.down_off, db,
+            if (!d_place &&
+                !mmq::gather_native_group((const uint8_t* const*) (P + 0 * E + j0), n, f.up_off, half, f.down_off, db,
                                           m.dq_gu, gub, m.dq_d, db, m.s))
                 for (size_t j = j0; j < j1; ++j) {
                     const uint8_t* bl = (const uint8_t*) P[0 * E + j];
@@ -624,7 +630,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
                                        (uint8_t*) m.dq_gu + (j - j0) * gub, (uint8_t*) m.dq_d + (j - j0) * db, m.s);
                 }
             if (!in_place) cudaMemsetAsync((uint8_t*) m.dq_gu + (size_t) n * gub, 0, MMQ_TAIL, m.s);
-            cudaMemsetAsync((uint8_t*) m.dq_d + (size_t) n * db, 0, MMQ_TAIL, m.s);
+            if (!d_place) cudaMemsetAsync((uint8_t*) m.dq_d + (size_t) n * db, 0, MMQ_TAIL, m.s);
         } else if (lay.native)
             strata::kernels::iq_dequant_experts_f16(f.gu_type, f.d_type, (const uint8_t* const*) (m.ptrs + 0 * E + j0), n,
                                                     f.up_off, f.down_off, f.n_ff, f.n_embd, m.dq_gu, m.dq_d, m.s);
@@ -632,7 +638,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
             for (size_t j = j0; j < j1; ++j)
                 blob_dequant_f16((const uint8_t*) P[0 * E + j], (uint16_t*) P[2 * E + j], (uint16_t*) P[5 * E + j], m.s);
         // the batch's staging slot and the copy-ahead area are free once their last reader is queued: the gather,
-        // or with the gate/up read in place that product
+        // the gate/up product, or with down read in place too that product
         auto release = [&] {
             if (has_stream[b]) cudaEventRecord(m.used[sl], m.s);
             if (last_grp >= 0) {
@@ -665,12 +671,23 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
             p.dst = m.gu; p.ld_dst = FF2;
             if (in_place) p.tab = (const void* const*) (P + 0 * E + j0);
             m.mmq_ctx->run(p, m.s);
-            if (in_place) release();
+            const void* d_at[mmq::kGatherGroupMax];
+            if (d_place) {   // the bytes down reads past each matrix, after the gate/up product read them
+                uint8_t* after[mmq::kGatherGroupMax];
+                for (size_t j = j0; j < j1; ++j) {
+                    d_at[j - j0] = (const uint8_t*) P[0 * E + j] + f.down_off;
+                    after[j - j0] = (uint8_t*) P[0 * E + j] + bb;
+                }
+                mmq::zero_after(after, n, over, m.s);
+            } else if (in_place) {
+                release();
+            }
             mmq::swiglu_quantize(m.gu, m.xq, f.d_type, rows, FF, false, m.s);   // H's q8_1 rows
-            p.tab = nullptr;
+            p.tab = d_place ? d_at : nullptr;
             p.w = m.dq_d; p.type = f.d_type; p.w_rows = N; p.w_cols = FF; p.expert_bytes = db;
             p.dst = m.d; p.ld_dst = N;
             m.mmq_ctx->run(p, m.s);
+            if (d_place) release();
             const int32_t* a = m.adds + adds_at[b];
             moe_gather_add(out, m.d, r0, m.w, a, a + ntok[b], a + 2 * ntok[b] + 1, ntok[b], m.s);
             continue;

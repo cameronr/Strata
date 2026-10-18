@@ -1,11 +1,12 @@
-// mmq_tab_parity - the prompt experts' gate/up product read in place (mmq::Product::tab: each expert's matrix where its
-// blob lies) byte for byte against the gathered product it replaces (the experts copied `expert_bytes` apart, a zeroed
-// 4096-byte tail after the last), for the gate/up types of the configs' files (IQ2_S IQ3_XXS IQ3_S IQ4_XS Q4_K Q5_K) at
-// their shape [1280, 2560].  In place the matrices lie at scattered 256-byte-aligned addresses of an arena filled with
-// an fp16 NaN pattern (0xFF 0x7C), each followed by it: a read past a matrix would put a non-finite value into the
-// output.  Groups of 1-16 experts with mixed row counts (0 to 1,000), and max_rows from 1 to 1,000 so that every tile
-// width MMQ picks (8-128) is taken, few-tile launches (the stream-k grid with its fixup) and many-tile ones.  Both
-// outputs are pre-filled with the NaN pattern and compared whole.
+// mmq_tab_parity - the prompt experts' products read in place (mmq::Product::tab: each expert's matrix where its blob
+// lies) byte for byte against the gathered products they replace (the experts copied `expert_bytes` apart, a zeroed
+// 4096-byte tail after the last), for the configs' files' gate/up types (IQ2_S IQ3_XXS IQ3_S IQ4_XS Q4_K Q5_K) at
+// their shape [1280, 2560] and down types (Q2_0 IQ4_NL Q5_1 Q8_0) at [2560, 640].  In place the matrices lie at
+// scattered 256-byte-aligned addresses of an arena filled with an fp16 NaN pattern (0xFF 0x7C), each followed by the
+// tab_overread bytes the k loop reads past it, zeroed by zero_after, then by the pattern: a read further past a matrix
+// would put a non-finite value into the output.  Groups of 1-16 experts with mixed row counts (0 to 1,000), and
+// max_rows from 1 to 1,000 so that every tile width MMQ picks (8-128) is taken, few-tile launches (the stream-k grid
+// with its fixup) and many-tile ones.  Both outputs are pre-filled with the NaN pattern and compared whole.
 #include "strata/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
@@ -25,7 +26,6 @@ namespace {
 namespace mmq = strata::prefill::mmq;
 
 constexpr int G = mmq::kGatherGroupMax;
-constexpr int64_t ROWS = 1280, COLS = 2560;   // gate/up
 constexpr size_t TAIL = 4096;
 constexpr int64_t kIdsPad = 2048 + 128;        // MMQ reads a whole tile's ids from an expert's first row on
 
@@ -53,13 +53,13 @@ void fill_nan(const Dev& d) {
     upload(d.p, h.data(), d.n);
 }
 
-// random blocks with sane fp16 scales where each format keeps them (d first; the K-quants' dmin after it)
-void fill_matrix(uint8_t* m, ggml_type t, std::mt19937& rng) {
-    const size_t bs = ggml_type_size(t), nb = (size_t) ROWS * (size_t) (COLS / ggml_blck_size(t));
+// random blocks with sane fp16 scales where each format keeps them (d first; the K-quants' dmin, Q5_1's m after it)
+void fill_matrix(uint8_t* m, ggml_type t, int64_t rows, int64_t cols, std::mt19937& rng) {
+    const size_t bs = ggml_type_size(t), nb = (size_t) rows * (size_t) (cols / ggml_blck_size(t));
     std::uniform_int_distribution<int> byte(0, 255);
     std::uniform_real_distribution<float> sc(0.0004f, 0.0024f);
     for (size_t i = 0; i < nb * bs; ++i) m[i] = (uint8_t) byte(rng);
-    const bool dmin = t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K;
+    const bool dmin = t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K || t == GGML_TYPE_Q5_1;
     for (size_t b = 0; b < nb; ++b) {
         const ggml_fp16_t d = ggml_fp32_to_fp16(sc(rng)), dm = ggml_fp32_to_fp16(sc(rng));
         std::memcpy(m + b * bs, &d, 2);
@@ -69,8 +69,9 @@ void fill_matrix(uint8_t* m, ggml_type t, std::mt19937& rng) {
 
 int g_cases = 0, g_fail = 0;
 
-// one product of n experts with cnt[e] rows each
-void product_case(mmq::Context& ctx, ggml_type t, const std::vector<int>& cnt, std::mt19937& rng, cudaStream_t s) {
+// one product of n experts of [ROWS, COLS] with cnt[e] rows each
+void product_case(mmq::Context& ctx, ggml_type t, int64_t ROWS, int64_t COLS, const std::vector<int>& cnt,
+                  std::mt19937& rng, cudaStream_t s) {
     const int n = (int) cnt.size();
     int64_t total = 0, max_rows = 0;
     std::vector<int32_t> bounds(cnt.size() + 1, 0);
@@ -92,14 +93,14 @@ void product_case(mmq::Context& ctx, ggml_type t, const std::vector<int>& cnt, s
     if (total > 0) mmq::quantize((const float*) x.p, nullptr, xq.p, (int) t, COLS, COLS, total, s);
     ck(cudaStreamSynchronize(s), "acts");
     std::vector<std::vector<uint8_t>> w((size_t) n, std::vector<uint8_t>(eb));
-    for (auto& m : w) fill_matrix(m.data(), t, rng);
+    for (auto& m : w) fill_matrix(m.data(), t, ROWS, COLS, rng);
     // gathered: back to back, a zeroed tail
     Dev grp((size_t) n * eb + TAIL + 4096);
     fill_nan(grp);
     for (int z = 0; z < n; ++z) upload(grp.b() + (size_t) z * eb, w[(size_t) z].data(), eb);
     ck(cudaMemset(grp.b() + (size_t) n * eb, 0, TAIL), "tail");
-    // in place: shuffled 256-aligned places with random gaps, NaN after each matrix
-    const size_t stride = (eb + 255) / 256 * 256;
+    // in place: shuffled 256-aligned places with random gaps, the over-read zeroed after each matrix, then NaN
+    const size_t over = mmq::tab_overread((int) t, COLS), stride = (eb + over + 255) / 256 * 256;
     std::vector<size_t> order((size_t) n), where((size_t) n);
     for (int z = 0; z < n; ++z) order[(size_t) z] = (size_t) z;
     std::shuffle(order.begin(), order.end(), rng);
@@ -113,10 +114,13 @@ void product_case(mmq::Context& ctx, ggml_type t, const std::vector<int>& cnt, s
         at += stride;
     }
     std::vector<const void*> tab((size_t) n);
+    std::vector<uint8_t*> after((size_t) n);
     for (int z = 0; z < n; ++z) {
         upload(arena.b() + where[(size_t) z], w[(size_t) z].data(), eb);
         tab[(size_t) z] = arena.b() + where[(size_t) z];
+        after[(size_t) z] = arena.b() + where[(size_t) z] + eb;
     }
+    mmq::zero_after(after.data(), n, over, s);
     const size_t out = (size_t) tr * ROWS * 4;
     Dev ref(out), got(out);
     fill_nan(ref);
@@ -167,7 +171,9 @@ int main() {
         static const int kMax[] = {1, 7, 8, 9, 16, 17, 24, 25, 32, 33, 40, 41, 48, 56, 64, 65, 72, 80, 88, 96, 100,
                                    104, 112, 120, 128, 129, 200, 256, 512, 1000};
         for (const ggml_type t : {GGML_TYPE_IQ2_S, GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS, GGML_TYPE_Q4_K,
-                                  GGML_TYPE_Q5_K}) {
+                                  GGML_TYPE_Q5_K, GGML_TYPE_Q2_0, GGML_TYPE_IQ4_NL, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0}) {
+            const bool down = t == GGML_TYPE_Q2_0 || t == GGML_TYPE_IQ4_NL || t == GGML_TYPE_Q5_1 || t == GGML_TYPE_Q8_0;
+            const int64_t ROWS = down ? 2560 : 1280, COLS = down ? 640 : 2560;
             if (!mmq::tab_takes((int) t, ROWS, COLS)) {
                 std::printf("FAIL %s: no pointer-table product in this build\n", ggml_type_name(t));
                 ++g_fail;
@@ -179,16 +185,18 @@ int main() {
                 std::vector<int> c((size_t) n);
                 for (auto& v : c) v = kRows[pick(rng)];
                 if (*std::max_element(c.begin(), c.end()) == 0) c[0] = 1;
-                product_case(ctx, t, c, rng, s);
+                product_case(ctx, t, ROWS, COLS, c, rng, s);
             }
             for (const int mx : kMax) {      // every tile width: one expert with mx rows, the others fewer
                 std::uniform_int_distribution<int> fewer(0, mx);
                 std::vector<int> c(5);
                 for (auto& v : c) v = fewer(rng);
                 c[2] = mx;
-                product_case(ctx, t, c, rng, s);
+                product_case(ctx, t, ROWS, COLS, c, rng, s);
             }
-            std::printf("%s %-8s %d products\n", g_fail == f0 ? "ok  " : "FAIL", ggml_type_name(t), g_cases - c0);
+            std::printf("%s %-8s [%lld, %lld] %d products, %zu bytes read past each matrix\n",
+                        g_fail == f0 ? "ok  " : "FAIL", ggml_type_name(t), (long long) ROWS, (long long) COLS,
+                        g_cases - c0, mmq::tab_overread((int) t, COLS));
         }
         cudaStreamDestroy(s);
     } catch (const std::exception& e) {

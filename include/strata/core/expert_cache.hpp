@@ -101,8 +101,14 @@ public:
     /// not have, which is the shape of error this project keeps paying for.
     bool open(int64_t n_slots, int64_t n_layers, int64_t n_expert, int64_t blob_bytes, std::string& err);
     /// Plan v0.3 P6: slots of the given sizes, back to back (a native pack's blobs differ per layer, and a
-    /// profile-filled tier never moves an expert to another layer's slot, so each slot keeps its first size).
+    /// profile-filled tier never moves an expert to another layer's slot, so each slot keeps its first size), each
+    /// taking slot_stride of its blob.
     bool open_sized(const std::vector<int64_t>& slot_bytes, int64_t n_layers, int64_t n_expert, std::string& err);
+    /// A sized slot's bytes: its blob, then room for the bytes the prompt path's MMQ reads past the blob's last
+    /// matrix where it reads the expert in its slot (prefill/experts.cpp; Q8_0's down 136), 256-byte aligned.  Every
+    /// place that sizes slots counts them with it.
+    static constexpr int64_t kSlotGuard = 256;
+    static int64_t slot_stride(int64_t blob) { return (blob + kSlotGuard + 255) / 256 * 256; }
     /// Byte offset of each slot in the arena (null for uniform slots).
     const uint64_t* slot_offsets() const { return off_.empty() ? nullptr : off_.data(); }
     void close();
