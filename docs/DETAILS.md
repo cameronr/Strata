@@ -1014,24 +1014,24 @@ print(r.choices[0].message.content)
   `max_tokens` would run past the context is refused too (400); agents that always ask for their full output cap
   can instead get it shortened to the room left: add `"fit_max_tokens": true` to `strata-<model>.json` (or pass
   `--fit-max-tokens` to `serve/server.py`). A prompt that leaves no room at all is still refused.
-- **Prompt cache.** A request continues from the longest start of its prompt the engine still holds, so the next turn
-  of a chat or an agent processes only what is new (a 16K-token conversation: ~0.3 s instead of ~25 s before the first
-  token). It keeps checkpoints of the sequence state in RAM (at every turn's start and end, and at the end of each
-  chunk of a long prompt, chunks of up to 16K tokens of one size: regenerated and edited answers resume from them; for
-  agents also where a prompt leaves the previous request's, and before the end of a last message that grows between
-  requests, so one long context asked different questions, or a transcript growing inside one message, is read once: a
-  6K-token prompt's next request in ~0.5-1 s instead of ~10 s on an RTX 3060) and moves a conversation that another
-  request replaces (a chat app's title request, a subagent) to RAM with its key/value cache, so switching back
+- **Prompt cache.** A request continues from the longest start of its prompt the engine still holds, so the next turn of
+  a chat or an agent processes only what is new (a 16K-token conversation: ~0.3 s instead of ~25 s before the first
+  token). It keeps checkpoints of the sequence state in RAM (at every turn's start and end, and at the end of each chunk
+  of a long prompt, chunks of up to 16K tokens, of one size with a second GPU: regenerated and edited answers resume
+  from them; for agents also where a prompt leaves the previous request's, and before the end of a last message that
+  grows between requests, so one long context asked different questions, or a transcript growing inside one message, is
+  read once: a 6K-token prompt's next request in ~0.5-1 s instead of ~10 s on an RTX 3060) and moves a conversation that
+  another request replaces (a chat app's title request, a subagent) to RAM with its key/value cache, so switching back
   continues where it was; a new conversation that starts as one in RAM does (sibling subagents with one system prompt
-  and tools) copies that start from it and leaves it there whole. When the checkpoints are all in use, a
-  conversation's keep thinning out back from its end (dense near it, sparser further back), so an agent that rewrites
-  its history N tokens back (trims an old tool output) reads about N to 2N tokens again, not the whole conversation.
-  The server keeps the model's own token ids of each reply for the next turn: a reply written in pieces a fresh
-  tokenization merges (`())` + `);` for `()));`) no longer makes the next turn read the rest of the reply again.
-  Responses report the reused tokens (`usage.prompt_tokens_details.cached_tokens`; Anthropic:
-  `cache_read_input_tokens`). Engine options: `--prompt-cache N` checkpoints (default 16, ~110 MB each; 0 = off),
-  `--cache-ram MIB` for replaced conversations (default 16384), `--cache-every N` (default 16384). A changed system
-  prompt or reasoning effort changes the prompt from its first tokens, so nothing is reused.
+  and tools) copies that start from it and leaves it there whole. When the checkpoints are all in use, a conversation's
+  keep thinning out back from its end (dense near it, sparser further back), so an agent that rewrites its history N
+  tokens back (trims an old tool output) reads about N to 2N tokens again, not the whole conversation. The server keeps
+  the model's own token ids of each reply for the next turn: a reply written in pieces a fresh tokenization merges
+  (`())` + `);` for `()));`) no longer makes the next turn read the rest of the reply again. Responses report the reused
+  tokens (`usage.prompt_tokens_details.cached_tokens`; Anthropic: `cache_read_input_tokens`). Engine options:
+  `--prompt-cache N` checkpoints (default 16, ~110 MB each; 0 = off), `--cache-ram MIB` for replaced conversations
+  (default 16384), `--cache-every N` (default 16384). A changed system prompt or reasoning effort changes the prompt
+  from its first tokens, so nothing is reused.
 - **Model aliases** (0.1.32). `"aliases": ["qwen", "local-model"]` in `strata-<model>.json` lists the model under
   those names too in `/v1/models` (each with its own `id`, and in the model's `aliases`), like llama-server's
   `--alias`; a request naming one is answered under that name. Any other name is still served, as before.

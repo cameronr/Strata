@@ -92,6 +92,13 @@ int64_t even_chunk(int64_t len, int64_t cap) {
     const int64_t k = (len + cap - 1) / cap;
     return std::min(cap, ((len + k - 1) / k + 255) / 256 * 256);
 }
+// A prompt's chunk: of one size where a second GPU takes the experts the first lacks (a short last chunk streams
+// nearly every expert of every layer, and under --prompt-split runs its second stage alone after the first's); whole
+// chunks on one GPU, whose copy-ahead area grows with a chunk's tokens (UD-Q4_K_XL's 64K prompt on the 3090 alone
+// 45.6 s in whole chunks, 52.4 in chunks of one size)
+int64_t prompt_chunk(int64_t len, int64_t cap, bool second_gpu) {
+    return second_gpu ? even_chunk(len, cap) : std::min(len, cap);
+}
 
 using Clock = std::chrono::steady_clock;
 
@@ -4245,7 +4252,7 @@ int main(int argc, char** argv) {
                 tier2.apply_pending(true);
                 // --prompt-split: a prompt of more than one chunk, when the second GPU can lend the split's bytes.
                 // The checkpoints every --cache-every cells fall at the chunks' ends.
-                const int64_t chunk = even_chunk(batched_end - reuse, o.prefill_chunk);
+                const int64_t chunk = prompt_chunk(batched_end - reuse, o.prefill_chunk, pbuf.offload != nullptr);
                 const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * chunk;
                 const bool split_try = pbuf.split != nullptr && batched_end - reuse > o.prefill_chunk;
                 if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
@@ -4601,8 +4608,9 @@ int main(int argc, char** argv) {
     std::vector<float> final_r_host(final_r ? (size_t) (g.hc * g.n_embd) : 0);
     if (o.prefill_chunk > 0 && n_prompt > 1) {
         const int64_t n_batched = (o.prefill_until > 0 && o.prefill_until < n_prompt - 1) ? o.prefill_until : n_prompt - 1;
-        const int64_t chunk = even_chunk(n_batched, o.prefill_chunk);
-        if (!setup_prompt_path(prefill, offload, pbuf, psplit, err) ||
+        const bool path_ok = setup_prompt_path(prefill, offload, pbuf, psplit, err);
+        const int64_t chunk = path_ok ? prompt_chunk(n_batched, o.prefill_chunk, pbuf.offload != nullptr) : 0;
+        if (!path_ok ||
             !pbuf.take(chunk, err, pbuf.split != nullptr && n_batched > o.prefill_chunk ? psplit.bytes_for(chunk, n_batched) : 0)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
