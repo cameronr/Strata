@@ -83,6 +83,16 @@
 
 namespace {
 
+/// The chunk size a batched prompt of `len` tokens reads in: as few chunks of at most `cap` tokens as it takes, of one
+/// size (a multiple of 256, the last one shorter), not whole `cap` chunks and the rest.  Every chunk streams each
+/// expert its tokens use, so a short last one costs nearly a whole one's copies, and under --prompt-split it leaves the
+/// pipeline's last stage alone (UD-Q4_K_XL at 20K tokens: 4.33 -> 4.01 s).
+int64_t even_chunk(int64_t len, int64_t cap) {
+    if (len <= cap) return len;
+    const int64_t k = (len + cap - 1) / cap;
+    return std::min(cap, ((len + k - 1) / k + 255) / 256 * 256);
+}
+
 using Clock = std::chrono::steady_clock;
 
 // FNV-1a is deliberately kept local to the request parser: image identity is
@@ -4210,7 +4220,6 @@ int main(int argc, char** argv) {
             else if (n - 1 - reuse > o.feed_max) batched_end = (q > reuse && n - 1 - q <= o.feed_max) ? q : n - 1;
             // Every batched chunk streams each expert its tokens use, however few tokens it holds, so a short last
             // chunk goes through verify windows too.  Chunks and checkpoint segments start at `reuse`.
-            const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * o.prefill_chunk;
             if (!geni && batched_end > reuse) {
                 const int64_t last = reuse + (batched_end - 1 - reuse) / o.prefill_chunk * o.prefill_chunk;
                 if (last > reuse && batched_end - last <= o.feed_max) batched_end = last;
@@ -4220,8 +4229,10 @@ int main(int argc, char** argv) {
             if (batched_end > reuse) {
                 tier.apply_pending(true);   // no copy may still land in a lent slot
                 tier2.apply_pending(true);
-                // --prompt-split: a prompt of more than one chunk, when the second GPU can lend the split's bytes
-                const int64_t chunk = std::min(o.prefill_chunk, batched_end - reuse);
+                // --prompt-split: a prompt of more than one chunk, when the second GPU can lend the split's bytes.
+                // The checkpoints every --cache-every cells fall at the chunks' ends.
+                const int64_t chunk = even_chunk(batched_end - reuse, o.prefill_chunk);
+                const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * chunk;
                 const bool split_try = pbuf.split != nullptr && batched_end - reuse > o.prefill_chunk;
                 if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
                 const bool split_on = pbuf.split_region != nullptr;
@@ -4555,7 +4566,7 @@ int main(int argc, char** argv) {
     std::vector<float> final_r_host(final_r ? (size_t) (g.hc * g.n_embd) : 0);
     if (o.prefill_chunk > 0 && n_prompt > 1) {
         const int64_t n_batched = (o.prefill_until > 0 && o.prefill_until < n_prompt - 1) ? o.prefill_until : n_prompt - 1;
-        const int64_t chunk = std::min(o.prefill_chunk, n_batched);
+        const int64_t chunk = even_chunk(n_batched, o.prefill_chunk);
         if (!setup_prompt_path(prefill, offload, pbuf, psplit, err) ||
             !pbuf.take(chunk, err, pbuf.split != nullptr && n_batched > o.prefill_chunk ? psplit.bytes_for(chunk, n_batched) : 0)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
