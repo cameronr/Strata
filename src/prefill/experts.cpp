@@ -468,6 +468,9 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
     const bool use_mmq = m.mmq_ctx != nullptr && mmq_layer(f);
     const size_t gub = use_mmq ? mmq::matrix_bytes(f.gu_type, FF2, N) : 0;
     const size_t db = use_mmq ? mmq::matrix_bytes(f.d_type, N, FF) : 0;
+    // gate/up read in place by the MMQ (a blob starts with them: [gate | up | down]), down gathered: its 640 columns
+    // take MMQ's k loop past each row's end, and past the last row the blobs end without slack
+    const bool gu_tab = use_mmq && f.up_off * 2 == gub && mmq::tab_takes(f.gu_type, FF2, N);
     auto held = [&](int32_t e) -> int32_t {
         return m.res && m.cache ? m.res[(size_t) layer * (size_t) m.n_expert + (size_t) e] : -1;
     };
@@ -607,17 +610,20 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         if (last_grp >= 0) cudaStreamWaitEvent(m.s, m.pre_ev[(size_t) last_grp], 0);
         const int64_t r0 = off[j0], rows = off[j1] - r0;
         const bool q = use_mmq && rows <= ROWS;   // an expert with more rows is multiplied in pieces, in FP16
+        const bool in_place = q && gu_tab;
         if (q) {
             // the batch's GGUF blocks side by side in the dequantization buffers' place (MMQ reads the experts at
-            // one stride), a zeroed tail after them; one launch for the batch (G <= kGatherGroupMax)
-            if (!mmq::gather_native_group((const uint8_t* const*) (P + 0 * E + j0), n, f.up_off, gub / 2, f.down_off, db,
+            // one stride), a zeroed tail after them; one launch for the batch (G <= kGatherGroupMax).  In place:
+            // down alone
+            const size_t half = in_place ? 0 : gub / 2;
+            if (!mmq::gather_native_group((const uint8_t* const*) (P + 0 * E + j0), n, f.up_off, half, f.down_off, db,
                                           m.dq_gu, gub, m.dq_d, db, m.s))
                 for (size_t j = j0; j < j1; ++j) {
                     const uint8_t* bl = (const uint8_t*) P[0 * E + j];
-                    mmq::gather_native(bl, bl + f.up_off, gub / 2, bl + f.down_off, db,
+                    mmq::gather_native(bl, bl + f.up_off, half, bl + f.down_off, db,
                                        (uint8_t*) m.dq_gu + (j - j0) * gub, (uint8_t*) m.dq_d + (j - j0) * db, m.s);
                 }
-            cudaMemsetAsync((uint8_t*) m.dq_gu + (size_t) n * gub, 0, MMQ_TAIL, m.s);
+            if (!in_place) cudaMemsetAsync((uint8_t*) m.dq_gu + (size_t) n * gub, 0, MMQ_TAIL, m.s);
             cudaMemsetAsync((uint8_t*) m.dq_d + (size_t) n * db, 0, MMQ_TAIL, m.s);
         } else if (lay.native)
             strata::kernels::iq_dequant_experts_f16(f.gu_type, f.d_type, (const uint8_t* const*) (m.ptrs + 0 * E + j0), n,
@@ -625,11 +631,16 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         else
             for (size_t j = j0; j < j1; ++j)
                 blob_dequant_f16((const uint8_t*) P[0 * E + j], (uint16_t*) P[2 * E + j], (uint16_t*) P[5 * E + j], m.s);
-        if (has_stream[b]) cudaEventRecord(m.used[sl], m.s);
-        if (last_grp >= 0) {
-            cudaEventRecord(m.pre_used, m.s);
-            m.pre_live = true;
-        }
+        // the batch's staging slot and the copy-ahead area are free once their last reader is queued: the gather,
+        // or with the gate/up read in place that product
+        auto release = [&] {
+            if (has_stream[b]) cudaEventRecord(m.used[sl], m.s);
+            if (last_grp >= 0) {
+                cudaEventRecord(m.pre_used, m.s);
+                m.pre_live = true;
+            }
+        };
+        if (!in_place) release();
         if (t_begin == 0)   // counted once a layer
             for (size_t j = j0; j < j1; ++j) if (held(experts[j]) >= 0) ++experts_resident;
         if (rows > ROWS) {   // one expert: its rows in pieces
@@ -652,8 +663,11 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
             p.w = m.dq_gu; p.type = f.gu_type; p.w_rows = FF2; p.w_cols = N; p.expert_bytes = gub; p.n = n;
             p.xq = m.xq; p.bounds = m.adds + bounds_at[b]; p.ids = m.ident; p.total_rows = rows; p.max_rows = maxr;
             p.dst = m.gu; p.ld_dst = FF2;
+            if (in_place) p.tab = (const void* const*) (P + 0 * E + j0);
             m.mmq_ctx->run(p, m.s);
+            if (in_place) release();
             mmq::swiglu_quantize(m.gu, m.xq, f.d_type, rows, FF, false, m.s);   // H's q8_1 rows
+            p.tab = nullptr;
             p.w = m.dq_d; p.type = f.d_type; p.w_rows = N; p.w_cols = FF; p.expert_bytes = db;
             p.dst = m.d; p.ld_dst = N;
             m.mmq_ctx->run(p, m.s);

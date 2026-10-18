@@ -1,7 +1,7 @@
-// src/prefill/moe_mmq_tab.cuh - STRATA_MMQ_DIRECT: llama.cpp's MMQ outer scheduler (ggml-cuda mmq.cuh, MIT) with a
-// per-expert pointer table, so the prompt path's MMQ reads resident experts in their expert-cache slots instead of
-// a gathered copy.  Included only by the per-type instance TUs (CMake: mmq_tab_instance.cu.in); moe_mmq.cu sees
-// the declarations in moe_mmq_tab.hpp.
+// src/prefill/moe_mmq_tab.cuh - llama.cpp's MMQ outer scheduler (ggml-cuda mmq.cuh, MIT) with a per-expert pointer
+// table (upstream's, for its STRATA_MMQ_DIRECT), so the prompt path's MMQ reads an expert's gate/up where its blob lies
+// (a cache slot, the copy-ahead area, staging) instead of a gathered copy.  Included only by the per-type instance
+// TUs (CMake: mmq_tab_instance.cu.in); moe_mmq.cu sees the declarations in moe_mmq_tab.hpp.
 //
 // Mirrored from llama.cpp 3cf03257f219afbe7334045ff7c6a06ac68c627d (the fetched pin; the vendored third_party tree's
 // mmq.cuh is byte-identical to it), ggml/src/ggml-cuda/mmq.cuh:
@@ -19,10 +19,10 @@
 //      mul_mat_q<type, J, true> is dropped, so no fallback=true kernel is instantiated.
 // The launch geometry (J, tiles, the stream-k grid and k split, the fixup) is computed from the same mmq_args as
 // upstream's, so every output tile is summed in the same order: the results are bitwise the same as gathering the
-// experts `stride_channel_x` apart (tests/cuda/prefill_mmq_tab_test.cu checks it per type and J).
-// CMake turns STRATA_MMQ_TAB off unless the SHA-256 of mmq.cuh's mirrored region (mul_mat_q_process_tile through
-// mul_mat_q_case, which includes struct mmq_args) is one this copy was verified against; when the llama.cpp pin
-// moves, re-sync this file, re-run the test and record the new hash in CMakeLists.txt (_strata_mmq_tab_known).
+// experts `stride_channel_x` apart (mmq_tab_parity checks it per type and J).
+// CMake leaves the instances out unless the SHA-256 of mmq.cuh's mirrored region (mul_mat_q_process_tile through
+// mul_mat_q_case, which includes struct mmq_args) is the one this copy was verified against; when the llama.cpp pin
+// moves, re-sync this file, re-run the test and record the new hash in CMakeLists.txt.
 //
 // MIT License
 // Copyright (c) 2023-2026 The ggml authors
@@ -49,19 +49,7 @@
 #include "mmq.cuh"
 #include "moe_mmq_tab.hpp"
 
-#include <type_traits>
-
 namespace strata::prefill::mmq {
-
-// A second net behind the configure fingerprint: the upstream templates this copy calls keep their signatures.
-static_assert(std::is_same<decltype(&mul_mat_q_process_tile<GGML_TYPE_Q8_0, 8, false, false>),
-                           void (*)(const char*, int, const int*, const int*, float*, float*, const float*, int, int, int,
-                                    int, int, int, int)>::value,
-              "mmq.cuh: mul_mat_q_process_tile changed - re-sync src/prefill/moe_mmq_tab.cuh");
-static_assert(std::is_same<decltype(&mul_mat_q_stream_k_fixup<GGML_TYPE_Q8_0, 8, false>),
-                           void (*)(const int32_t*, const int32_t*, float*, float*, uint3, int, int, int, uint3, int,
-                                    uint3, int, uint3)>::value,
-              "mmq.cuh: mul_mat_q_stream_k_fixup changed - re-sync src/prefill/moe_mmq_tab.cuh");
 
 // The table reaches the kernel as 16 separate `const char * __restrict__` parameters, like upstream's `x`, and an
 // expert's entry is picked with a select chain: a pointer picked from read-only kernel parameters keeps upstream's

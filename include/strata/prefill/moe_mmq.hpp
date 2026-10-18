@@ -1,8 +1,8 @@
 // include/strata/prefill/moe_mmq.hpp - prompt-speed plan step 2b: the prompt path's experts through llama.cpp's MMQ
 // kernels (ggml-cuda mmq.cuh, MIT): the weights stay quantized and the activations are rounded to q8_1, the
 // products run on int8 tensor cores.  The dequantize-to-FP16 + cuBLAS path wrote ~10 MB of FP16 per expert and
-// multiplied in FP16; this reads the ~1.4-2 MB expert once.  A group of experts is gathered into one buffer
-// (`gather_*`, one launch per expert as its blob arrives) and multiplied in one launch per product.
+// multiplied in FP16; this reads the ~1.4-2 MB expert once.  A group of experts is multiplied in one launch per
+// product: its gate/up where each blob lies (Product::tab), its down gathered into one buffer (`gather_*`).
 #pragma once
 
 #include <cstddef>
@@ -32,9 +32,12 @@ void quantize_f16(const uint16_t* x, const int32_t* ids, void* xq, int ggml_type
 /// One launch over n experts whose weights lie `expert_bytes` apart from `w`: for expert e, the activation rows
 /// [bounds[e], bounds[e+1]) of `xq` (bounds on the device, n+1 entries) times its [w_rows, w_cols] matrix into
 /// dst rows of the same indices (`ld_dst` floats apart, via `ids`: dst row = ids[row], an identity table works).
-/// `total_rows`: the rows of xq; `max_rows`: the most rows one expert has (the launch grid).
+/// `total_rows`: the rows of xq; `max_rows`: the most rows one expert has (the launch grid).  With `tab` (n host
+/// pointers) expert e's matrix is read at tab[e] instead (`w` and `expert_bytes` unused): only where tab_takes says
+/// so, and the same sums in the same order, so the same bits.
 struct Product {
     const void* w = nullptr;
+    const void* const* tab = nullptr;
     int type = -1;
     int64_t w_rows = 0, w_cols = 0;
     size_t expert_bytes = 0;
@@ -46,6 +49,11 @@ struct Product {
     float* dst = nullptr;
     int64_t ld_dst = 0;
 };
+
+/// Product::tab can read a [w_rows, w_cols] matrix of `ggml_type` in place: this build has its pointer-table MMQ
+/// (moe_mmq_tab.cuh: the gate/up types of the configs' files), the rows a multiple of 128, and MMQ's k loop reads
+/// no block past a row (w_cols a multiple of 256: gate/up's 2,560; down's 640 runs past the last row's end).
+bool tab_takes(int ggml_type, int64_t w_rows, int64_t w_cols);
 
 /// The launch context (llama.cpp's MMQ keeps a small scratch pool for its stream-k fixup).  One per prompt path.
 class Context {

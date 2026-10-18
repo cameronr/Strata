@@ -6,6 +6,9 @@
 #include "common.cuh"
 #include "mmq.cuh"
 #include "quantize.cuh"
+#if defined(STRATA_MMQ_TAB)
+#include "moe_mmq_tab.hpp"   // declarations: the kernels are in the per-type mmq-tab-*.cu TUs
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -275,17 +278,59 @@ Context::Context() {
 }
 Context::~Context() { delete (ggml_backend_cuda_context*) ctx_; }
 
+#if defined(STRATA_MMQ_TAB)
+namespace {
+// the pointer-table MMQ for the types CMakeLists builds it for; false: none (nothing launched; ctx null: only asked)
+bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, const mmq_x_tab& tab, cudaStream_t s) {
+    switch (t) {
+#define STRATA_TAB_CASE(T) case T: return ctx == nullptr || mul_mat_q_tab_case<T>(*ctx, a, tab, s)
+        STRATA_TAB_CASE(GGML_TYPE_IQ2_S);
+        STRATA_TAB_CASE(GGML_TYPE_IQ3_XXS);
+        STRATA_TAB_CASE(GGML_TYPE_IQ3_S);
+        STRATA_TAB_CASE(GGML_TYPE_IQ4_XS);
+        STRATA_TAB_CASE(GGML_TYPE_Q4_K);
+        STRATA_TAB_CASE(GGML_TYPE_Q5_K);
+#undef STRATA_TAB_CASE
+        default: return false;
+    }
+}
+}  // namespace
+#endif
+
+bool tab_takes(int t, int64_t w_rows, int64_t w_cols) {
+#if defined(STRATA_MMQ_TAB)
+    // MMQ's k loop takes 256 or 512 values a step (MMQ_ITER_K, MMQ_ITER_K_FP4)
+    return w_rows % 128 == 0 && w_cols % 512 == 0 && run_tab(nullptr, (ggml_type) t, mmq_args{}, mmq_x_tab{}, nullptr);
+#else
+    (void) t; (void) w_rows; (void) w_cols;
+    return false;
+#endif
+}
+
 void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = ggml_blck_size(t), bpr = p.w_cols / qk;
     const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, nullptr,
                         p.w_cols, p.w_rows, p.total_rows, bpr, p.total_rows, p.ld_dst,
-                        p.n, p.n, (int64_t) (p.expert_bytes / ggml_type_size(t)), 0, 0,
+                        p.n, p.n, p.tab ? 0 : (int64_t) (p.expert_bytes / ggml_type_size(t)), 0, 0,
                         1, 1, 0, 0, 0,
                         p.max_rows, p.max_rows};
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
+    if (p.tab) {
+#if defined(STRATA_MMQ_TAB)
+        mmq_x_tab tab{};
+        for (int z = 0; z < p.n && z < kGatherGroupMax; ++z) tab.p[z] = (const char*) p.tab[z];
+        if (p.n <= kGatherGroupMax && tab_takes(p.type, p.w_rows, p.w_cols) && run_tab(&ctx, t, a, tab, s)) {
+            ck(cudaGetLastError(), "mul_mat_q (pointer table)");
+            return;
+        }
+#endif
+        std::fprintf(stderr, "prefill mmq: no pointer-table MMQ for %s [%lld, %lld] (%d experts)\n", ggml_type_name(t),
+                     (long long) p.w_rows, (long long) p.w_cols, p.n);
+        std::exit(1);
+    }
     switch (t) {
         case GGML_TYPE_Q2_0: mul_mat_q_case<GGML_TYPE_Q2_0>(ctx, a, s); break;
         case GGML_TYPE_IQ2_XXS: mul_mat_q_case<GGML_TYPE_IQ2_XXS>(ctx, a, s); break;
