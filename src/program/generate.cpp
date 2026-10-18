@@ -4321,6 +4321,7 @@ int main(int argc, char** argv) {
                 }
                 return true;
             };
+            int64_t merge_from = n - 1;   // the first decode window's first position: [merge_from, n) are prompt tokens
             if (!stop_req.load()) {
                 struct NoHeadSampling {   // every token is committed and the picks are discarded
                     strata::core::Verifier& v;
@@ -4343,18 +4344,30 @@ int main(int argc, char** argv) {
                     return feed(from, to);
                 };
                 const int64_t split = q > batched_end ? q : batched_end;
+                // the last feed window takes the prompt's last token too when it has room for it: it runs as the
+                // first decode window, its prompt tokens committed as they are and the pick at the last one emitted
+                // (a window fewer: the first token 16-20 ms sooner on IQ3_S's follow-up turns); a scored request keeps
+                // the last token alone (its row is the first window's first), as does one that emits nothing
+                if (n - 1 > split && max_new > 0 && req_score.empty() && !ddump.on()) {
+                    int64_t s = split;   // the last piece feed_to runs: from the last cut before the end
+                    for (int64_t c : cuts)
+                        if (track && c > s && c < n - 1) s = c;
+                    const int64_t k = s + (n - 2 - s) / W * W;
+                    if (n - 1 - k < W) merge_from = k;
+                }
                 if (!feed_to(batched_end, split)) { report(err); return 1; }
                 if (split > batched_end) pp_line(split);
                 if (track && split == q && poison_at < 0) pcache.checkpoint(q);
-                if (poison_at < 0 && !feed_to(split, n - 1)) { report(err); return 1; }
-                if (n - 1 > split) pp_line(n - 1);
-                if (track && poison_at < 0) pcache.checkpoint(n - 1);
+                if (poison_at < 0 && !feed_to(split, merge_from)) { report(err); return 1; }
+                if (merge_from > split) pp_line(merge_from);
+                if (track && poison_at < 0) pcache.checkpoint(merge_from);
             }
             pp_total = 0;
             const double prompt_ms = std::chrono::duration<double, std::milli>(Clock::now() - r0).count();
-            // the verify windows: the first holds the last prompt token alone
-            int64_t p = n - 1;
-            int32_t x = (int32_t) ids[(size_t) (n - 1)];
+            // the verify windows: the first holds the prompt's tokens from merge_from on (its last alone when the last
+            // feed window was full, or none ran)
+            int64_t p = merge_from;
+            int32_t x = (int32_t) ids[(size_t) merge_from];
             bool first_window = true;
             int64_t produced_n = 0;
             const char* finish = poison_at >= 0 ? "nonfinite" : "length";
@@ -4364,7 +4377,7 @@ int main(int argc, char** argv) {
             const int64_t hits0 = drive.d.cache_hits + drive.d.gpu2_entries, look0 = hits0 + drive.d.cache_refused;
             std::vector<int32_t> consumed;   // what the state has read, for the penalties
             if (hist_n > 0)
-                for (int64_t i = 0; i + 1 < n; ++i) consumed.push_back((int32_t) ids[(size_t) i]);
+                for (int64_t i = 0; i < merge_from; ++i) consumed.push_back((int32_t) ids[(size_t) i]);
             int lk = 0;   // the next window's drafts from the lookup (0: the draft layer's)
             if (o.spec_lookup > 0) {
                 ids32.resize((size_t) n);
@@ -4384,18 +4397,20 @@ int main(int argc, char** argv) {
                     while (T < S && dprob[(size_t) T - 1] >= (float) req_spec_min_p) ++T;
                 }
                 if (lk > 0) T = 1 + lk;
-                if (first_window) T = 1;
+                if (first_window) T = (int) (n - merge_from);   // the prompt's last tokens (1: its last alone)
                 const std::vector<int32_t>& dr = lk > 0 ? ldrafts : drafts;
                 // Never verify past what this request emits: the committed cells then hold exactly the tokens the
                 // client saw, so its next turn continues from them.  So the window stops at the output limit and
                 // at a drafted end-of-turn token.
-                T = (int) std::min<int64_t>(T, max_new - produced_n);
-                for (int i = 1; i < T; ++i)
-                    if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) dr[(size_t) i - 1]) !=
-                        o.eos_ids.end()) {
-                        T = i + 1;
-                        break;
-                    }
+                if (!first_window) {
+                    T = (int) std::min<int64_t>(T, max_new - produced_n);
+                    for (int i = 1; i < T; ++i)
+                        if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) dr[(size_t) i - 1]) !=
+                            o.eos_ids.end()) {
+                            T = i + 1;
+                            break;
+                        }
+                }
                 if (p + T > o.max_context) break;
                 // the elastic K/V: the window's cells and the drafter's beyond them
                 if (kvg.on && p + T + 64 > kvg.cells && !kvg_ensure(p + T + 64)) {
@@ -4404,7 +4419,8 @@ int main(int argc, char** argv) {
                     return 1;
                 }
                 window[0] = x;
-                for (int i = 1; i < T; ++i) window[(size_t) i] = dr[(size_t) i - 1];
+                for (int i = 1; i < T; ++i)
+                    window[(size_t) i] = first_window ? (int32_t) ids[(size_t) (merge_from + i)] : dr[(size_t) i - 1];
                 if (hist_n > 0) {
                     // row t counts what plain decode would have: the state's tokens, then window[0..t]
                     strata::kernels::penalty_rows(consumed.data(), (int64_t) consumed.size(), window.data(), T, hist_n,
@@ -4444,7 +4460,8 @@ int main(int argc, char** argv) {
                     std::printf("\n");
                     ver.set_logits_wanted(false);
                 }
-                int a = 0;
+                const bool fw = first_window;
+                int a = fw ? T - 1 : 0;   // the first window's prompt tokens are all committed
                 while (a < T - 1 && window[(size_t) a + 1] == outv[(size_t) a]) ++a;
                 if (!ver.commit(a + 1, err, false)) {   // beside the draft
                     drive.join_adapt();
@@ -4453,12 +4470,14 @@ int main(int argc, char** argv) {
                 }
                 if (track) pcache.set(p, window.data(), a + 1);   // the committed cells p .. p + a
                 if (hist_n > 0) consumed.insert(consumed.end(), window.begin(), window.begin() + a + 1);
-                draft_offered += T - 1;
-                draft_accepted += a;
+                if (!fw) {
+                    draft_offered += T - 1;
+                    draft_accepted += a;
+                }
                 ver.ple_ahead(0, outv[(size_t) a]);
                 first_window = false;
                 bool eos = false;
-                for (int i = 0; i <= a && produced_n < max_new && !eos; ++i) {
+                for (int i = fw ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {
                     std::printf("T %d\n", (int) outv[(size_t) i]);
                     if (o.spec_lookup > 0) lookup.append(outv[(size_t) i]);
                     ++produced_n;
@@ -4475,6 +4494,8 @@ int main(int argc, char** argv) {
                     for (int j = 0; j < lk; ++j) ver.ple_ahead(j + 1, ldrafts[(size_t) j]);
                 }
                 mtp.set_max_drafts(lk > 0 ? 1 : S - 1);
+                if (fw)   // the draft layer catches up on the prompt tokens: each position's next token is the prompt's
+                    for (int i = 0; i < T - 1; ++i) outv[(size_t) i] = (int32_t) ids[(size_t) (merge_from + i + 1)];
                 const bool drafted = (eos || produced_n >= max_new ||
                                       mtp.draft(T, outv.data(), p, a, drafts.data(), err, dprob.data(), (float) req_spec_min_p)) &&
                                      ver.wait_commit(err);
