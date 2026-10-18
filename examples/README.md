@@ -96,8 +96,8 @@ as unpaired DIMMs make (two 32 GB and two 48 GB modules), the engine times its R
 experts the CPU reads out of the slow region, again between requests ([DETAILS.md](../docs/DETAILS.md)). On such a
 PC add it to a config's arguments; elsewhere it finds nothing to move and costs ~2 s at the start.
 
-Both of this PC's configs also have `--prompt-split 26`, left out here: a prompt of more than one chunk runs in two
-stages, the second GPU taking each chunk's layers 26-47 whole while the first runs the next chunk. It pays where the
+This PC's configs also have `--prompt-split` (IQ3_S 23, UD-Q4_K_XL 26), left out here: a prompt of more than one
+chunk runs in two stages, the second GPU taking each chunk's last layers whole while the first runs the next chunk. It pays where the
 second GPU alone reads a chunk about as fast as both together: this PC's 5070 Ti runs the dense steps 1.44x as fast as
 its 3090, and prompts of 32K-128K tokens read 1.13-1.55x as fast. It costs 0.7 GiB more pinned RAM and lends 6-8 GiB
 of the second GPU's cache during such a prompt ([DETAILS.md](../docs/DETAILS.md)). Measure it on your pair before
