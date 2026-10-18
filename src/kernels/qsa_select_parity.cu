@@ -301,7 +301,7 @@ int selftest(Data& d, cudaStream_t s) {
     // decode windows: the captured graph's fixed grid, 1-8 queries at consecutive positions
     const int64_t pos_dec[] = {0, 3, 2046, 2047, 2050, 2051, 2052, 8190, 16381, 32766, 65533, 131070, 200180, 262136};
     for (int64_t p : pos_dec)
-        for (int64_t nq : {1, 2, 3, 4, 8}) {
+        for (int64_t nq : {1, 2, 3, 4, 5, 6, 7, 8}) {
             if (p + nq > d.max_cells) continue;
             bad += compare(d, p, nq, qsa_score_grid_blocks, s, "decode");
             ++cases;
@@ -329,7 +329,7 @@ int selftest_long(Data& d, cudaStream_t s) {
     const int64_t pos_dec[] = {0, 2051, 131070, 262136, 262140, 262143, 262144, 266237, 300001, 393213, 524284,
                                786431, 1048572, m - 8};
     for (int64_t p : pos_dec)
-        for (int64_t nq : {1, 4, 8}) {
+        for (int64_t nq : {1, 3, 4, 5, 8}) {
             if (p + nq > m) continue;
             bad += compare(d, p, nq, qsa_score_grid_blocks, s, "decode (long)");
             ++cases;
@@ -379,7 +379,10 @@ void bench(Data& d, cudaStream_t s) {
     const Case cs[] = {{"decode 4 q, 1K cells", 1024, 4, false},      {"decode 4 q, 2K cells", 2048, 4, false},
                        {"decode 4 q, 16K cells", 16384, 4, false},
                        {"decode 4 q, 64K cells", 65536, 4, false},    {"decode 4 q, 131K cells", 131072, 4, false},
-                       {"decode 1 q, 131K cells", 131072, 1, false},  {"prompt 256 q at 16K", 16384 - 256, 256, true},
+                       {"decode 1 q, 131K cells", 131072, 1, false},  {"decode 8 q, 131K cells", 131072, 8, false},
+                       {"decode 1 q, 2K cells", 2048, 1, false},      {"decode 8 q, 16K cells", 16384, 8, false},
+                       {"decode 4 q, 200K cells", 200000, 4, false},  {"decode 8 q, 200K cells", 200000, 8, false},
+                       {"prompt 256 q at 16K", 16384 - 256, 256, true},
                        {"prompt 256 q at 64K", 65536 - 256, 256, true},
                        {"prompt 256 q at 131K", 131072 - 256, 256, true},
                        {"prompt 16 q at 131K", 131072 - 16, 16, true},  {"prompt 64 q at 131K", 131072 - 64, 64, true},

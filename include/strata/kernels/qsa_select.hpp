@@ -9,14 +9,17 @@
 //                      and gets +1e9 when it has cells - which is exactly what the per-token path reads there,
 //                      because pooled[n_bid] holds `dead` at that time (in a chunk it may already hold a block
 //                      completed later, so it is not read).  Each score sums in the order one warp per
-//                      (query, block) did.  Decode windows (< 12 queries): an 8-lane group per key block reads the
-//                      key once for all queries.  Batches: a per-thread GEMM form, a lane's 2 queries x 4 key
-//                      blocks over all heads, the tree on a stack of partial sums, the queries read by the whole
-//                      warp at once; one persistent block an SM with an equal share of the (key tile, query chunk)
-//                      units.
-//   qsa_block_topk   : one 1024-thread block per query; a 4-pass radix select over the query's n_bid + 1 blocks,
-//                      each weighted by its cell count, then the cells emitted in ascending order with ties to the
-//                      lowest index - the same selection as topk_kernel, over a quarter of the elements.
+//                      (query, block) did.  Decode windows (up to 8 queries): a warp per key block, the queries'
+//                      leaves in registers, the warp's sums by recursive halving (9-11 queries: an 8-lane group per
+//                      key block, the queries through shared memory).  Batches: a per-thread GEMM form, a lane's 2
+//                      queries x 4 key blocks over all heads, the tree on a stack of partial sums, the queries read
+//                      by the whole warp at once; one persistent block an SM with an equal share of the (key tile,
+//                      query chunk) units.
+//   qsa_block_topk   : a 4-pass radix select over the query's n_bid + 1 blocks, each weighted by its cell count, then
+//                      the cells emitted in ascending order with ties to the lowest index - the same selection as
+//                      topk_kernel, over a quarter of the elements.  Up to 8 queries (decode windows) in one launch
+//                      over many 256-thread blocks, a query's blocks in chunks that meet at barriers in device
+//                      memory (calls on a GPU must not overlap); more queries: one 1024-thread block per query.
 //
 // Queries carry their own step record (pos, n_kv, n_bid, width) as everywhere else in QSA.
 #pragma once
