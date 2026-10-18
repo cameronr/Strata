@@ -1411,6 +1411,18 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: cannot set the CUDA stack limit\n");
         return 2;
     }
+    // the second GPU's context, made on a thread of its own beside the loads: its first CUDA call took ~2 s here (the
+    // head split's or the tier's, whichever came first).  Joined before either, and on any return.
+    struct JoinOnExit {
+        std::thread t;
+        void join() { if (t.joinable()) t.join(); }
+        ~JoinOnExit() { join(); }
+    } second_ctx;
+    if (o.second_gpu >= 0)
+        second_ctx.t = std::thread([dev = o.second_gpu] {
+            if (cudaSetDevice(dev) == cudaSuccess) (void) cudaFree(nullptr);
+            (void) cudaGetLastError();   // a failure shows where the GPU is first used
+        });
     strata::core::qsa_set_kv_format(o.kv == "int8"   ? strata::core::KvFormat::Int8
                                     : o.kv == "k8v4" ? strata::core::KvFormat::K8V4
                                     : o.kv == "q4_0" ? strata::core::KvFormat::Q4
@@ -2099,6 +2111,7 @@ int main(int argc, char** argv) {
         // the head's last rows on the second GPU (split_head.hpp): each GPU streams its part after the last layer.
         // The drafter gathers its draft head's rows first; without one it needs the whole head here.
         if (o.second_gpu >= 0 && o.head_split > 0.0 && o.head_split < 1.0 && o.spec >= 2) {
+            second_ctx.join();
             const int64_t split = (int64_t) ((1.0 - o.head_split) * (double) n_vocab) / 256 * 256;
             auto sh = std::make_unique<strata::core::SplitHead>();
             std::string e2;
@@ -2971,6 +2984,7 @@ int main(int argc, char** argv) {
     strata::core::SecondGpu gpu2;
     std::vector<int32_t> host_res2;
     strata::core::AdaptiveTier tier2;
+    second_ctx.join();
     if (o.second_gpu >= 0) {
         if (!native_pack || host_res.empty() || o.spec < 2) {
             std::fprintf(stderr, "strata generate: --second-gpu needs a native pack, --expert-profile and --spec\n");
