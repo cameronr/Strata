@@ -743,7 +743,7 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                             const std::vector<uint8_t*>& layer_base, const strata::kernels::cpu::ExpertLayout& lay,
                             int threads, const std::function<void(int64_t)>& done = nullptr,
                             const std::vector<int32_t>& idx = {}, uint64_t skipped = 0,
-                            const std::function<bool(int64_t)>& ready = nullptr) {
+                            const std::function<bool(int64_t)>& ready = nullptr, bool uncached = false) {
     LoadStats st;
     st.layers = (uint64_t) lay.n_layers;
     const auto t0 = std::chrono::steady_clock::now();
@@ -808,6 +808,9 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                         bad = true;
                         break;
                     }
+                    if (uncached)   // --no-file-cache: the pages just read leave the page cache
+                        (void) posix_fadvise(fd, (off_t) (sp.offset + (uint64_t) e0 * per[r]), (off_t) ((uint64_t) n * per[r]),
+                                             POSIX_FADV_DONTNEED);
                     e0 += n;
                 }
             }
@@ -819,10 +822,14 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
 #else
     // fread on a FILE* (upstream #230: MSVC's std::ifstream::read splits a request into 4095-byte freads, 6.2 GiB/s
     // from the file cache against 9.0, 1.6 from the drive against 4.2-4.4); the copy through the cache leaves the file
-    // there for the next start
+    // there for the next start.  --no-file-cache: unbuffered reads (FILE_FLAG_NO_BUFFERING), 4 KB aligned, into an
+    // aligned staging buffer (4.3-4.4 GiB/s from this PC's drive)
     auto worker = [&]() {
         std::vector<FILE*> files(shards.size(), nullptr);
+        std::vector<HANDLE> handles(shards.size(), INVALID_HANDLE_VALUE);
         std::vector<uint8_t> buf;
+        uint8_t* abuf = nullptr;   // the unbuffered reads' staging
+        size_t abuf_bytes = 0;
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
@@ -834,15 +841,46 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
             const int32_t* ix = idx.empty() ? nullptr : idx.data() + (size_t) l * (size_t) lay.n_expert;
             for (int r = 0; r < 3 && !bad; ++r) {
                 const GgufSpan& sp = spans[(size_t) (3 * l + r)];
-                FILE*& f = files[sp.shard];
-                if (f == nullptr) f = std::fopen(shards[sp.shard].c_str(), "rb");
-                if (f == nullptr) { bad = true; break; }
                 const uint64_t total = per[r] * (uint64_t) lay.n_expert, chunk = per[r] * 16;   // 16 experts a read
-                buf.resize((size_t) chunk);
+                FILE*& f = files[sp.shard];
+                HANDLE& h = handles[sp.shard];
+                if (uncached) {
+                    if (h == INVALID_HANDLE_VALUE) {
+                        const std::string& s = shards[sp.shard];
+                        std::wstring w((size_t) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0), L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, w.data(), (int) w.size());
+                        h = CreateFileW(w.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                        FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                    }
+                    if (h == INVALID_HANDLE_VALUE) { bad = true; break; }
+                    const size_t need = (size_t) chunk + 2 * 4096;
+                    if (abuf_bytes < need) {
+                        if (abuf != nullptr) VirtualFree(abuf, 0, MEM_RELEASE);
+                        abuf = (uint8_t*) VirtualAlloc(nullptr, need, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                        abuf_bytes = abuf != nullptr ? need : 0;
+                    }
+                    if (abuf == nullptr) { bad = true; break; }
+                } else {
+                    if (f == nullptr) f = std::fopen(shards[sp.shard].c_str(), "rb");
+                    if (f == nullptr) { bad = true; break; }
+                    buf.resize((size_t) chunk);
+                }
                 for (uint64_t pos = 0; pos < total; pos += chunk) {
                     const uint64_t n = std::min<uint64_t>(chunk, total - pos);
-                    if (_fseeki64(f, (long long) (sp.offset + pos), SEEK_SET) != 0 ||
-                        std::fread(buf.data(), 1, (size_t) n, f) != (size_t) n) {
+                    const uint8_t* src = buf.data();
+                    if (uncached) {   // from the sector below to the one past the end
+                        const uint64_t at0 = (sp.offset + pos) / 4096 * 4096, head = sp.offset + pos - at0;
+                        OVERLAPPED ov{};
+                        ov.Offset = (DWORD) at0;
+                        ov.OffsetHigh = (DWORD) (at0 >> 32);
+                        DWORD got = 0;
+                        if (!ReadFile(h, abuf, (DWORD) ((head + n + 4095) / 4096 * 4096), &got, &ov) || got < head + n) {
+                            bad = true;
+                            break;
+                        }
+                        src = abuf + head;
+                    } else if (_fseeki64(f, (long long) (sp.offset + pos), SEEK_SET) != 0 ||
+                               std::fread(buf.data(), 1, (size_t) n, f) != (size_t) n) {
                         bad = true;
                         break;
                     }
@@ -850,7 +888,7 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
                         const uint64_t e = pos / per[r] + k;
                         if (ix != nullptr && ix[e] < 0) continue;   // only in VRAM
                         const uint64_t at_e = ix != nullptr ? (uint64_t) ix[e] : e;
-                        std::memcpy(layer_base[(size_t) l] + at_e * blob + at[r], buf.data() + k * per[r], (size_t) per[r]);
+                        std::memcpy(layer_base[(size_t) l] + at_e * blob + at[r], src + k * per[r], (size_t) per[r]);
                     }
                 }
             }
@@ -858,6 +896,9 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
         }
         for (FILE* f : files)
             if (f != nullptr) std::fclose(f);
+        for (HANDLE h : handles)
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        if (abuf != nullptr) VirtualFree(abuf, 0, MEM_RELEASE);
     };
 #endif
     std::vector<std::thread> pool;
@@ -1076,7 +1117,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     };
     const LoadStats st =
         from_gguf ? load_experts_gguf(gguf_, spans, layer_base_, lay, threads, on_layer, idx_, vram_only_bytes_,
-                                      overlap ? std::function<bool(int64_t)>(layer_ready) : nullptr)
+                                      overlap ? std::function<bool(int64_t)>(layer_ready) : nullptr, uncached_)
                   : load_experts_ranges(path, layer_base_, loff, lbytes, threads, /*chunk=*/8u << 20,
                                         [&](uint64_t l) { on_layer((int64_t) l); });
     if (placer.joinable()) placer.join();
@@ -1156,6 +1197,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     note_ = std::to_string(pinned_layers_) + " of " + std::to_string(n_layers) + " layers pinned (" +
             std::to_string(pinned_total >> 30) + (anon ? " GiB, page-locked as each layer loaded)" : " GiB, a cudaHostAlloc block each)");
     if (tail_ != nullptr || anon_lock_ != nullptr) note_ += "; the others pageable: " + tail_note;
+    if (uncached_ && from_gguf) note_ += "; read past the file cache";
     if (vram_only_bytes_ > 0) {
         char buf[160];
         int64_t n = 0;

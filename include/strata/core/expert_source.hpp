@@ -382,6 +382,12 @@ public:
     /// out (a 119.5 GiB Q8_0 then fits a 125.7 GiB machine), blob() has none for them, and `read_file_blob` reads
     /// one from the model for the GPU that keeps it.  A native pack read from its GGUF only.
     void set_vram_only(std::vector<uint8_t> mask) { vram_only_ = std::move(mask); }
+    /// Before open(), --no-file-cache: the experts read from the GGUF past the OS file cache (Windows: unbuffered
+    /// reads; Linux: the pages read dropped from the page cache), which then keeps no second copy of them.  Where
+    /// the RAM holds the arena and the cached file together, the cache settles on pages the later starts' arenas
+    /// would have had (on this PC the faster ones).  Each start reads the experts from the drive.  A pack's
+    /// experts.bin is read through the cache either way.
+    void set_uncached(bool on) { uncached_ = on; }
     void close();
 
     bool mapped() const { return !layer_base_.empty(); }
@@ -441,6 +447,7 @@ private:
     double gib_per_s_ = 0.0;
     std::vector<std::string> gguf_;
     std::vector<uint8_t> vram_only_;
+    bool uncached_ = false;
     /// per (layer, expert): its place among its layer's blobs in the arena, -1 for one only in VRAM (empty: all
     /// in the arena, at their expert index)
     std::vector<int32_t> idx_;

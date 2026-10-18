@@ -96,6 +96,13 @@ as unpaired DIMMs make (two 32 GB and two 48 GB modules), the engine times its R
 experts the CPU reads out of the slow region, again between requests ([DETAILS.md](../docs/DETAILS.md)). On such a
 PC add it to a config's arguments; elsewhere it finds nothing to move and costs ~2 s at the start.
 
+This PC's UD-Q4_K_XL config also has `--no-file-cache`, left out here: the engine reads the experts from the GGUF past
+the OS file cache. Where the RAM holds the 72 GiB arena and the cached 72 GB file together (this PC's 160 GB), the
+file settles in the cache on pages the later starts' arenas would have had: here generation fell 7-8% over a session's
+starts, and with the flag it stays at a fresh boot's speed. Each start then reads the experts from the drive (here
+4.3-4.4 GiB/s against 6 from the cache, ~5 s more). With less RAM the cache cannot keep the file beside the arena, and
+the flag costs only the start time ([DETAILS.md](../docs/DETAILS.md)).
+
 Both of this PC's configs also have `--prompt-split 26`, left out here: a prompt of more than one chunk runs in two
 stages, the second GPU taking each chunk's layers 26-47 whole while the first runs the next chunk. It pays where the
 second GPU alone reads a chunk about as fast as both together: this PC's 5070 Ti runs the dense steps 1.44x as fast as

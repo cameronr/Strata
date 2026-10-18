@@ -311,6 +311,7 @@ struct Options {
     /// The arena's blobs placed by the RAM's measured read rate once the GPUs' experts are known
     /// (ArenaExpertSource::place): for RAM with slower regions, off by default.
     bool arena_place = false;
+    bool no_file_cache = false;
     /// The prompt path's share of the experts the main GPU holds that the second GPU computes (Prefill::set_shift).
     double prompt_shift = 0.0;
     /// The prompt path in two stages (prefill/split.hpp): the second GPU runs each chunk's layers from this one on
@@ -496,6 +497,10 @@ void usage() {
                  "  --arena-place        at the start, time each expert's place in the RAM arena and move the experts\n"
                  "                       no GPU holds out of the slow places, into the GPU-resident ones' (RAM with\n"
                  "                       slower regions, as unpaired DIMMs make; ~2-4 s).  Off by default\n"
+                 "  --no-file-cache      the experts read from the model's GGUF past the OS file cache, which then\n"
+                 "                       keeps no second copy of them on RAM the next starts' arenas would have had\n"
+                 "                       (where the arena and the cached file fill the faster RAM); each start reads\n"
+                 "                       them from the drive.  Off by default\n"
                  "  --kv-grow            with --serve: the K/V takes VRAM only for the cells the requests\n"
                  "                       reach and the expert cache holds the rest, giving slots up as a conversation\n"
                  "                       grows and taking them back after (STRATA_KV_GROW=1/0 too; after Niko1221/Strata\n"
@@ -1167,7 +1172,8 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         {   // switches outside the chain below: MSVC refuses one this long (C1061)
-            bool* on = a == "--hc-q8" ? &o.hc_q8 : a == "--arena-place" ? &o.arena_place : nullptr;
+            bool* on = a == "--hc-q8" ? &o.hc_q8 : a == "--arena-place" ? &o.arena_place
+                     : a == "--no-file-cache" ? &o.no_file_cache : nullptr;
             if (on != nullptr) {
                 *on = true;
                 continue;
@@ -2011,6 +2017,7 @@ int main(int argc, char** argv) {
         } else {
             arena_src.set_gguf(native_shards);   // plan v0.3 P6: a native pack may take its experts from the GGUF
             if (!vram_only.empty()) arena_src.set_vram_only(vram_only);
+            arena_src.set_uncached(o.no_file_cache);
             if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
                 return false;

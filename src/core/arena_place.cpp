@@ -260,7 +260,8 @@ bool ArenaExpertSource::place(const std::vector<int32_t>& rank, const std::vecto
     }
     char buf[512];
     int len = std::snprintf(buf, sizeof buf, "--arena-place: %zu places timed in %.1f s on %d cores, the fast ones ~%.1f "
-                                             "GB/s; %zu slow", n, t_time, T, (double) fast, slow_gbs.size());
+                                             "GB/s (the median %.1f, the 10th percentile %.1f); %zu slow", n, t_time, T,
+                            (double) fast, (double) sorted[n / 2], (double) sorted[n / 10], slow_gbs.size());
     if (!slow_gbs.empty())
         len += std::snprintf(buf + len, sizeof buf - (size_t) len, " (%.2f GiB, ~%.1f GB/s)",
                              (double) slow_bytes / 1073741824.0, (double) slow_gbs[slow_gbs.size() / 2]);
