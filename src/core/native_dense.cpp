@@ -13,6 +13,7 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <thread>
 
@@ -293,11 +294,19 @@ HcQ8::~HcQ8() {
 
 bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std::string& err) {
     try {
-        std::vector<int8_t> q;
-        std::vector<uint16_t> s;
-        std::vector<float> row;
+        int device = 0;
+        if (cudaGetDevice(&device) != cudaSuccess) { err = "hc q8: no device"; return false; }
+        struct Job {
+            const strata::TensorInfo* t;
+            WeightRef* ref;
+            bool q8_0;    // the GGUF's own Q8_0 blocks, split into codes and scales
+            int kind;     // else the rows' type: 0 F32, 1 F16, 2 BF16
+            void* dq = nullptr;
+            void* ds = nullptr;
+        };
         for (const auto& path : shards) {
             strata::GgufFile gguf(path);
+            std::vector<Job> jobs;
             for (const auto& t : gguf.tensors()) {
                 if (!hc_matrix(t.name)) continue;
                 auto found = table.table_.find(t.name);
@@ -312,54 +321,83 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
                     err = "hc q8: " + t.name + " has another shape or type (" + tn + ")";
                     return false;
                 }
-                const int64_t cols = ref.ne0, rows = ref.ne1;
-                q.resize((size_t) (rows * cols));
-                s.resize((size_t) (rows * cols / 32));
-                row.resize((size_t) cols);
-                const uint8_t* src = gguf.tensor_data(t);
-                for (int64_t r = 0; r < rows; ++r) {
-                    int8_t* qr = q.data() + r * cols;
-                    uint16_t* sr = s.data() + r * (cols / 32);
-                    if (tn == "Q8_0") {   // as stored: {f16 d, 32 codes} a block
-                        const uint8_t* bl = src + (size_t) (r * (cols / 32)) * 34;
-                        for (int64_t b = 0; b < cols / 32; ++b) {
-                            std::memcpy(sr + b, bl + b * 34, 2);
-                            std::memcpy(qr + b * 32, bl + b * 34 + 2, 32);
-                        }
-                        continue;
-                    }
-                    for (int64_t c = 0; c < cols; ++c) {
-                        const size_t i = (size_t) (r * cols + c);
-                        if (tn == "F32") {
-                            std::memcpy(&row[(size_t) c], src + i * 4, 4);
-                        } else {
-                            uint16_t h;
-                            std::memcpy(&h, src + i * 2, 2);
-                            if (tn == "F16") {
-                                row[(size_t) c] = f16_to_f32(h);
-                            } else {
-                                const uint32_t u = (uint32_t) h << 16;
-                                std::memcpy(&row[(size_t) c], &u, 4);
-                            }
-                        }
-                    }
-                    q8_0_row(row.data(), cols, qr, sr);
-                }
-                void *dq = nullptr, *ds = nullptr;
-                if (cudaMalloc(&dq, q.size()) != cudaSuccess || cudaMalloc(&ds, s.size() * 2) != cudaSuccess ||
-                    cudaMemcpy(dq, q.data(), q.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
-                    cudaMemcpy(ds, s.data(), s.size() * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
-                    if (dq) cudaFree(dq);
-                    if (ds) cudaFree(ds);
-                    err = "hc q8: upload of " + t.name + ": " + cudaGetErrorString(cudaGetLastError());
+                Job j{&t, &ref, tn == "Q8_0", tn == "F32" ? 0 : tn == "F16" ? 1 : 2};
+                const size_t n = (size_t) (ref.ne0 * ref.ne1);
+                if (cudaMalloc(&j.dq, n) != cudaSuccess || cudaMalloc(&j.ds, n / 32 * 2) != cudaSuccess) {
+                    if (j.dq) cudaFree(j.dq);
+                    err = "hc q8: no VRAM for " + t.name;
                     return false;
                 }
-                allocs_.push_back(dq);
-                allocs_.push_back(ds);
-                bytes_ += q.size() + s.size() * 2;
-                if (tn == "Q8_0") ++q8_0_;
-                ref.hc_codes = (const int8_t*) dq;
-                ref.hc_scales = (const uint16_t*) ds;
+                allocs_.push_back(j.dq);
+                allocs_.push_back(j.ds);
+                jobs.push_back(j);
+            }
+            // a matrix at a time to each of up to 8 threads (one thread rounded IQ3_S's 194 BF16 matrices in 2 s)
+            std::atomic<size_t> next{0};
+            std::atomic<bool> bad{false};
+            std::mutex err_mu;
+            auto worker = [&] {
+                std::vector<int8_t> q;
+                std::vector<uint16_t> s;
+                std::vector<float> row;
+                if (cudaSetDevice(device) != cudaSuccess) bad = true;
+                for (size_t k; !bad && (k = next++) < jobs.size();) {
+                    const Job& j = jobs[k];
+                    const int64_t cols = j.ref->ne0, rows = j.ref->ne1;
+                    q.resize((size_t) (rows * cols));
+                    s.resize((size_t) (rows * cols / 32));
+                    row.resize((size_t) cols);
+                    const uint8_t* src = gguf.tensor_data(*j.t);
+                    for (int64_t r = 0; r < rows; ++r) {
+                        int8_t* qr = q.data() + r * cols;
+                        uint16_t* sr = s.data() + r * (cols / 32);
+                        if (j.q8_0) {   // as stored: {f16 d, 32 codes} a block
+                            const uint8_t* bl = src + (size_t) (r * (cols / 32)) * 34;
+                            for (int64_t b = 0; b < cols / 32; ++b) {
+                                std::memcpy(sr + b, bl + b * 34, 2);
+                                std::memcpy(qr + b * 32, bl + b * 34 + 2, 32);
+                            }
+                            continue;
+                        }
+                        for (int64_t c = 0; c < cols; ++c) {
+                            const size_t i = (size_t) (r * cols + c);
+                            if (j.kind == 0) {
+                                std::memcpy(&row[(size_t) c], src + i * 4, 4);
+                            } else {
+                                uint16_t h;
+                                std::memcpy(&h, src + i * 2, 2);
+                                if (j.kind == 1) {
+                                    row[(size_t) c] = f16_to_f32(h);
+                                } else {
+                                    const uint32_t u = (uint32_t) h << 16;
+                                    std::memcpy(&row[(size_t) c], &u, 4);
+                                }
+                            }
+                        }
+                        q8_0_row(row.data(), cols, qr, sr);
+                    }
+                    if (cudaMemcpy(j.dq, q.data(), q.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+                        cudaMemcpy(j.ds, s.data(), s.size() * 2, cudaMemcpyHostToDevice) != cudaSuccess) {
+                        std::lock_guard<std::mutex> lk(err_mu);
+                        if (!bad) err = "hc q8: upload of " + j.t->name + ": " + cudaGetErrorString(cudaGetLastError());
+                        bad = true;
+                    }
+                }
+            };
+            const size_t threads = std::min<size_t>(8, jobs.size());
+            std::vector<std::thread> pool;
+            for (size_t k = 1; k < threads; ++k) pool.emplace_back(worker);
+            if (threads > 0) worker();
+            for (auto& th : pool) th.join();
+            if (bad) {
+                if (err.empty()) err = "hc q8: no device on a loader thread";
+                return false;
+            }
+            for (const Job& j : jobs) {
+                bytes_ += (uint64_t) (j.ref->ne0 * j.ref->ne1) / 32 * 34;   // the codes and an f16 scale a 32
+                if (j.q8_0) ++q8_0_;
+                j.ref->hc_codes = (const int8_t*) j.dq;
+                j.ref->hc_scales = (const uint16_t*) j.ds;
             }
         }
         return true;
