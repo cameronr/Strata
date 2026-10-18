@@ -64,10 +64,10 @@ struct Bufs {
     uint16_t* hc16 = nullptr;   // a layer's hyper-connection down and up matrices without a BF16 copy, dequantized
     void* gemm_ws = nullptr;
     // the chunk's: residual stream, the MoE's input (FP16) and output, the FFN half's injection, routing, steps, PLE
-    // rows, the second GPU's sums (FP16)
+    // rows, the second GPU's sums (FP16), its token ids
     float *R = nullptr, *bo_moe = nullptr, *inj_f = nullptr, *w = nullptr, *ple_emb = nullptr;
     uint16_t *mixed_h = nullptr, *sums = nullptr;
-    int32_t *ids = nullptr, *steps = nullptr;
+    int32_t *ids = nullptr, *steps = nullptr, *tok = nullptr;
     // a sub-chunk's: the mixer's BF16 input, its output, the mixer half's injection, a read's row scales
     uint16_t* mixed_bf = nullptr;
     float *bo = nullptr, *inj_a = nullptr, *rs = nullptr;
@@ -105,6 +105,7 @@ Bufs layout(Alloc& a, int64_t T, int64_t cap, int64_t max_blocks, bool offload) 
     b.bo_moe = a.take<float>(t * N);
     b.inj_f = a.take<float>(t * HC);
     b.ids = a.take<int32_t>(t * K);
+    b.tok = a.take<int32_t>(t);
     b.w = a.take<float>(t * K);
     b.steps = a.take<int32_t>(t * strata::kernels::kStepCount);
     b.ple_emb = a.take<float>(t * N);
@@ -199,6 +200,7 @@ struct Prefill::Impl {
     int32_t* ids_host = nullptr;   // pinned [max_chunk, K]
     float* w_host = nullptr;
     std::vector<int32_t> steps_host, cnt, off, entry_of;
+    std::vector<int32_t> tok_host;   // a chunk's token ids, pageable (its copy is staged at once)
     // this GPU's experts; the second GPU's, the tokens of the first half and of the second (run_layer's passes)
     std::vector<int32_t> ex1, off1, src1, ex2[2], off2[2], src2[2];
     double shift = 0.0;              // set_shift
@@ -577,23 +579,31 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 return true;
             }
             if (m.out_live) cudaStreamWaitEvent(m.cs, m.ev_out[(size_t) (t0 / SUB)], 0);
-            for (int64_t t = t0; t < t0 + P; ++t) {
-                const float* row = embd_rows ? embd_rows[p0 + t] : nullptr;
-                if (row) {
-                    if (cudaMemcpyAsync(b.emb + (t - t0) * N, row, (size_t) N * 4, cudaMemcpyHostToDevice, m.cs) != cudaSuccess) {
+            // the sub-chunk's rows in one gather (a launch a token took 117 ms of the 3090 a 16K prompt), a picture's
+            // rows copied over theirs
+            if (!core::embed_rows(*m.wt, g, b.tok + t0, P, b.emb, m.cs, err)) return false;
+            if (embd_rows)
+                for (int64_t t = t0; t < t0 + P; ++t)
+                    if (const float* row = embd_rows[p0 + t];
+                        row && cudaMemcpyAsync(b.emb + (t - t0) * N, row, (size_t) N * 4, cudaMemcpyHostToDevice, m.cs) != cudaSuccess) {
                         err = "prefill: the image embedding upload failed";
                         return false;
                     }
-                } else if (!core::embed_row(*m.wt, g, tokens[c0 + t], b.emb + (t - t0) * N, m.cs, err)) {
-                    return false;
-                }
-            }
             gr_broadcast(b.emb, b.R + t0 * D, P, m.cs);
             return true;
         };
         // ---- the QSA step records of every position in the chunk
         for (int64_t t = 0; t < T; ++t) strata::kernels::qsa_step_fill(m.steps_host.data() + t * SC, p0 + t, s);
         cudaMemcpyAsync(b.steps, m.steps_host.data(), (size_t) T * SC * 4, cudaMemcpyHostToDevice, m.cs);
+        if (L0 == 0) {   // the chunk's token ids for its embeddings (a picture's positions any valid id: overwritten)
+            m.tok_host.resize((size_t) T);
+            for (int64_t t = 0; t < T; ++t) {
+                const bool image = embd_rows && embd_rows[p0 + t];
+                if (!image && tokens[c0 + t] < 0) { err = "prefill: a negative token id"; return false; }
+                m.tok_host[(size_t) t] = image ? 0 : (int32_t) tokens[c0 + t];
+            }
+            cudaMemcpyAsync(b.tok, m.tok_host.data(), (size_t) T * 4, cudaMemcpyHostToDevice, m.cs);   // pageable: staged now
+        }
 
         // ---- a layer's FFN write, deferred to the sub-chunk that reads its rows next: the second GPU's sums come back
         // a sub-chunk at a time while this GPU works on the sub-chunks before (with `norm`, the next read's norm in
