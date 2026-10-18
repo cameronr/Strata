@@ -1750,7 +1750,17 @@ thinking / after a 16K prompt / an edit quoting its prompt):
   (`STRATA_ARENA_REPLACE=0`), since the startup's slow places hold experts the tiers later send back to the CPU. IQ3_S
   within 0.1% (its CPU kernels read ~40 GB/s, about the slow region's own rate); on one GPU, where the CPU reads most
   experts, within 1%. On RAM without a slow region it finds little or nothing to move, and the start is ~2 s longer
-  for the timing.
+  for the timing. The startup line gives the places' 90th percentile, median and 10th percentile: the median falls
+  where the arena landed on slower pages throughout (46-50 against 53-55 GB/s here) while the 90th stays.
+- **`--no-file-cache`: the experts read past the OS file cache.** The arena's reads from the GGUF skip the cache
+  (Windows: unbuffered reads, `FILE_FLAG_NO_BUFFERING`; Linux: the pages read dropped from the page cache), which
+  then keeps no second copy of the experts. Where the RAM holds the arena and the cached file together, the file
+  settles in the cache on the RAM's faster pages and each later start's arena gets slower ones: on this PC (160 GB,
+  UD-Q4_K_XL's 72 GiB arena and 72 GB file) fixed text with the file settled ran code / edit 119.6 / 164.1 t/s, with
+  the flag 128-130 / 176-183 at every start, the arena's places at a median of 52-55 GB/s against 46-50. Each start
+  reads the experts from the drive: here 4.3-4.4 GiB/s against 6.1 from the cache, ~5 s more. IQ3_S's 47 GB file fits
+  beside its arena, and its generation held with the file cached. A pack's `experts.bin` is read through the cache
+  either way. This fork's UD-Q4_K_XL config sets it.
 - **`--prompt-shift F`: the second GPU takes part of the first GPU's experts in long prompts.** With `--second-gpu`,
   the first GPU computes each layer's experts it holds while the second computes the rest in two halves; when the
   first holds many experts (small ones fill more of its cache), its share is the longer. In prompt chunks of 8K tokens
