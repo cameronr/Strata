@@ -1769,8 +1769,11 @@ thinking / after a 16K prompt / an edit quoting its prompt):
   chunk's dense steps 1.44x as fast as an RTX 3090 here (2.6 against 3.7 s), so a layer of the chunk takes it about
   as long whole as the 3090 with help. Split at layer 26, through the API with the prompt cache off (two servers
   each way): IQ3_S prompts of 32K / 64K / 128K tokens 3,130 / 3,320 / 3,240 -> 3,880 / 4,740 / 5,030 t/s (1.24 /
-  1.43 / 1.55x), UD-Q4_K_XL 3,170 / 3,410 / 3,330 -> 3,590 / 4,420 / 4,780 (1.13 / 1.30 / 1.43x); layers 24 and 28
-  within 3%. The answers after them as fast for IQ3_S, 2-5% slower over 400 tokens for UD-Q4_K_XL (its larger loan
+  1.43 / 1.55x), UD-Q4_K_XL 3,170 / 3,410 / 3,330 -> 3,590 / 4,420 / 4,780 (1.13 / 1.30 / 1.43x). The best layer
+  moves with the engine and the prompt's length, so measure it on the pair: on 2026-10-18 (generate mode) IQ3_S split
+  at 23 read 32K / 64K / 128K prompts 10.8 / 10.6 / 6.4% faster than at 26 (its loan 0.3 GiB larger), UD-Q4_K_XL at
+  24 5% faster at 32K and alike at 64K-128K, at 27-28 2-8% slower. The answers after them as fast for IQ3_S, 2-5%
+  slower over 400 tokens for UD-Q4_K_XL (its larger loan
   refills while the first windows run). Shorter prompts are not split. Costs: 0.7 GiB more pinned RAM (a chunk's
   residual and a staging buffer), ~0.3 GiB of the second GPU's VRAM outside its cache, and during a split prompt
   6-8 GiB of its cache lent (64K-128K tokens: IQ3_S 6.0-6.3 GiB, UD-Q4_K_XL 7.7-8.1). The second GPU's kernels and its FP32 expert sums (its shares

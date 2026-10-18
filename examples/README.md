@@ -91,7 +91,7 @@ quantized tensors, the experts and most projections, from the GGUF files at star
 
    (`START-HERE.bat` starts setup's own config.)
 
-This PC's UD-Q4_K_XL config also has `--arena-place`, left out here: for RAM whose regions read at different rates,
+Both of this PC's configs also have `--arena-place`, left out here: for RAM whose regions read at different rates,
 as unpaired DIMMs make (two 32 GB and two 48 GB modules), the engine times its RAM arena at the start and keeps the
 experts the CPU reads out of the slow region, again between requests ([DETAILS.md](../docs/DETAILS.md)). On such a
 PC add it to a config's arguments; elsewhere it finds nothing to move and costs ~2 s at the start.
@@ -101,6 +101,7 @@ stages, the second GPU taking each chunk's layers 26-47 whole while the first ru
 second GPU alone reads a chunk about as fast as both together: this PC's 5070 Ti runs the dense steps 1.44x as fast as
 its 3090, and prompts of 32K-128K tokens read 1.13-1.55x as fast. It costs 0.7 GiB more pinned RAM and lends 6-8 GiB
 of the second GPU's cache during such a prompt ([DETAILS.md](../docs/DETAILS.md)). Measure it on your pair before
-adding it.
+adding it, and its layer too: here the best one moved with the engine and the prompt's length (IQ3_S's 32K-128K
+prompts read 6-11% faster at 23 than at 26 on 2026-10-18, UD-Q4_K_XL's alike at 24-26).
 
 On Linux the engine is `./build/strata` and Python `.venv/bin/python`.
