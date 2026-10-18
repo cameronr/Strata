@@ -98,14 +98,14 @@ void* PromptCache::take_buffer(int64_t pos) {
         size_t keep = SIZE_MAX;
         for (size_t k = 0; k < order.size(); ++k) {
             chain.push_back(s.ckpts[order[k]].pos);
-            if (live && chain.back() == pin_) keep = k;
+            if (chain.back() == s.pin) keep = k;
         }
         if (live) chain.push_back(pos);
         const size_t k = spread_victim(chain.data(), chain.size(), keep);
         size_t pick = k < order.size() ? order[k] : SIZE_MAX;
         if (pick == SIZE_MAX)   // too few to spread: the least recently used
             for (size_t i = 0; i < s.ckpts.size(); ++i)
-                if (!(live && s.ckpts[i].pos == pin_) && (pick == SIZE_MAX || s.ckpts[i].stamp < s.ckpts[pick].stamp))
+                if (s.ckpts[i].pos != s.pin && (pick == SIZE_MAX || s.ckpts[i].stamp < s.ckpts[pick].stamp))
                     pick = i;
         if (pick != SIZE_MAX && s.ckpts[pick].stamp < oldest) {
             oldest = s.ckpts[pick].stamp;
@@ -150,13 +150,15 @@ std::vector<PromptCache::Part> PromptCache::kv_parts(int64_t cells) const {
     return parts;
 }
 
-bool PromptCache::kv_copy(const std::vector<Part>& parts, uint8_t* host, bool to_host) {
+bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host) {
     cudaStream_t cs = (cudaStream_t) stream_;
-    for (const Part& p : parts) {
+    const std::vector<Part> parts = kv_parts(cells), layout = kv_parts(held);
+    for (size_t i = 0; i < parts.size(); ++i) {
+        const Part& p = parts[i];
         const cudaError_t e = to_host ? cudaMemcpyAsync(host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs)
                                       : cudaMemcpyAsync(p.dev, host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs);
         if (e != cudaSuccess) return false;
-        host += p.bytes;
+        host += layout[i].bytes;
     }
     return cudaStreamSynchronize(cs) == cudaSuccess;
 }
@@ -165,22 +167,23 @@ void PromptCache::stash_live(int64_t keep_upto) {
     const int64_t L = (int64_t) live_.tokens.size();
     if (stash_budget_ == 0 || L < kStashMin) return;
     if (ensure_kv && !ensure_kv(L)) return;
-    const std::vector<Part> parts = kv_parts(L);
     uint64_t bytes = 0;
-    for (const Part& p : parts) bytes += p.bytes;
+    for (const Part& p : kv_parts(L)) bytes += p.bytes;
     if (bytes > stash_budget_) return;
     uint64_t used = 0;
     for (const Seq& s : stash_) used += s.kv_bytes;
-    while (!stash_.empty() && used + bytes > stash_budget_) {   // the least recently used sequences go
-        auto lru = std::min_element(stash_.begin(), stash_.end(),
-                                    [](const Seq& a, const Seq& b) { return a.stamp < b.stamp; });
+    while (used + bytes > stash_budget_) {   // the least recently used sequences go, but not one lending its prefix
+        auto lru = stash_.end();
+        for (auto it = stash_.begin(); it != stash_.end(); ++it)
+            if (it->pin < 0 && (lru == stash_.end() || it->stamp < lru->stamp)) lru = it;
+        if (lru == stash_.end()) return;
         used -= lru->kv_bytes;
         release(*lru, 0);
         stash_.erase(lru);
     }
     Seq s;
     s.kv.reset(new (std::nothrow) uint8_t[bytes]);
-    if (!s.kv || !kv_copy(parts, s.kv.get(), true)) return;
+    if (!s.kv || !kv_copy(L, L, s.kv.get(), true)) return;
     checkpoint(L);   // the end state: the session is still at L
     for (size_t i = 0; i < live_.ckpts.size();) {
         if (live_.ckpts[i].pos > keep_upto) {
@@ -200,11 +203,12 @@ void PromptCache::stash_live(int64_t keep_upto) {
     stash_.push_back(std::move(s));
 }
 
-bool PromptCache::restore(Seq& seq, int64_t pos) {
+bool PromptCache::restore(Seq& seq, int64_t pos, bool prefix) {
     Ckpt* ck = find(seq, pos);
     if (ck == nullptr) return false;
-    if (seq.kv && ensure_kv && !ensure_kv(seq.kv_cells)) return false;
-    if (seq.kv && !kv_copy(kv_parts(seq.kv_cells), seq.kv.get(), false)) return false;
+    const int64_t cells = prefix ? pos : seq.kv_cells;
+    if (seq.kv && ensure_kv && !ensure_kv(cells)) return false;
+    if (seq.kv && !kv_copy(cells, seq.kv_cells, seq.kv.get(), false)) return false;
     ck->stamp = ++clock_;
     return session_ckpt_load(ss_, g_, pos, ck->host, stream_);
 }
@@ -240,9 +244,9 @@ int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<Im
         // prefix), the rest goes to the stash; an edit near the end just overwrites it.
         const int64_t dropped = L - best;
         if (dropped >= kStashMin && dropped > best) {
-            pin_ = best;   // kept through the stash's evictions
+            live_.pin = best;
             stash_live(best);
-            pin_ = -1;
+            live_.pin = -1;
         }
         if (best < L && !restore(live_, best)) return zero();
         release(live_, best);
@@ -250,7 +254,26 @@ int64_t PromptCache::begin(const std::vector<int64_t>& ids, const std::vector<Im
         live_.imgs = imgs;
         return best;
     }
-    // Another sequence continues: the live one is stashed and the chosen one becomes live.
+    int64_t newest = 0;
+    for (const Ckpt& c : stash_[(size_t) from].ckpts) newest = std::max(newest, c.pos);
+    if (best < newest) {
+        // Another conversation that shares the stashed one's start: it borrows the cells before `best`, and the
+        // stashed sequence stays whole (pinned while the live one is stashed beside it).
+        stash_[(size_t) from].pin = best;
+        stash_live(0);
+        release(live_, 0);
+        live_.tokens.clear();
+        auto donor = std::find_if(stash_.begin(), stash_.end(), [](const Seq& s) { return s.pin >= 0; });
+        if (donor == stash_.end()) return zero();
+        const bool ok = restore(*donor, best, true);
+        donor->pin = -1;
+        if (!ok) return zero();
+        donor->stamp = ++clock_;
+        live_.tokens.assign(donor->tokens.begin(), donor->tokens.begin() + best);
+        live_.imgs = imgs;
+        return best;
+    }
+    // That sequence continues: the live one is stashed and the chosen one becomes live.
     Seq chosen = std::move(stash_[(size_t) from]);
     stash_.erase(stash_.begin() + from);
     stash_live(0);

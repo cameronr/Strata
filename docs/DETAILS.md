@@ -1021,7 +1021,9 @@ print(r.choices[0].message.content)
   request's, and before the end of a last message that grows between requests, so one long context asked different
   questions, or a transcript growing inside one message, is read once: a 6K-token prompt's next request in ~0.5-1 s
   instead of ~10 s on an RTX 3060) and moves a conversation that another request replaces (a chat app's title
-  request, a subagent) to RAM with its key/value cache, so switching back continues where it was. When the
+  request, a subagent) to RAM with its key/value cache, so switching back continues where it was; a new conversation
+  that starts as one in RAM does (sibling subagents with one system prompt and tools) copies that start from it and
+  leaves it there whole. When the
   checkpoints are all in use, a conversation's keep thinning out back from its end (dense near it, sparser further
   back), so an agent that rewrites its history N tokens back (trims an old tool output) reads about N to 2N tokens
   again, not the whole conversation. The server keeps the model's own token ids of each reply for the next turn: a

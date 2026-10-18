@@ -9,7 +9,10 @@
 //     continues the sequence from there;
 //   * STASHED sequences: a sequence the live one replaced, kept in host memory with its K/V cells and its
 //     checkpoints, so a client that alternates between conversations (a chat and its title request, an agent
-//     and its subagents) does not start over on every switch.
+//     and its subagents) does not start over on every switch.  A prompt that continues a stashed sequence from its
+//     newest checkpoint takes it out of the stash; one that matches it only up to an earlier checkpoint (another
+//     conversation with the same start: sibling subagents, sessions with one system prompt) borrows the cells up to
+//     there, and the stashed sequence stays whole.
 //
 // Checkpoint buffers are a shared pool of `max_ckpts`.  When it is full, each sequence offers the checkpoint it can
 // spare best (spread_victim over its own; with fewer than three, its least recently used), and the least recently
@@ -109,6 +112,9 @@ private:
         int64_t kv_cells = 0;
         uint64_t kv_bytes = 0;
         uint64_t stamp = 0;
+        /// begin(): the checkpoint a request resumes from, kept through the pool's evictions while the live sequence
+        /// is stashed (a stashed sequence lending its prefix is not evicted either); -1: none.
+        int64_t pin = -1;
     };
 
     /// One device region of the K/V cells, stored back to back in a stashed sequence's buffer.
@@ -126,8 +132,12 @@ private:
     /// checkpoints after `keep_upto` (the ones before stay with the live sequence, which continues from there).
     void stash_live(int64_t keep_upto);
     std::vector<Part> kv_parts(int64_t cells) const;
-    bool kv_copy(const std::vector<Part>& parts, uint8_t* host, bool to_host);
-    bool restore(Seq& seq, int64_t pos);   // K/V cells (stashed only) and the checkpoint at `pos`
+    /// The first `cells` K/V cells between the device and `host`, a stashed copy of `held` >= cells cells
+    /// (kv_parts(held) back to back: each region's first cells lead its part).
+    bool kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_host);
+    /// The checkpoint at `pos` and, of a stashed sequence, its K/V cells: all of them, or with `prefix` only those
+    /// before `pos` (a borrowed prefix).
+    bool restore(Seq& seq, int64_t pos, bool prefix = false);
 
     const ModelGeometry& g_;
     SessionState& ss_;
@@ -138,7 +148,6 @@ private:
     uint64_t ckpt_bytes_;
     int allocated_ = 0;
     uint64_t clock_ = 0;
-    int64_t pin_ = -1;   // begin(): the live checkpoint the request resumes from, kept while the rest is stashed
     Seq live_;
     std::vector<Seq> stash_;
     std::vector<void*> free_;
