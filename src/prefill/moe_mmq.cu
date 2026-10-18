@@ -330,7 +330,9 @@ namespace {
 struct ZeroArgs {
     uint32_t* at[kGatherGroupMax];
 };
-__global__ void zero_after_kernel(ZeroArgs za, int words) {
+// __grid_constant__: the pointers indexed in the parameter bank (a by-value copy went to local memory, 128 bytes a
+// thread, past the engine's stack limit)
+__global__ void zero_after_kernel(const __grid_constant__ ZeroArgs za, int words) {
     if ((int) threadIdx.x < words) za.at[blockIdx.x][threadIdx.x] = 0;
 }
 }  // namespace
