@@ -2016,7 +2016,18 @@ int main(int argc, char** argv) {
             srcp = &src;
         } else {
             arena_src.set_gguf(native_shards);   // plan v0.3 P6: a native pack may take its experts from the GGUF
-            if (!vram_only.empty()) arena_src.set_vram_only(vram_only);
+            if (!vram_only.empty()) {
+                // --prompt-split: the second stage streams the experts of its layers that its GPU lacks from this arena,
+                // and the main GPU's pinned ones of those layers live nowhere else, so they stay here too (the first
+                // stage's experts the main GPU lacks are the second GPU's, pinned there or streamed: as without the
+                // split).  Before, a prompt of two chunks or more stopped at "the expert source has no blob".
+                std::vector<uint8_t> left_out = vram_only;
+                if (o.prompt_split > 0)
+                    for (int64_t l = (int64_t) o.prompt_split; l < g.n_layers; ++l)
+                        for (int64_t e = 0; e < g.n_expert; ++e)
+                            if (uint8_t& v = left_out[(size_t) (l * g.n_expert + e)]; v == 1) v = 0;
+                arena_src.set_vram_only(std::move(left_out));
+            }
             arena_src.set_uncached(o.no_file_cache);
             if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err)) {
                 std::fprintf(stderr, "strata generate: %s\n", err.c_str());
