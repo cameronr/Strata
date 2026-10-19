@@ -105,6 +105,10 @@ bool session_ckpt_save_layers(const SessionState& s, const ModelGeometry& g, int
                               int64_t lo, int64_t hi, int64_t first);
 /// The inverse: the session continues at `pos`.  The K/V cells [0, pos) must still hold the same prefix.
 bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, const void* host, void* stream);
+/// After a failed copy of a checkpoint or of K/V cells: waits for the copies queued before it and clears the
+/// runtime's error, which the next launch check would otherwise take for its own and end the engine (the caller
+/// falls back: no checkpoint, no stash, or the prompt read again).  Returns false.
+bool session_copy_failed(void* stream);
 
 /// One token: layers 0..47 in order, each a `block_layer`, and the residual is updated in place.
 ///

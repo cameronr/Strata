@@ -157,10 +157,10 @@ bool PromptCache::kv_copy(int64_t cells, int64_t held, uint8_t* host, bool to_ho
         const Part& p = parts[i];
         const cudaError_t e = to_host ? cudaMemcpyAsync(host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs)
                                       : cudaMemcpyAsync(p.dev, host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs);
-        if (e != cudaSuccess) return false;
+        if (e != cudaSuccess) return session_copy_failed(stream_);
         host += layout[i].bytes;
     }
-    return cudaStreamSynchronize(cs) == cudaSuccess;
+    return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream_);
 }
 
 void PromptCache::stash_live(int64_t keep_upto) {

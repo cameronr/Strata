@@ -202,12 +202,12 @@ bool session_ckpt_save_layers(const SessionState& s, const ModelGeometry& g, int
     for (const CkptPart& p : ckpt_parts(s, g, pos, first))
         if (p.layer >= lo && p.layer < hi &&
             cudaMemcpyAsync(h + p.host, p.dev, (size_t) p.bytes, cudaMemcpyDeviceToHost, cs) != cudaSuccess)
-            return false;
+            return session_copy_failed(stream);
     if (lo == 0) {
         const int32_t ints[kCkptHostInts] = {s.ple_prev[0], s.ple_prev[1], s.ple_token};
         std::memcpy(h + ckpt_ints_at(g), ints, sizeof ints);
     }
-    return cudaStreamSynchronize(cs) == cudaSuccess;
+    return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
 }
 
 bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, const void* host, void* stream) {
@@ -215,14 +215,21 @@ bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, con
     const uint8_t* h = (const uint8_t*) host;
     for (const CkptPart& p : ckpt_parts(s, g, pos))
         if (cudaMemcpyAsync(p.dev, h + p.host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs) != cudaSuccess)
-            return false;
+            return session_copy_failed(stream);
     h += ckpt_ints_at(g);
     int32_t ints[kCkptHostInts];
     std::memcpy(ints, h, sizeof ints);
     s.ple_prev[0] = ints[0];
     s.ple_prev[1] = ints[1];
     s.ple_token = ints[2];
-    return cudaStreamSynchronize(cs) == cudaSuccess;
+    return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
+}
+
+bool session_copy_failed(void* stream) {
+    (void) cudaGetLastError();
+    (void) cudaStreamSynchronize((cudaStream_t) stream);
+    (void) cudaGetLastError();
+    return false;
 }
 
 /// Sets `s.gdn.state`/`conv_state` for `layer`, which is what makes one layer's GDN state its own.  Shared by
