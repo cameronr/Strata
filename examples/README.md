@@ -16,7 +16,10 @@ requests (`--batch`), token biases, prompt lookup chained after the drafts (`--l
 approximations (the route tail skip, on by default in upstream's CUDA server), the adaptive tier's overlapped copies
 (`STRATA_ADAPT_OVERLAP`), the CPU pool's `--host-core` and `--pool-affinity`, the engine's own watchdog and stall
 report, the PLE read probe, 0.1.44's NVFP4 experts, Qwen3.6-35B-A3B engine and batched commit graph, 0.1.45's CUDA
-opt-in switches but `STRATA_DEQUANT_WIDE`, and the AMD, Intel, Metal (Mac), Turing, Volta and Pascal builds. A
+opt-in switches but `STRATA_DEQUANT_WIDE`, the engine of 0.2.0-beta (0.1.45.3): the switches on by default per
+architecture (`STRATA_SM86_PERF`, `STRATA_SM120_PERF`), agentionai's Gyro files (trellis expert types, Hadamard-folded
+experts), the CPU pool's planned worker count, the pinned-memory reserve, the prompt planner and the Linux file tier's
+read-ahead, and the AMD, Intel, Metal (Mac), Turing, Volta and Pascal builds. A
 server config with `parallel` or `vram_elastic` passes the engine a flag it refuses; with `slot_save_path`, a save
 request ends the engine.
 
