@@ -114,4 +114,19 @@ of the second GPU's cache during such a prompt ([DETAILS.md](../docs/DETAILS.md)
 adding it, and its layer too, through the server: here generate mode put IQ3_S's best layer at 23 (6-11% faster
 than 26), while through the API 26 was 2-4% faster than 23.
 
-On Linux the engine is `./build/strata` and Python `.venv/bin/python`.
+On Linux (here CachyOS, GCC 16.2.1 and CUDA 13.4, with two RTX 3090 and an RTX 5060 Ti) the steps are the same, with
+these differences:
+
+- Build with `.venv/bin/cmake` and `.venv/bin/ninja` (`\` for the line breaks, `"-DCMAKE_CUDA_ARCHITECTURES=86;120"`
+  quoted for the shell). GCC builds `src/core/native_dense.cpp` only with its F16C helpers compiled for F16C (#24).
+  The engine is `./build/strata`, the image encoder `./build-vision/bin/strata-vision`, Python `.venv/bin/python`.
+- The CUDA libraries come from the toolkit through the loader's path, or from the config's `lib_dirs`, which the
+  server puts on `LD_LIBRARY_PATH`.
+- Start a config from the Strata folder with `.venv/bin/python serve/server.py --engine strata --config
+  examples/iq3_s.json --port 8081` (without `--engine strata` the server starts its mock engine); the `.bat` launchers
+  have no Linux counterpart.
+
+The GPU numbers of step 5, on any system: the server numbers the cards as `nvidia-smi` does (`CUDA_DEVICE_ORDER=PCI_BUS_ID`)
+only for a config with a `gpu` list. These configs have none, so the engine sees CUDA's own order, fastest first, which
+can differ from `nvidia-smi`'s with three cards or cards of different generations: add
+`"env": {"CUDA_DEVICE_ORDER": "PCI_BUS_ID"}` to a config to number them as `nvidia-smi` does.
