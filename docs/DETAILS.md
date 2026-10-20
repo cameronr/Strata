@@ -1809,16 +1809,15 @@ thinking / after a 16K prompt / an edit quoting its prompt):
   whenever a request needs them, taking the chunks of the cache slots just below the prompt path's loan (a hotter
   expert there moves into the loan region's coldest slot first); after two far shorter requests in a row it gives
   them back and the slots refill from the profile. No address moves, so no graph is captured again, and
-  `--max-context` cells always fit: the start refuses a context whose K/V the slots between the cache's floor and the
-  loan cannot take, naming the longest that fits (with `--vram-pin-gib`, how much to lower it) - without pinned slots
-  such a start used to go ahead and the first request that long got `ERR the K/V cannot grow to this prompt`
-  (this fork's configs turn it on). At 200,192 cells the RTX 3090's cache holds 8,787 slots instead of 7,835 with IQ3_S
-  (k8v4) and 5,330 instead of 4,602 with UD-Q4_K_XL (INT8) while a conversation is short. The configs at
-  `--max-context 24576`, which gives the cache the same room, took UD-Q4_K_XL -4.8 / -2.4 / -2.5 / -5.6% time a round
-  and IQ3_S -1.5 / -0.4 / -0.2 / -1.8%. Under `--expert-math exact` (where residency cannot change the output) a
-  multi-turn session with forced small steps, a trim, a regrow and stash round trips gave the same tokens as without
-  it. Off with `--disable-hit` and `--mmap-experts`; a growth or trim that fails stops the engine (the server starts
-  it again).
+  `--max-context` cells always fit: the start refuses a context whose K/V neither the slots between the cache's floor
+  and the loan nor the VRAM free past `--vram-reserve-mib` can take, naming the longest that fits (with
+  `--vram-pin-gib`, also how much to lower that). This fork's configs turn it on. At 200,192 cells the RTX 3090's
+  cache holds 8,787 slots instead of 7,835 with IQ3_S (k8v4) and 5,330 instead of 4,602 with UD-Q4_K_XL (INT8)
+  while a conversation is short. The configs at `--max-context 24576`, which gives the cache the same room, took
+  UD-Q4_K_XL -4.8 / -2.4 / -2.5 / -5.6% time a round and IQ3_S -1.5 / -0.4 / -0.2 / -1.8%. Under
+  `--expert-math exact` (where residency cannot change the output) a multi-turn session with forced small steps, a
+  trim, a regrow and stash round trips gave the same tokens as without it. Off with `--disable-hit` and
+  `--mmap-experts`; a growth or trim that fails stops the engine (the server starts it again).
 - **`--vram-pin-gib G`, `--second-gpu-pin-gib G`: experts only in VRAM.** The profile's hottest experts, up to G GiB,
   stay in the main GPU's lowest cache slots for good (the second option: the next ones in the second GPU's), and the
   RAM arena leaves them out, so a model whose experts outgrow the RAM or the pinning limit can fit. The adaptive tiers

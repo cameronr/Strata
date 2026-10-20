@@ -3482,35 +3482,35 @@ int main(int argc, char** argv) {
             kvg.on = strata::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && d_res != nullptr &&
                      !host_res.empty() && srcp != nullptr && top >= kvg.floor;
             if (kvg.on) {
-                // the whole context's K/V must fit between the cache's floor (the pinned slots, if any) and the loan's.
-                // Without pinned slots too: the K/V's only other room is new VRAM once the cache is at its floor, the
-                // few hundred MiB the start leaves free, so a --max-context past the cache's room started and the
-                // first request that long got "ERR the K/V cannot grow to this prompt" (917,504 cells on a 3090 with
-                // --vram-pin-gib 0: 13.40 GiB needed, ~12.2 GiB of slots below the loan)
+                // The whole context's K/V must fit: in the cache's slots between its floor (the pinned ones, if any)
+                // and the loan's, then in new VRAM once the cache is at its floor, as far as the VRAM free past
+                // --vram-reserve-mib goes (`--expert-cache auto` leaves the reserve alone; a smaller cache leaves
+                // more).  A context past that would stop the engine at its first request that long: "ERR the K/V
+                // cannot grow to this prompt" (917,504 cells on a 3090: 13.40 GiB needed, ~12.2 GiB of slots).
                 const uint64_t G = strata::core::vmm_granularity();
                 const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.floor) + G - 1) / G);
                 const int64_t c1 = (int64_t) (xcache.slot_offset(top) / G);
-                const int64_t room = std::max<int64_t>(c1 - c0, 0);
-                const int64_t need = strata::core::qsa_kv_elastic_need(o.max_context + 64);
-                if (room < need) {
-                    const double gib = (double) G / 1073741824.0;
-                    if (!pin1.empty()) {
-                        std::fprintf(stderr, "strata serve: the elastic K/V needs %.2f GiB of the main GPU's cache for "
-                                             "the whole context and --vram-pin-gib leaves it %.2f: lower it by %.2f (or "
-                                             "--max-context)\n", (double) need * gib, (double) room * gib,
-                                     (double) (need - room) * gib + 0.05);
-                    } else {
-                        // the longest context, in whole K/V steps, whose K/V the cache's slots can take
-                        int64_t lo = 0, hi = o.max_context;
-                        while (hi - lo > kvg.step) {
-                            const int64_t mid = lo + (hi - lo) / 2;
-                            (strata::core::qsa_kv_elastic_need(mid + 64) <= room ? lo : hi) = mid;
-                        }
-                        std::fprintf(stderr, "strata serve: the elastic K/V needs %.2f GiB of the main GPU's cache for "
-                                             "the whole context and the cache can give it %.2f: --max-context %lld at "
-                                             "most here\n", (double) need * gib, (double) room * gib,
-                                     (long long) (lo / kvg.step * kvg.step));
+                size_t free_b = 0, total_b = 0;
+                cudaMemGetInfo(&free_b, &total_b);
+                const int64_t spare = std::max<int64_t>((int64_t) free_b - ((int64_t) o.vram_reserve_mib << 20), 0);
+                const int64_t room = std::max<int64_t>(c1 - c0, 0) + spare / (int64_t) G;
+                auto need = [](int64_t cells) { return strata::core::qsa_kv_elastic_need(cells + 64); };
+                if (need(o.max_context) > room) {
+                    int64_t fit = 0;   // the longest context, in whole K/V steps, whose K/V fits
+                    for (int64_t lo = 1, hi = o.max_context / kvg.step; lo <= hi;) {
+                        const int64_t mid = lo + (hi - lo) / 2;
+                        if (need(mid * kvg.step) <= room) { fit = mid * kvg.step; lo = mid + 1; } else hi = mid - 1;
                     }
+                    const double gib = (double) G / 1073741824.0;
+                    char pins[64] = "";
+                    if (!pin1.empty())
+                        std::snprintf(pins, sizeof pins, ", or --vram-pin-gib %.2f lower",
+                                      (double) (need(o.max_context) - room) * gib + 0.05);
+                    std::fprintf(stderr, "strata serve: the elastic K/V needs %.2f GiB for the whole context and the main "
+                                         "GPU has %.2f for it (its cache's slots%s, the VRAM free past "
+                                         "--vram-reserve-mib): --max-context %lld at most here%s\n",
+                                 (double) need(o.max_context) * gib, (double) room * gib,
+                                 pin1.empty() ? "" : " past the pinned ones", (long long) fit, pins);
                     return 1;
                 }
             }
