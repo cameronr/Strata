@@ -7726,7 +7726,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     ap.add_argument("--script", action="append",
                     help="the mock engine's answer (default: a short greeting); given more than once, requests get "
                          "them in turn and the last one repeats")
-    ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--port", type=int, default=None,
+                    help="the port to listen on (default 8095); also \"port\" in the config")
     ap.add_argument("--ready-file", help="write a JSON instance record once the API is bound and model state is known")
     ap.add_argument("--owner-fd", type=int, help=argparse.SUPPRESS)
     ap.add_argument("--shutdown-timeout", type=float, default=None,
@@ -7854,6 +7855,10 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if a.gpu is not None:
         cfg["gpu"] = int(a.gpu) if a.gpu.strip().isdigit() else a.gpu
     a.host = a.host or cfg.get("host") or "127.0.0.1"   # issue #26: the run scripts pass no --host, the config can
+    if a.port is None:                                  # the port too
+        a.port = cfg.get("port", 8095)
+        if type(a.port) is not int or not 0 <= a.port <= 65535:
+            ap.error("\"port\" in the config must be a whole number in 0..65535")
     supplied_args = argv if argv is not None else sys.argv[1:]
     if ("STRATA_API_KEY" in os.environ and not os.environ["STRATA_API_KEY"].strip()) or \
             any((x == "--api-key" and i + 1 < len(supplied_args) and not supplied_args[i + 1].strip()) or

@@ -88,10 +88,11 @@ quantized tensors, the experts and most projections, from the GGUF files at star
    `CUDA_DEVICE_ORDER=PCI_BUS_ID` unless the environment names an order). `--main-gpu` runs the model, and nothing
    else may use that card: a display or another program on it slows generation to a few tokens per second.
    `--second-gpu` holds more experts and may drive the display.
-6. Start a config with its launcher, `run-iq3_s.bat` (port 8081) or `run-ud-q4_k_xl.bat` (8082), or from the Strata
-   folder:
+6. Start a config with its launcher, `run-iq3_s.bat` or `run-ud-q4_k_xl.bat`, or from the Strata folder:
 
-       .venv\Scripts\python.exe serve\server.py --engine strata --config examples\iq3_s.json --port 8081
+       .venv\Scripts\python.exe serve\server.py --engine strata --config examples\iq3_s.json
+
+   The server listens on the config's `port` (8081 and 8082; `--port` overrides it).
 
    (`START-HERE.bat` starts setup's own config.)
 
@@ -124,5 +125,5 @@ the same, with these differences:
 - The CUDA libraries come from the toolkit through the loader's path, or from the config's `lib_dirs`, which the
   server puts on `LD_LIBRARY_PATH`.
 - Start a config from the Strata folder with `.venv/bin/python serve/server.py --engine strata --config
-  examples/iq3_s.json --port 8081` (without `--engine strata` the server starts its mock engine); the `.bat` launchers
+  examples/iq3_s.json` (without `--engine strata` the server starts its mock engine); the `.bat` launchers
   have no Linux counterpart.

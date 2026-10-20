@@ -44,6 +44,7 @@
   "cwd": ".",
   "tokenizer": "../Strata-data/packs/ud-q4_k_xl/tokenizer",
   "model_name": "qwen3.8-flash-next-ud-q4_k_xl",
+  "port": 8082,
   "sampling": {
     "temperature": 0.7,
     "top_p": 0.95,

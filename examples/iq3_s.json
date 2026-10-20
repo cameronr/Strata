@@ -44,6 +44,7 @@
   "cwd": ".",
   "tokenizer": "../Strata-data/packs/iq3_s/tokenizer",
   "model_name": "qwen3.8-flash-next-iq3_s",
+  "port": 8081,
   "sampling": {
     "temperature": 0.7,
     "top_p": 0.95,
