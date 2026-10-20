@@ -1825,7 +1825,8 @@ thinking / after a 16K prompt / an edit quoting its prompt):
   (the tier copied 4-7x fewer MB over the 3090's link), UD-Q4_K_XL -0.6 / -2.5 / -4.7 / +13.2% (on the edit text its
   hits fell from 80% to 61%); 8 GiB the same. Needs `--expert-profile`, a native pack read from its GGUF and the
   token graph's GPU hits. With `--prompt-split L` the main GPU's pinned experts of layers L and later stay in the
-  arena too: the second stage streams the experts of its layers that its GPU lacks from there.
+  arena too: the second stage streams the experts of its layers that its GPU lacks from there. `--prompt-shift`
+  passes over the pinned experts the arena lacks: the second GPU takes the likeliest held ones it can stream.
 - **`--arena-place`: the experts the CPU reads kept out of the RAM's slow region.** For RAM whose regions read at
   different rates, as unpaired DIMMs make (two 32 GB and two 48 GB modules here: 32 GB sit on one channel and read at
   ~37 GB/s against ~58 with 8 cores). Where the OS puts the pinned expert arena varies with what ran before: 2-25 GiB

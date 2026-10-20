@@ -177,6 +177,7 @@ struct Prefill::Impl {
     const core::WeightTable* wt = nullptr;
     const core::ModelGeometry* g = nullptr;
     core::SessionState* ss = nullptr;
+    core::ExpertSource* src = nullptr;
     const core::ExpertCache* cache = nullptr;
     const int32_t* host_res = nullptr;
     ExpertRunner* offload = nullptr;
@@ -246,7 +247,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
                    core::ExpertSource* src, const core::ExpertCache* cache, const int32_t* host_res, int64_t max_chunk,
                    void* stream, ExpertRunner* offload, std::string& err) {
     Impl& m = *impl_;
-    m.wt = &wt; m.g = &g; m.ss = &ss; m.cache = cache; m.host_res = host_res; m.offload = offload;
+    m.wt = &wt; m.g = &g; m.ss = &ss; m.src = src; m.cache = cache; m.host_res = host_res; m.offload = offload;
     m.max_chunk = max_chunk; m.cs = (cudaStream_t) stream;
     if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert != NE || ss.k != K) {
         err = "prefill: geometry differs from the artifact's"; return false;
@@ -627,7 +628,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             // the experts this GPU's cache lacks stream to the second GPU (or here): the likeliest are copied ahead
             // while the dense steps run (the second GPU's a piece at a time, below)
             ExpertRunner* const streamer = m.offload ? m.offload : &m.local;
-            // --prompt-shift: the likeliest of the experts held here go to the second GPU as well
+            // --prompt-shift: the likeliest of the experts held here go to the second GPU as well, those with a copy
+            // in RAM to stream there (not the ones --vram-pin-gib keeps only in this GPU's VRAM)
             m.shifted.assign((size_t) NE, 0);
             if (m.offload && m.shift > 0 && T >= ExpertRunner::kShiftMinTokens && m.host_res && m.cache) {
                 int64_t held = 0;
@@ -635,7 +637,10 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 int64_t k = (int64_t) (m.shift * (double) held);
                 for (int32_t i = 0; i < NE && k > 0; ++i) {
                     const int32_t e = m.order.empty() ? i : m.order[(size_t) l * NE + i];
-                    if (m.host_res[(size_t) l * NE + e] >= 0) { m.shifted[(size_t) e] = 1; --k; }
+                    if (m.host_res[(size_t) l * NE + e] >= 0 && (m.src == nullptr || m.src->in_ram(l, e))) {
+                        m.shifted[(size_t) e] = 1;
+                        --k;
+                    }
                 }
             }
             m.ex1.clear();

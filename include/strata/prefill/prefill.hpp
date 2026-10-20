@@ -90,8 +90,9 @@ public:
     /// The order the experts a layer streams are copied ahead in: per layer (n_layers x n_expert) its experts, the
     /// likeliest to be routed first (the expert profile's ranking).  Empty: by id.
     void set_order(std::vector<int32_t> order);
-    /// --prompt-shift: with the second GPU's share, the likeliest `fraction` of the experts this GPU holds (per layer,
-    /// in set_order's order) go to the second GPU too, copied ahead with the ones it streams (0: none).
+    /// --prompt-shift: with the second GPU's share, `fraction` of the experts this GPU holds (per layer, the likeliest
+    /// in set_order's order that the expert source has in RAM) go to the second GPU too, copied ahead with the ones it
+    /// streams (0: none).
     void set_shift(double fraction);
 
     /// Positions [pos0, pos0 + n) holding `tokens`, in chunks of the bound length; `ss.ple_prev` must be the two
