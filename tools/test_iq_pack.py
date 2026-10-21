@@ -424,10 +424,10 @@ def run_pack(first, out, *extra):
     return rc, buf.getvalue()
 
 
-def expected_experts(model):
+def expected_experts(model, n_layers=2):
     """experts.bin from first principles: per layer, per expert, gate | up | down slices."""
     parts = []
-    for l in (0, 1):
+    for l in range(n_layers):
         ts = [model.bytes(f"blk.{l}.ffn_{r}_exps.weight").reshape(N_EXPERT, -1) for r in ("gate", "up", "down")]
         parts.append(np.concatenate(ts, axis=1).tobytes())
     return b"".join(parts)
@@ -631,6 +631,40 @@ class SplitArtifactTests(unittest.TestCase):
             self.assertEqual(rc, 0, log)
             self.assertIn("cannot be continued", log)
             self.assertEqual((pack / "experts.bin").read_bytes(), expected_experts(iq_pack.Model(paths[0])))
+
+    def test_a_revision_that_changed_an_earlier_kept_layer_is_not_continued(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            pack = root / "pack"
+
+            def model(sign):
+                """3 layers of 4 experts, layer 0's weights times `sign`: the same file name and size either way"""
+                x = np.arange(4 * 2 * 32, dtype=np.float32).reshape(4, 2, 32) / 256
+                write_gguf(root / "m.gguf",
+                           [("blk.%d.ffn_gate_inp.weight" % l, np.ones((4, 32), np.float32), Q.BF16)
+                            for l in range(3)] +
+                           [("blk.%d.ffn_%s_exps.weight" % (l, r), x * (sign if l == 0 else 1), Q.Q8_0)
+                            for l in range(3) for r in ("gate", "up", "down")])
+                return root / "m.gguf"
+            first = model(1)
+            real = np.concatenate
+            calls = []
+
+            def dies_on_layer_2(parts, axis):
+                calls.append(1)
+                if len(calls) == 3:
+                    raise KeyboardInterrupt("killed")
+                return real(parts, axis=axis)
+            with patch.object(iq_pack.np, "concatenate", dies_on_layer_2):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_pack(first, pack, "--experts-bin")
+            self.assertEqual(json.loads((pack / "experts.bin.tmp.json").read_text())["layers"], 2)
+            # a revision of the same geometry: layer 0 changed, layer 1 (the last kept one) as it was
+            rc, log = run_pack(model(-1), pack, "--experts-bin")
+            self.assertEqual(rc, 0, log)
+            self.assertIn("cannot be continued", log)
+            self.assertEqual((pack / "experts.bin").read_bytes(),
+                             expected_experts(iq_pack.Model(root / "m.gguf"), 3))
 
     def test_stale_same_size_experts_bin(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

@@ -695,20 +695,25 @@ def main() -> int:
         assert chunk.shape == (n_expert, blob)
         return chunk
 
+    def ends_match(f, rows):
+        """Whether the first and last blobs of each layout row in the open file `f` are the GGUF's."""
+        for l, gt, dt, off, blob, ts in rows:
+            for e in (0, n_expert - 1):
+                f.seek(off + e * blob)
+                want_blob = b"".join(model.bytes(t.name).reshape(n_expert, -1)[e].tobytes() for t in ts)
+                if any(t.type_name == "NVFP4" for t in ts):
+                    tail = nvfp4_tails(l, ts)
+                    want_blob += tail[e].tobytes() if tail is not None else b""
+                if f.read(blob) != want_blob:
+                    return False
+        return True
+
     if reuse:
         # the sidecar names the shards by name and size, which a re-quantized or fine-tuned checkpoint of the same
         # geometry packed into the same folder can share: compare the first and last blobs of the first, middle and
         # last layers with the GGUF too (six blobs, so an unchanged pack is still reused at once)
         with open(path, "rb") as f:
-            for l, gt, dt, off, blob, ts in (layout[0], layout[len(layout) // 2], layout[-1]):
-                for e in (0, n_expert - 1):
-                    f.seek(off + e * blob)
-                    want_blob = b"".join(model.bytes(t.name).reshape(n_expert, -1)[e].tobytes() for t in ts)
-                    if any(t.type_name == "NVFP4" for t in ts):
-                        tail = nvfp4_tails(l, ts)
-                        want_blob += tail[e].tobytes() if tail is not None else b""
-                    if f.read(blob) != want_blob:
-                        reuse = False
+            reuse = ends_match(f, (layout[0], layout[len(layout) // 2], layout[-1]))
         if not reuse:
             print("%s matches %s but not this GGUF's expert blobs" % (path, sidecar.name))
     if path.exists() and not reuse and not a.experts_bin:
@@ -762,9 +767,12 @@ def main() -> int:
     sidecar.unlink(missing_ok=True)
     part = out / "experts.bin.tmp"
     progress = out / "experts.bin.tmp.json"
-    # A stop part-way (a kill, a power cut) used to cost the whole write again (40 GB, minutes).  The finished layers are kept:
-    # after every layer the file is flushed to disk and experts.bin.tmp.json says how many layers are in it and which source they were
-    # cut from.  The next run continues at that layer when the source is the same and the last kept layer still matches the GGUF.
+    # A stop part-way (a kill, a power cut) used to cost the whole write again (40 GB, minutes).  The finished layers
+    # are kept: after every layer the file is flushed to disk and experts.bin.tmp.json says how many layers are in it
+    # and which source they were cut from.  The next run continues at that layer when the source is the same, the
+    # last kept layer still matches the GGUF and so do the first and last blobs of every earlier one: the note names
+    # the source by its shards' names and sizes, which a revision of the same geometry can share (comparing every kept
+    # layer whole would read as much as writing it again).
     start = 0
     if part.exists():
         done = read_json(progress)
@@ -776,8 +784,8 @@ def main() -> int:
                 with open(part, "rb") as f:
                     f.seek(off)
                     kept = f.read(n_expert * blob)
-                if kept == last.tobytes():
-                    start = k
+                    if kept == last.tobytes() and ends_match(f, layout[:k - 1]):
+                        start = k
         if start:
             print("the earlier packing was interrupted: keeping its first %d of %d layers and continuing with layer %d"
                   % (start, len(layout), start), flush=True)
