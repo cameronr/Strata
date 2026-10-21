@@ -664,6 +664,37 @@ class SplitArtifactTests(unittest.TestCase):
             rc, log = run_pack(paths[0], pack, "--experts-bin")
             self.assertEqual((pack / "experts.bin").read_bytes(), want)
 
+    def test_a_stop_while_rewriting_leaves_no_stale_experts_bin(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            other = split_model(root / "a", name="other", seed=100)
+            paths = split_model(root / "b")
+            pack = root / "pack"
+            rc, log = run_pack(other[0], pack, "--experts-bin")    # another model, the same geometry
+            self.assertEqual(rc, 0, log)
+            real = np.concatenate
+            calls = []
+
+            def dies_on_layer_1(parts, axis):
+                calls.append(1)
+                if len(calls) == 2:
+                    raise KeyboardInterrupt("killed")
+                return real(parts, axis=axis)
+            with patch.object(iq_pack.np, "concatenate", dies_on_layer_1):
+                with self.assertRaises(KeyboardInterrupt):
+                    run_pack(paths[0], pack, "--experts-bin")
+            # this model's index and completion marker are out, the other model's experts.bin is not: the engine
+            # reads the experts from the GGUF
+            self.assertTrue((pack / "native_experts.txt").exists())
+            self.assertFalse((pack / "experts.bin").exists())
+            self.assertFalse((pack / "experts.bin.src.json").exists())
+            rc, log = run_pack(paths[0], pack, "--experts-bin")
+            self.assertEqual(rc, 0, log)
+            self.assertIn("continuing with layer 1", log)
+            self.assertEqual((pack / "experts.bin").read_bytes(), expected_experts(iq_pack.Model(paths[0])))
+
 
 class HadamardTests(unittest.TestCase):
     """prism.hadamard (Agention's APR files) -> hadamard.txt; anything the engine cannot rotate is refused."""

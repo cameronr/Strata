@@ -728,6 +728,11 @@ def main() -> int:
         rc = index_standalone(src, out, model, a.compat_bf16)
     if rc:
         return rc
+    if path.exists() and not reuse and a.experts_bin:
+        # not this model's, and rewritten only after the completion marker below: removed now, so that a stop in
+        # between leaves the GGUF's experts beside this dense.bin, not this file, which the engine would read instead
+        path.unlink()
+        sidecar.unlink(missing_ok=True)
     if not (out / "tokenizer" / "vocab.json").exists() or not (out / "tokenizer" / "chat_template.jinja").exists():
         subprocess.run([sys.executable, str(HERE / "strata_tokenizer.py"), "--gguf", str(src), "--out", str(out)],
                        check=True)   # writes <out>/tokenizer/
