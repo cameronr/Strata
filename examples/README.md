@@ -63,9 +63,10 @@ quantized tensors, the experts and most projections, from the GGUF files at star
    `86;120` is an RTX 30 card and an RTX 50 card. The engine needs the CUDA runtime DLLs (`cudart64_13.dll`,
    `cublas64_13.dll`, `cublasLt64_13.dll`) beside it, on the PATH, or their folder in the config's `lib_dirs`.
 3. For UD-Q4_K_XL, download unsloth's four `Qwen3.8-Flash-Next-UD-Q4_K_XL-0000N-of-00004.gguf` files into
-   `../Strata-data/models/UD-Q4_K_XL` and make its pack:
+   `../Strata-data/models/UD-Q4_K_XL` and make its pack (`--compat-bf16`: the file stores the hyper-connection
+   projections and the PLE value in Q8_0, which the pack holds rounded to BF16, the form the engine reads):
 
-       .venv\Scripts\python.exe tools\iq_pack.py --out ../Strata-data/packs/ud-q4_k_xl ^
+       .venv\Scripts\python.exe tools\iq_pack.py --compat-bf16 --out ../Strata-data/packs/ud-q4_k_xl ^
          --gguf ../Strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf
 
 4. Images: the configs' `vision` section starts the image encoder (`strata-vision`, llama.cpp's mtmd library with the
