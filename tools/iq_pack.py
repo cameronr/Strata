@@ -402,25 +402,23 @@ def write_index(out, rows, src, served, n_extra, publish=True):
           % (len(rows), served, n_extra, at / 2**30))
 
 
-def index_from_base(a, src, base, out, g, T, mm) -> int:
+def index_from_base(src, base, out, model: Model) -> int:
     base_src = pathlib.Path(json.loads((base / "manifest.json").read_text(encoding="utf-8"))["source"]["shard1"])
     if not base_src.exists():
         print("cannot find the base pack's shard 1 from its manifest.json")
         return 1
-    bg = G.GGUFFile(base_src)
-    BT = {t.name: t for t in bg.tensors}
-    bmm = np.memmap(base_src, dtype=np.uint8, mode="r")
+    bm = Model(base_src)                      # both models' tensors are looked up across all of their shards
     header, rows = read_index(base / "index.txt")
     new_rows, extra = [], []
     served = 0
     for name, f in rows.items():
-        t, bt = T.get(name), BT.get(name)
-        if t is None or bt is None:
+        if name not in model.where or name not in bm.where:
             print("tensor %s missing from one of the models" % name)
             return 1
+        t, bt = model.where[name][1], bm.where[name][1]
         if t.type_name in FLOAT and bt.type_name in FLOAT:
             if t.type_name != bt.type_name or t.shape != bt.shape or \
-                    not np.array_equal(tensor_bytes(mm, g, t), tensor_bytes(bmm, bg, bt)):
+                    not np.array_equal(model.bytes(name), bm.bytes(name)):
                 print("float tensor %s differs from the base model; this pack cannot reuse its dense.bin" % name)
                 return 1
             new_rows.append(list(f))
@@ -430,7 +428,7 @@ def index_from_base(a, src, base, out, g, T, mm) -> int:
                 return 1
             nbytes = t.expected_bytes()
             off = sum(len(b) + (-len(b)) % ALIGN for b in extra)
-            extra.append(tensor_bytes(mm, g, t).tobytes())
+            extra.append(model.bytes(name).tobytes())
             # file 3 = extra.bin, raw BF16 (index kind 4)
             new_rows.append([name, "3", "4", str(off), str(nbytes), "0", str(nbytes), f[7], f[8]] + ["0"] * 10)
         else:
@@ -638,7 +636,6 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     g = G.GGUFFile(src)
-    mm = np.memmap(src, dtype=np.uint8, mode="r")
     model = Model(src)
     if len(model.paths) > 1:
         print("model shards: " + ", ".join(p.name for p in model.paths))
@@ -724,11 +721,8 @@ def main() -> int:
         print("warning: %s has no %s, so nothing says it belongs to this model; the engine reads it instead of "
               "the GGUF (rerun with --experts-bin to rewrite it)" % (path, sidecar.name))
     if a.base:
-        if any(w[3] != src for w in model.where.values() if not w[1].name in NOT_IN_PACK):
-            print("--base needs a model whose tensors are all in shard 1")
-            return 1
         (out / "native_experts.txt").unlink(missing_ok=True)
-        rc = index_from_base(a, src, base, out, g, {t.name: t for t in g.tensors}, mm)
+        rc = index_from_base(src, base, out, model)
     else:
         rc = index_standalone(src, out, model, a.compat_bf16)
     if rc:

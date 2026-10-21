@@ -465,6 +465,25 @@ class SplitArtifactTests(unittest.TestCase):
             self.assertNotIn("blk.1.ffn_gate_exps.weight", rows)
             self.assertEqual(rows["blk.1.ffn_gate_inp.weight"][2], "4")
 
+    def test_a_base_pack_of_split_models(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            (root / "a").mkdir()
+            (root / "b").mkdir()
+            base_paths = split_model(root / "a", name="base", seed=100)
+            paths = split_model(root / "b")                               # other experts, the same float tensors
+            base = root / "base"
+            rc, log = run_pack(base_paths[0], base)
+            self.assertEqual(rc, 0, log)
+            (base / "manifest.json").write_text(json.dumps({"source": {"shard1": str(base_paths[0])}}))
+            pack = root / "pack"
+            rc, log = run_pack(paths[0], pack, "--base", str(base))
+            self.assertEqual(rc, 0, log)
+            # the routers in shard 2 and the norm in shard 4 found in both models: the base's rows and dense.bin
+            self.assertEqual(iq_pack.read_index(pack / "index.txt")[1], iq_pack.read_index(base / "index.txt")[1])
+            self.assertEqual((pack / "dense.bin").read_bytes(), (base / "dense.bin").read_bytes())
+            self.assertIn(paths[2].name, (pack / "native_experts.txt").read_text())
+
     def test_unsplit_layers_keep_the_v3_file(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
