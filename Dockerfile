@@ -3,7 +3,7 @@
 #
 # Most people want the ready-made images instead (nothing compiled): docs/DOCKER.md.
 #
-#   docker build -t strata:src .                                        # RTX 20/30/40/50 (compiles for each, ~25 min)
+#   docker build -t strata:src .                                        # RTX 30/40/50 (compiles for each, ~25 min)
 #   docker build -t strata:src --build-arg CUDA_ARCHITECTURES=86 .      # one card only (faster); 86 = RTX 30, 89 = RTX 40, 120 = RTX 50
 #   docker run --rm --gpus all -p 127.0.0.1:8080:8080 --ulimit memlock=-1 --shm-size 2g --stop-timeout 120 \
 #              -v strata-data:/data -e MODEL=IQ3_XXS -e API_KEY=change-me-please-123 strata:src
@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-ARG CUDA_ARCHITECTURES="75;80;86;89;120"
+ARG CUDA_ARCHITECTURES="80;86;89;120"
 ARG BUILD_VISION=1
 ARG ENGINE_VERSION=
 RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -r requirements.txt -r requirements-build.txt
@@ -36,9 +36,9 @@ RUN set -e; \
     real=""; for a in $(echo "$CUDA_ARCHITECTURES" | tr ';,' '  '); do real="$real;${a}-real"; done; real=${real#;}; \
     last=$(echo "$CUDA_ARCHITECTURES" | tr ';,' '  ' | awk '{print $NF}'); \
     /venv/bin/cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=OFF \
-        -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON -DSTRATA_Q6K_EXPERTS=ON -DSTRATA_MMQ_KQUANTS=ON \
+        -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON \
         "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual" -DSTRATA_GGML_DIR=/src/third_party/llama.cpp; \
-    /venv/bin/cmake --build build --target strata strata_kq -j "$(nproc)"; \
+    /venv/bin/cmake --build build --target strata -j "$(nproc)"; \
     if [ "$BUILD_VISION" = "1" ]; then \
       /venv/bin/cmake -G Ninja -S tools/vision -B build-vision -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=/src/third_party/llama.cpp \
           -DSTRATA_VISION_CUDA=ON -DSTRATA_PORTABLE=ON -DGGML_CUDA_NCCL=OFF "-DCMAKE_CUDA_ARCHITECTURES=${real};${last}-virtual"; \
@@ -47,7 +47,6 @@ RUN set -e; \
 RUN set -e; \
     mkdir -p /stage /engine; \
     cp build/strata /stage/; \
-    [ -f build/libstrata_kq.so ] && cp build/libstrata_kq.so /stage/ || true; \
     [ -f build-vision/bin/strata-vision ] && cp build-vision/bin/strata-vision /stage/ || true; \
     ver="${ENGINE_VERSION:-$(sed -n 's/^[[:space:]]*project([^)]*VERSION[[:space:]]*\([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)}"; \
     echo "{\"version\": \"$ver\", \"source\": \"docker build\", \"archs\": \"$CUDA_ARCHITECTURES\", \"cuda\": \"13.0\", \"portable\": true}" > /stage/BUILD.json; \
@@ -55,7 +54,7 @@ RUN set -e; \
     archs=""; for a in $(echo "$CUDA_ARCHITECTURES" | tr ';,' '  '); do archs="$archs --arch sm_$a"; done; \
     last=$(echo "$CUDA_ARCHITECTURES" | tr ';,' '  ' | awk '{print $NF}'); \
     python3 packaging/package_engine.py --src /stage --backend cuda --version "$ver" --out /engine $archs --arch "compute_$last" \
-        --min-driver nvidia=580.65 --variant cuda13 --platform linux-x86_64 --build-id "docker-source-${ver}-cuda13.0" --include SYSTEM-LIBS.txt --include 'libstrata_kq*' \
+        --min-driver nvidia=580.65 --variant cuda13 --platform linux-x86_64 --build-id "docker-source-${ver}-cuda13.0" --include SYSTEM-LIBS.txt \
         --include strata-vision; \
     for d in /engine/*/; do python3 packaging/package_engine.py --verify "$d"; python3 packaging/binary_deps.py "$d"; done
 
