@@ -352,6 +352,34 @@ class ConversionTests(unittest.TestCase):
             self.assertEqual(conv["compat_bf16"], True)
 
 
+class NativeTests(unittest.TestCase):
+    """A quantized tensor without a float form is served from the GGUF: only what this engine serves so (the token
+    embedding, NativeDense's projections and PLE key, the head), in the types it has kernels for."""
+
+    V = np.random.default_rng(5).normal(0, 0.05, (4, 64)).astype(np.float32)
+
+    def test_served_types(self):
+        ok = [("token_embd.weight", Q.Q5_1), ("output.weight", Q.Q4_0), ("blk.0.attn_qkv.weight", Q.Q5_0),
+              ("blk.2.ffn_down_shexp.weight", Q.Q8_0), ("blk.1.ple_key.weight", Q.Q8_0)]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            rc, log, rows, *_ = pack_one(Path(tmp), [(n, self.V, k) for n, k in ok])
+            self.assertEqual(rc, 0, log)
+            for n, _ in ok:
+                self.assertEqual(rows[n][9], "8", n)                              # a shape only
+
+    def test_what_the_engine_cannot_serve_is_refused_before_anything_is_written(self):
+        bad = {"token_embd.weight": (Q.Q4_0, "no kernels"), "output.weight": (Q.Q5_1, "no kernels"),
+               "blk.0.attn_qkv.weight": (Q.Q4_1, "no kernels"), "blk.0.ssm_new.weight": (Q.Q8_0, "neither")}
+        for name, (kind, why) in bad.items():
+            with self.subTest(name), tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                (Path(tmp) / "dense.bin").write_bytes(b"previous pack")
+                rc, log, *_ = pack_one(Path(tmp), [(name, self.V, kind)], True)
+                self.assertEqual(rc, 1)
+                self.assertIn(name, log)
+                self.assertIn(why, log)
+                self.assertEqual((Path(tmp) / "dense.bin").read_bytes(), b"previous pack")
+
+
 # ---- split artifacts: Unsloth's UD-Q4_K_XL in miniature.  Shard 1 holds the metadata and no tensor; shard 2 the
 # routers, layer 0 and layer 1's down; shard 3 layer 1's gate and up (a shard boundary inside a layer, like its
 # layer 11); shard 4 one float tensor.  4 experts of 32 x 32, Q8_0 and F32.

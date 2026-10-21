@@ -88,10 +88,32 @@ FORM = {
 # UD-Q4_K_XL; IQ3_XXS and IQ4_XS, #381).  Other quantized keys take the BF16 path (--compat-bf16), as before.
 NATIVE_PLE_KEY = {"Q2_0", "Q8_0", "IQ3_XXS", "IQ4_XS"}
 KIND = {"BF16": "4", "F16": "5", "F32": "2"}
+# What this engine serves from the GGUF, in the types it has kernels for: the token embedding (NativeEmbed,
+# iq_supported), the output head (NativeHead) and NativeDense's projections and PLE key (native_mmvq_supported).  The
+# engine refuses a pack row that carries a shape only for anything else, so the pack is refused at once instead.
+EMBED_TYPES = {"IQ2_XXS", "IQ2_XS", "IQ3_XXS", "IQ4_NL", "IQ3_S", "IQ2_S", "IQ4_XS", "IQ1_S", "IQ1_M", "Q2_0", "Q3_K",
+               "Q4_K", "Q5_K", "Q6_K", "Q5_1", "Q8_0"}
+MMVQ_TYPES = {"Q4_0", "Q5_0", "Q8_0", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS", "Q2_0", "IQ2_XXS",
+              "IQ2_XS", "IQ3_XXS", "IQ3_S", "IQ2_S", "IQ1_M"}
+NATIVE_DENSE = (".attn_qkv.weight", ".attn_gate.weight", ".ssm_out.weight", ".attn_q.weight", ".attn_k.weight",
+                ".attn_v.weight", ".attn_output.weight", ".ffn_gate_shexp.weight", ".ffn_up_shexp.weight",
+                ".ffn_down_shexp.weight")
 
 
 def form_of(name: str):
     return FORM.get(re.sub(r"^blk\.\d+\.", "", name))
+
+
+def native_problem(name: str, type_name: str):
+    """Why the engine cannot serve the quantized tensor `name` from the GGUF, or None."""
+    if name == "token_embd.weight":
+        types = EMBED_TYPES
+    elif name in ("output.weight", "blk.1.ple_key.weight") or \
+            (name.startswith("blk.") and name.endswith(NATIVE_DENSE)):
+        types = MMVQ_TYPES
+    else:
+        return f"{name} is {type_name}: the engine reads it neither from the GGUF nor in a float form"
+    return None if type_name in types else f"{name} is {type_name}, a type the engine has no kernels for"
 
 
 def needs_bf16(name: str, type_name: str) -> bool:
@@ -289,6 +311,9 @@ def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
             name == "blk.1.ple_key.weight" and t.type_name in NATIVE_PLE_KEY))
         if t.type_name not in FLOAT and not native and not compat_bf16:
             problems.append(f"{name} is {t.type_name}, but the engine requires {form}; use --compat-bf16")
+        why = native_problem(name, t.type_name) if native else None
+        if why:
+            problems.append(why)
         todo.append((name, g, t, mm, p, native))
     # refused before anything is written: the previous pack stays as it was
     if problems:
