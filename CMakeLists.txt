@@ -462,17 +462,21 @@ if(STRATA_ENABLE_CUDA)
   # ---- P2.S5: the GraphRegistry --------------------------------------------------
   # A .cu because the test needs real kernels to capture; it links `strata_core` and not `strata_kernels`,
   # because what it exercises is the capture machinery and not any kernel in it.
-  if(STRATA_BUILD_TESTS)
+  # optional dev micro-test: this fork does not ship every bench/micro source, so add it only when present
+  # (the same EXISTS guard the other optional micro-targets use)
+  if(STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/graph_registry_test.cu")
   add_executable(graph_registry_test bench/micro/graph_registry_test.cu)
   target_include_directories(graph_registry_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(graph_registry_test PRIVATE strata_core CUDA::cudart)
   add_test(NAME graph_registry_test COMMAND graph_registry_test)
+  endif()
 
   # ---- P2.S5's GATE: is a device<->pinned-memory handoff graph-capturable? --------------------
   # The doorbell protocol puts the D2H of `x_f` and the miss list INSIDE G[l] - that is the whole overlap.  The
   # phase doc says to verify this "before building on it", and this project has already lost two rounds to
   # building first (a memory-only spin that DEADLOCKS on Windows, and a `cudaEventRecord` inside a capture that
   # is SILENTLY DROPPED).  It links only cudart: it is about the capture machinery, not about any kernel.
+  if(STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/pinned_capture.cu")
   add_executable(pinned_capture bench/micro/pinned_capture.cu)
   target_include_directories(pinned_capture PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(pinned_capture PRIVATE CUDA::cudart)
@@ -752,5 +756,9 @@ endif()
 
 if(STRATA_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests)
+  # the C++ test tree is optional: this fork's tests/ is Python-only (pytest), so only add it when it has
+  # its own CMakeLists (the C++ parity targets above are defined here, not there, and build regardless)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
+  endif()
 endif()

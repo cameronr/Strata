@@ -1,8 +1,10 @@
 // src/kernels/draft_proxy_parity.cpp - draft_proxy (the drafter's head argmax through a 2-bit copy of its rows) against
-// native_mmvq + argmax_rows + row_top_prob_split, on synthetic Q6_K and Q8_0 heads of the draft head's shape (40,525
-// rows of 2560): with one row's logit clearly ahead (the activations lean on its weights), the pick is the exact
-// argmax and the probability within 0.05 of the exact one (the copy's terms for the rows it does not rescore); every
-// launch repeats bitwise.
+// native_mmvq + argmax_rows + row_top_prob_split, on synthetic Q6_K and Q8_0 heads of the draft head's shape (rows of
+// 2560): with one row's logit clearly ahead (the activations lean on its weights), the pick is the exact argmax and the
+// probability within 0.05 of the exact one (the copy's terms for the rows it does not rescore); every launch repeats
+// bitwise.  Run over the shipped subset (40,525), one tile past the old fixed sweep's 49,152-row cap (49,184: the
+// shape that used to throw "too many rows"), and the CJK subset (106,299) - the grid-stride sweep scores all of them.
+// It also times the copy's top-1 against the exact head over the same rows, which is what the 2-bit copy buys.
 // Usage: draft_proxy_parity --selftest
 #include "strata/kernels/draft_proxy.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -20,7 +22,7 @@
 
 namespace {
 
-constexpr int K = 2560, ROWS = 40525;
+constexpr int K = 2560;
 
 #define CK(x)                                                         \
     do {                                                              \
@@ -81,8 +83,9 @@ void dequant(int type, const uint8_t* row, float* w) {
     }
 }
 
-int run(int type) {
-    std::mt19937 rng(type * 7919);
+int run(int type, int rows) {
+    const int ROWS = rows;
+    std::mt19937 rng(type * 7919 + ROWS);
     using namespace strata::kernels;
     const size_t rb = native_mmvq_weight_bytes(type, K, 1);
     std::vector<uint8_t> hw((size_t) ROWS * rb);
@@ -168,8 +171,40 @@ int run(int type) {
                         hid[0], hp[0], hid[1], hp[1], hid[2], hp[2]);
         }
     }
-    std::printf("draft_proxy %s: %s (40 vectors; the probability within %.2e of the exact one; %d near-ties picked "
-                "otherwise)\n", type == 14 ? "Q6_K" : "Q8_0", bad ? "FAIL" : "ok", pmax, close);
+    std::printf("draft_proxy %s: %s (%d rows; 40 vectors; the probability within %.2e of the exact one; %d near-ties "
+                "picked otherwise)\n", type == 14 ? "Q6_K" : "Q8_0", bad ? "FAIL" : "ok", ROWS, pmax, close);
+    // ---- timing: the copy's top-1 against the exact head over the same rows (the last vector's activations): what the
+    // 2-bit copy buys.  The exact path is native_mmvq + argmax_rows + row_top_prob_split + map_ids, as above.
+    {
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0);
+        cudaEventCreate(&e1);
+        const int iters = 200;
+        for (int i = 0; i < 20; ++i) draft_proxy_top1(type, proxy, w, xq, ROWS, map, ids, prob, scratch, st);
+        cudaEventRecord(e0, st);
+        for (int i = 0; i < iters; ++i) draft_proxy_top1(type, proxy, w, xq, ROWS, map, ids, prob, scratch, st);
+        cudaEventRecord(e1, st);
+        cudaEventSynchronize(e1);
+        float copy_ms;
+        cudaEventElapsedTime(&copy_ms, e0, e1);
+        auto exact = [&] {
+            native_mmvq(type, w, xq, logits, K, ROWS, 1, st);
+            argmax_rows(logits, 1, ROWS, arg, ids, st);
+            row_top_prob_split(logits, 1, ROWS, ids, prob, top, st);
+            map_ids(ids, map, 1, st);
+        };
+        for (int i = 0; i < 20; ++i) exact();
+        cudaEventRecord(e0, st);
+        for (int i = 0; i < iters; ++i) exact();
+        cudaEventRecord(e1, st);
+        cudaEventSynchronize(e1);
+        float exact_ms;
+        cudaEventElapsedTime(&exact_ms, e0, e1);
+        std::printf("  timing (%d rows): copy %.1f us, exact head %.1f us, %.1fx\n", ROWS, copy_ms * 1000.0f / iters,
+                    exact_ms * 1000.0f / iters, exact_ms / copy_ms);
+        cudaEventDestroy(e0);
+        cudaEventDestroy(e1);
+    }
     cudaFree(w); cudaFree(proxy); cudaFree(scratch); cudaFree(xq); cudaFree(dx); cudaFree(logits); cudaFree(prob);
     cudaFree(ids); cudaFree(map); cudaFree(arg); cudaFree(top);
     cudaStreamDestroy(st);
@@ -183,6 +218,14 @@ int main(int argc, char** argv) {
         std::printf("usage: draft_proxy_parity --selftest\n");
         return 2;
     }
-    const int a = run(14), b = run(8);
-    return a || b ? 1 : 0;
+    // the shipped subset (fits the old fixed sweep), one tile past its old 49,152-row cap (the shape that used to
+    // throw "too many rows"), and the CJK subset that blew past it
+    const int sizes[] = {40525, 49184, 106299};
+    int bad = 0;
+    for (const int rows : sizes) {
+        std::printf("\n== %d rows ==\n", rows);
+        bad |= run(14, rows);
+        bad |= run(8, rows);
+    }
+    return bad ? 1 : 0;
 }
