@@ -1,0 +1,20 @@
+# Dev image for the draft_proxy parity selftest (see selftest-draft-proxy.sh).
+#
+# docker build has no GPU, so the selftest cannot run inside the engine image build, and that image is
+# built with STRATA_BUILD_TESTS=OFF so it carries no test binary. This image bakes only the slow, rarely
+# changing part - the CUDA toolchain, build deps and the venv - so the selftest can run against a GPU with
+# --gpus all. The engine source and a gitignored build-selftest/ cache are mounted at run time, so repeat
+# runs recompile only what changed.
+#
+#   docker build -f docker/Dockerfile.selftest -t strata-selftest-dev .
+
+ARG CUDA_IMAGE=nvidia/cuda:13.0.0-devel-ubuntu24.04
+FROM ${CUDA_IMAGE}
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates git ninja-build python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt requirements-build.txt /tmp/reqs/
+RUN python3 -m venv /venv \
+    && /venv/bin/pip install --no-cache-dir -r /tmp/reqs/requirements.txt -r /tmp/reqs/requirements-build.txt
+ENV PATH=/venv/bin:$PATH
