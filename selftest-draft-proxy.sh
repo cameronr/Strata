@@ -28,11 +28,10 @@ exec docker run --rm --gpus all \
   -v "$HERE":/src -v "$HERE/build-selftest":/src/build -w /src "$DEV_IMAGE" bash -c '
     set -e
     [ -d third_party/llama.cpp ] || /venv/bin/python -c "import setup; setup.get_llama_cpp()"
-    if [ ! -f build/CMakeCache.txt ]; then
-      cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
-        -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON \
-        -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DSTRATA_GGML_DIR=/src/third_party/llama.cpp
-    fi
+    # always (re)configure: cheap, and it recovers from a previous failed configure instead of skipping on a partial cache
+    cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON \
+      -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DSTRATA_GGML_DIR=/src/third_party/llama.cpp
     cmake --build build --target draft_proxy_parity -j"$(nproc)"
     ./build/draft_proxy_parity --selftest
   '
