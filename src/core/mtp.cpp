@@ -312,9 +312,8 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
             // its 2-bit copy finds each draft's row (STRATA_DRAFT_PROXY=0: the exact head over every row)
             const char* px = std::getenv("STRATA_DRAFT_PROXY");
-            if ((px == nullptr || std::atoi(px) != 0) &&
-                strata::kernels::draft_proxy_supported(head->type(), (int) g_->n_embd) &&
-                strata::kernels::draft_proxy_fits(n_dvocab_)) {
+            const bool copy = px == nullptr || std::atoi(px) != 0;
+            if (copy && strata::kernels::draft_proxy_supported(head->type(), (int) g_->n_embd)) {
                 const size_t pb = strata::kernels::draft_proxy_bytes(n_dvocab_);
                 const size_t sb = strata::kernels::draft_proxy_scratch_bytes(n_dvocab_);
                 if (cudaMalloc((void**) &proxy_, pb) != cudaSuccess || cudaMalloc(&proxy_scratch_, sb) != cudaSuccess) {
@@ -325,9 +324,7 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
                 strata::kernels::draft_proxy_pack(head->type(), dhead_, n_dvocab_, proxy_, nullptr);
                 cudaDeviceSynchronize();
                 vram_ += pb + sb;
-            } else if (px == nullptr || std::atoi(px) != 0) {
-                // the exact head over every row: this head's type or width has no 2-bit copy (or its row count cannot
-                // be indexed); STRATA_DRAFT_PROXY=0 forces this path for any head
+            } else if (copy) {   // a head type or width the copy does not take
                 std::fprintf(stderr, "strata mtp: draft head over %lld tokens: the exact head (no 2-bit copy for it)\n",
                              (long long) n_dvocab_);
             }

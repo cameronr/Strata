@@ -1,10 +1,9 @@
 // src/kernels/draft_proxy_parity.cpp - draft_proxy (the drafter's head argmax through a 2-bit copy of its rows) against
-// native_mmvq + argmax_rows + row_top_prob_split, on synthetic Q6_K and Q8_0 heads of the draft head's shape (rows of
-// 2560): with one row's logit clearly ahead (the activations lean on its weights), the pick is the exact argmax and the
-// probability within 0.05 of the exact one (the copy's terms for the rows it does not rescore); every launch repeats
-// bitwise.  Run over the shipped subset (40,525), one tile past the old fixed sweep's 49,152-row cap (49,184: the
-// shape that used to throw "too many rows"), and the CJK subset (106,299) - the grid-stride sweep scores all of them.
-// It also times the copy's top-1 against the exact head over the same rows, which is what the 2-bit copy buys.
+// native_mmvq + argmax_rows + row_top_prob_split, on synthetic Q6_K and Q8_0 heads of rows of 2560: with one row's
+// logit clearly ahead (the activations lean on its weights), the pick is the exact argmax and the probability within
+// 0.05 of the exact one (the copy's terms for the rows it does not rescore); every launch repeats bitwise.  Heads of
+// 40,525 rows (this branch's draft subset), 49,184 (6,148 candidates: 13 for some of the 512 rescoring warps) and
+// 106,299 (upstream's CJK subset), each with the copy's top-1 and the exact head timed.
 // Usage: draft_proxy_parity --selftest
 #include "strata/kernels/draft_proxy.hpp"
 #include "strata/kernels/native_mmvq.hpp"
@@ -218,8 +217,6 @@ int main(int argc, char** argv) {
         std::printf("usage: draft_proxy_parity --selftest\n");
         return 2;
     }
-    // the shipped subset (fits the old fixed sweep), one tile past its old 49,152-row cap (the shape that used to
-    // throw "too many rows"), and the CJK subset that blew past it
     const int sizes[] = {40525, 49184, 106299};
     int bad = 0;
     for (const int rows : sizes) {

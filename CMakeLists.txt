@@ -462,8 +462,6 @@ if(STRATA_ENABLE_CUDA)
   # ---- P2.S5: the GraphRegistry --------------------------------------------------
   # A .cu because the test needs real kernels to capture; it links `strata_core` and not `strata_kernels`,
   # because what it exercises is the capture machinery and not any kernel in it.
-  # optional dev micro-test: this fork does not ship every bench/micro source, so add it only when present
-  # (the same EXISTS guard the other optional micro-targets use)
   if(STRATA_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro/graph_registry_test.cu")
   add_executable(graph_registry_test bench/micro/graph_registry_test.cu)
   target_include_directories(graph_registry_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -756,8 +754,7 @@ endif()
 
 if(STRATA_BUILD_TESTS)
   enable_testing()
-  # the C++ test tree is optional: this fork's tests/ is Python-only (pytest), so only add it when it has
-  # its own CMakeLists (the C++ parity targets above are defined here, not there, and build regardless)
+  # the Catch2 suite's tests/CMakeLists.txt, which the published source leaves out
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     add_subdirectory(tests)
   endif()

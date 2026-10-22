@@ -324,12 +324,8 @@ __global__ void __launch_bounds__(RS_T) rescore_kernel(const uint8_t* __restrict
     float bv = ninf;
     int bi = 0x7fffffff;
     const int nc = n_tiles * PER;
-    // Every candidate, a warp each, in a grid-stride sweep over the tiles' PER bests.  The slot sequence (start
-    // blockIdx.x*RS_W + warp, step gridDim.x*RS_W) is the same order the fixed RS_SLOTS sweep used, so the rows that
-    // once fit rescore in the same order and the sum is bitwise identical; the sweep only keeps going past the old
-    // 6144-candidate (49,152-row) cap instead of stopping at it.  cand[] is a small L2-resident array, so dropping the
-    // register preload costs nothing: the row reads (the real work) happen once per candidate either way, and the
-    // window test skips all but the handful of rows near the best regardless of how many rows there are.
+    // the candidates a warp each, grid-stride: any number, in a fixed order (each read from L2 as it comes: loaded
+    // ahead, 12 a warp, they took 1-2 us longer a launch)
 #pragma unroll 1
     for (int slot = blockIdx.x * RS_W + warp; slot < nc; slot += gridDim.x * RS_W) {
         const float2 c = cand[slot];
@@ -391,14 +387,6 @@ bool draft_proxy_supported(int ggml_type, int n_in) noexcept {
     return n_in == K && (ggml_type == 14 || ggml_type == 8);
 }
 
-bool draft_proxy_fits(int64_t n_rows) noexcept {
-    // The rescore sweep is grid-stride, so there is no fixed row cap: any vocabulary that fits in memory works.  The
-    // only real limit is the rescoring kernel's int candidate count (n_tiles * PER); kept as the single place a future
-    // fixed-size optimization would have to respect, and the reason the caller falls back to the exact head.
-    if (n_rows <= 0) return false;
-    return tiles_of(n_rows) * PER <= (int64_t) INT32_MAX;
-}
-
 size_t draft_proxy_bytes(int64_t n_rows) { return (size_t) tiles_of(n_rows) * W4 * 32 * (16 + 4); }
 
 size_t draft_proxy_scratch_bytes(int64_t n_rows) {
@@ -424,8 +412,8 @@ void draft_proxy_pack(int ggml_type, const void* rows, int64_t n_rows, void* pro
 void draft_proxy_top1(int ggml_type, const void* proxy, const void* rows, const void* x_q8_1, int64_t n_rows,
                       const int32_t* map, int32_t* out_id, float* out_prob, void* scratch, void* stream) {
     const int64_t tiles = tiles_of(n_rows);
-    if (!draft_proxy_fits(n_rows))
-        throw std::invalid_argument("draft_proxy_top1: too many rows");
+    if (n_rows <= 0 || n_rows > INT32_MAX)   // the kernels' row ids are ints
+        throw std::invalid_argument("draft_proxy_top1: n_rows out of range");
     const uint4* wq = (const uint4*) proxy;
     const uint32_t* sc = (const uint32_t*) ((const char*) proxy + (size_t) tiles * W4 * 32 * 16);
     float2* cand = (float2*) scratch;
