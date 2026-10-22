@@ -752,5 +752,9 @@ endif()
 
 if(STRATA_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests)
+  # the C++ test tree is optional: this fork's tests/ is Python-only (pytest), so only add it when it has
+  # its own CMakeLists (the C++ parity targets above are defined here, not there, and build regardless)
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
+  endif()
 endif()
