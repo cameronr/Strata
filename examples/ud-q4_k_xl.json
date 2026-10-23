@@ -24,7 +24,7 @@
     "--mtp",
     "../Strata-data/mtp/rt-tuned",
     "--max-context",
-    "200192",
+    "262144",
     "--kv",
     "int8",
     "--kv-grow",
