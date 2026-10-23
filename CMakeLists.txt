@@ -449,10 +449,14 @@ if(STRATA_ENABLE_CUDA)
   add_test(NAME platform_memory_test COMMAND platform_memory_test)
 
   # Plan v0.3 P2: the n-gram table read straight from the SSD. The selftest needs only the CPU and a temp file.
-  add_executable(ple_reader_test src/ngram/ple_reader_test.cpp)
-  target_include_directories(ple_reader_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(ple_reader_test PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
+  # Built with the test suite only, like its neighbours: its current source (from upstream's 0.1.45 tree) expects
+  # upstream's BF16 PLE row format in kernels/ngram.hpp, which this branch does not have.
+  if(STRATA_BUILD_TESTS)
+    add_executable(ple_reader_test src/ngram/ple_reader_test.cpp)
+    target_include_directories(ple_reader_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(ple_reader_test PRIVATE strata_kernels CUDA::cudart)
+    add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
+  endif()
 
   # The GPU test is registered only when CUDA is on, and it runs ON THE TARGET PC.  `--selftest` allocates
   # and writes real VRAM, so a machine without a device fails this test rather than skipping it silently -
