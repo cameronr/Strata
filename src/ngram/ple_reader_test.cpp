@@ -10,6 +10,7 @@
 #include "strata/ngram/ple_reader.hpp"
 #include "strata/platform/direct_file.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -75,44 +76,33 @@ bool check_rows(ng::PleReader& rd, const std::vector<uint32_t>& rows, uint32_t n
     return true;
 }
 
-/// THE BF16 TABLE, and the claim it rests on.  A bfloat16 is literally the top half of a float32, so widening
-/// one is a shift: exact for every value, normal or not, with no rounding to hide behind.  These patterns are
-/// the ones a lossy path would break on - the subnormals and the NaN/inf encodings a saturating cast to FP8
-/// would collapse - so a table that came back through the FP8 route would not reproduce all of them.
-void bf16_widening_is_exact() {
-    const uint16_t bits[] = {0x0000, 0x8000, 0x3f80, 0xbf80, 0x7f7f, 0xff7f,  // 0, -0, 1, -1, max, -max
-                             0x0001, 0x8001, 0x007f, 0x7f80, 0xff80,          // smallest subnormals, +-inf
-                             0x7fc0, 0x7f81, 0x4049, 0xc249, 0x3c75};        // NaN, signalling NaN, 3.14, -3.14
-    for (uint16_t b : bits) {
-        uint8_t row[2 * k::PLE_HEAD_DIM];
-        std::memset(row, 0, sizeof row);
-        row[0] = (uint8_t) b;                       // little-endian: the low byte first
-        row[1] = (uint8_t) (b >> 8);
-        float out[k::PLE_HEAD_DIM];
-        k::bf16_dequant_row(row, out);
-        uint32_t want = (uint32_t) b << 16, got;
-        std::memcpy(&got, &out[0], sizeof got);
-        CHECK(got == want, "bf16 0x%04x widened to 0x%08x, not 0x%08x", b, got, want);
-        bool tail_zero = true;                      // one element under test must not have shifted the rest
-        for (int j = 1; j < k::PLE_HEAD_DIM; ++j) tail_zero = tail_zero && out[j] == 0.0f;
-        CHECK(tail_zero, "bf16 0x%04x: the rest of the row is not zero", b);
-    }
-}
+/// BOTH FORMATS OF THE TABLE, END TO END: IQ4_NL and Q8_0 (the unsloth files), the types `PleTable::open` takes. A
+/// minimal PLE-only GGUF holds `rows` rows of that format's row size, each filled with bytes that encode the row, and
+/// every I/O mode must return exactly what `ple_dequant_row` makes of those bytes - so the row width, the offset and
+/// the type have to be right for both formats, not only for IQ4_NL.
+struct Format {
+    const char* name;
+    uint32_t gguf_type;
+    uint32_t row_bytes;
+};
+constexpr Format kFormats[] = {{"IQ4_NL", 20, k::PLE_ROW_BYTES}, {"Q8_0", 8, k::PLE_ROW_BYTES_Q8_0}};
+constexpr Format kQ5_0 = {"Q5_0", 6, 110};   // a table type other GGUFs have, which `open` refuses
 
-/// EVERY FORMAT OF THE TABLE, END TO END (table-driven: one entry in `k::ple_formats()` is one run here). A minimal
-/// PLE-only GGUF holds `rows` rows of that format's row size, each filled with bytes that encode the row, and both I/O
-/// modes must return exactly what the format's own dequantizer makes of those bytes - so the row width, the offset
-/// and the type lookup all have to be right for every format, not only for IQ4_NL.
-uint32_t gguf_type_id(const char* name) {
-    static const struct { const char* name; uint32_t id; } ids[] = {
-        {"IQ4_NL", 20}, {"Q4_0", 2}, {"Q4_1", 3}, {"Q5_0", 6}, {"Q5_1", 7}, {"Q8_0", 8}, {"BF16", 30}, {"F8_E4M3", 24}, {"NVFP4", 24}};
-    for (const auto& e : ids)
-        if (std::strcmp(e.name, name) == 0) return e.id;
-    return 0xFFFFFFFFu;
+constexpr k::PleIo kModes[] = {k::PleIo::Direct, k::PleIo::Mmap, k::PleIo::Ram};
+const char* mode_name(k::PleIo m) { return m == k::PleIo::Direct ? "direct" : m == k::PleIo::Mmap ? "mmap" : "ram"; }
+
+/// `path` opened as `io` says; in Ram mode the table is read into RAM first, so the rows come from there.
+bool open_table(k::PleTable& t, const std::string& path, const k::PleIoOptions& io, std::string& err) {
+    if (!t.open(path, err, io)) return false;
+    if (io.mode != k::PleIo::Ram) return true;
+    if (!t.start_ram_load(err)) return false;
+    t.wait_ram_load();
+    if (!t.ram_ready()) { err = "the table was not read into RAM"; return false; }
+    return true;
 }
 
 // `claimed_rows` is the row count the header states; `rows` rows are actually written (equal unless a test lies)
-std::string write_format_table(const std::string& dir, const k::PleFormatInfo& f, uint32_t rows, uint64_t claimed_rows = 0) {
+std::string write_format_table(const std::string& dir, const Format& f, uint32_t rows, uint64_t claimed_rows = 0) {
     const std::string path = dir + "/ple_format_selftest.gguf";
     std::ofstream out(path, std::ios::binary);
     if (!out) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return {}; }
@@ -122,19 +112,11 @@ std::string write_format_table(const std::string& dir, const k::PleFormatInfo& f
         return s;
     };
     const auto str = [&](const char* s) { return le((uint64_t) std::strlen(s), 8) + std::string(s); };
-    const uint64_t n_kv = f.needs_scale ? 3 : 1;
-    std::string head = "GGUF" + le(3u, 4) + le(1ull, 8) + le(n_kv, 8);
+    std::string head = "GGUF" + le(3u, 4) + le(1ull, 8) + le(1ull, 8);
     head += str("general.architecture") + le(8u, 4) + str("strata-ple");
-    if (f.needs_scale) {
-        const float scale = 0.75f;
-        uint32_t sb;
-        std::memcpy(&sb, &scale, 4);
-        head += str("strata.ple.format") + le(8u, 4) + str(f.id == k::PleFormat::NVFP4 ? "nvfp4x16" : "f8_e4m3");
-        head += str("strata.ple.scale") + le(6u, 4) + le(sb, 4);       // 6 = FLOAT32
-    }
     head += str("per_layer_token_embd.weight") + le(2u, 4);
-    head += le(f.id == k::PleFormat::NVFP4 ? (uint64_t) f.row_bytes : (uint64_t) k::PLE_HEAD_DIM, 8) + le(claimed_rows != 0 ? claimed_rows : (uint64_t) rows, 8);
-    head += le(gguf_type_id(f.name), 4) + le(0ull, 8);
+    head += le((uint64_t) k::PLE_HEAD_DIM, 8) + le(claimed_rows != 0 ? claimed_rows : (uint64_t) rows, 8);
+    head += le(f.gguf_type, 4) + le(0ull, 8);
     while (head.size() % 32) head += '\0';
     out.write(head.data(), (std::streamsize) head.size());
     std::vector<uint8_t> r(f.row_bytes);
@@ -146,9 +128,7 @@ std::string write_format_table(const std::string& dir, const k::PleFormatInfo& f
     return out ? path : std::string();
 }
 
-void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32_t rows) {
-    CHECK(gguf_type_id(f.name) != 0xFFFFFFFFu, "%s: no GGUF type id in this test", f.name);
-    CHECK(f.row_bytes > 0 && f.row_bytes <= (uint32_t) k::PLE_ROW_BYTES_MAX, "%s: row_bytes %u out of range", f.name, f.row_bytes);
+void format_round_trip(const std::string& dir, const Format& f, uint32_t rows) {
     const std::string path = write_format_table(dir, f, rows);
     if (path.empty()) { CHECK(false, "%s: no table was written", f.name); return; }
     std::mt19937 rng(13);
@@ -156,24 +136,23 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
     for (uint32_t i = 0; i < rows; ++i) want[i] = rng() % rows;
     want[0] = 0;
     want[1] = rows - 1;
-    for (k::PleIo mode : {k::PleIo::Direct, k::PleIo::Mmap}) {
-        const char* name = mode == k::PleIo::Direct ? "direct" : "mmap";
+    for (k::PleIo mode : kModes) {
+        const char* name = mode_name(mode);
         k::PleTable t;
         std::string err;
         k::PleIoOptions io;
         io.mode = mode;
         io.max_inflight = 8;
         io.cache_rows = 0;
-        CHECK(t.open(path, err, io), "%s: open in %s mode: %s", f.name, name, err.c_str());
+        CHECK(open_table(t, path, io, err), "%s: open in %s mode: %s", f.name, name, err.c_str());
         if (g_fail) break;
-        CHECK(std::strcmp(t.format(), f.name) == 0, "%s: format() says \"%s\"", f.name, t.format());
         CHECK(t.rows() == rows, "%s: rows %llu, not %u", f.name, (unsigned long long) t.rows(), rows);
         std::vector<uint8_t> raw(f.row_bytes);
         float got[k::PLE_HEAD_DIM], ref[k::PLE_HEAD_DIM];
         for (uint32_t r : want) {
             t.read_row(r, got);
             expected_row(r, f.row_bytes, raw.data());
-            f.dequant(raw.data(), f.needs_scale ? 0.75f : 1.0f, ref);
+            k::ple_dequant_row((int) f.gguf_type, raw.data(), ref);
             if (std::memcmp(got, ref, sizeof got) != 0) {
                 CHECK(false, "%s: %s: row %u differs from the format's own dequantizer", f.name, name, r);
                 break;
@@ -186,7 +165,7 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
         t.gather(rows16, tok);
         for (int h = 0; h < 16; ++h) {
             expected_row(rows16[h], f.row_bytes, raw.data());
-            f.dequant(raw.data(), f.needs_scale ? 0.75f : 1.0f, ref);
+            k::ple_dequant_row((int) f.gguf_type, raw.data(), ref);
             CHECK(std::memcmp(tok + (size_t) h * k::PLE_HEAD_DIM, ref, sizeof ref) == 0, "%s: %s: gather head %d differs", f.name, name, h);
         }
         // a prompt chunk: gather_batch over more rows than one prefetch window (4096), one of them past the table's end
@@ -194,7 +173,7 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
             const size_t nt = 700, nr = nt * 16;     // 11200 rows, three windows
             std::vector<uint32_t> br(nr);
             for (size_t i = 0; i < nr; ++i) br[i] = want[i % want.size()];
-            if (mode == k::PleIo::Mmap) br[5000] = rows + 7;   // out of range (mapped): zeros, as read_row gives
+            br[5000] = rows + 7;                     // out of range: zeros, as read_row gives
             std::vector<float> bo(nr * k::PLE_HEAD_DIM);
             std::string e2;
             CHECK(t.gather_batch(br.data(), nt, bo.data(), e2), "%s: %s: gather_batch: %s", f.name, name, e2.c_str());
@@ -205,7 +184,7 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
                     continue;
                 }
                 expected_row(br[i], f.row_bytes, raw.data());
-                f.dequant(raw.data(), f.needs_scale ? 0.75f : 1.0f, ref);
+                k::ple_dequant_row((int) f.gguf_type, raw.data(), ref);
                 bad += std::memcmp(bo.data() + i * k::PLE_HEAD_DIM, ref, sizeof ref) != 0;
             }
             CHECK(bad == 0, "%s: %s: gather_batch differs in %zu rows", f.name, name, bad);
@@ -214,62 +193,46 @@ void format_round_trip(const std::string& dir, const k::PleFormatInfo& f, uint32
     std::filesystem::remove(path);
 }
 
-/// A table whose header does not match the file is refused with a message, never read past its end (#865): one row
-/// short, one row long (a single-tensor shard must be filled exactly), and a row count that wraps the 64-bit size.
-void bad_sizes_are_refused(const std::string& dir) {
-    for (int i = 0; i < k::ple_format_count(); ++i) {
-        const k::PleFormatInfo& f = k::ple_formats()[i];
-        struct { const char* what; uint32_t rows; uint64_t claimed; } cases[] = {
-            {"claims one row more than the file holds", 500, 501},
-            {"claims one row less than the file holds", 500, 499},
-            {"claims a row count that wraps 2^64", 8, (uint64_t) 0x4000000000000000ull / 3 * 2},
-        };
-        for (const auto& c : cases) {
-            const std::string path = write_format_table(dir, f, c.rows, c.claimed);
-            if (path.empty()) { CHECK(false, "%s: no table was written", f.name); continue; }
-            for (k::PleIo mode : {k::PleIo::Direct, k::PleIo::Mmap}) {
-                k::PleTable t;
-                std::string err;
-                k::PleIoOptions io;
-                io.mode = mode;
-                io.cache_rows = 0;
-                CHECK(!t.open(path, err, io), "%s: a table that %s was accepted", f.name, c.what);
-                CHECK(!err.empty(), "%s: refused without a message (%s)", f.name, c.what);
-                CHECK(!t.is_open(), "%s: left open after refusing (%s)", f.name, c.what);
-            }
-            std::filesystem::remove(path);
+/// A table whose header does not match the file is refused with a message, never read past its end: one row short,
+/// one row long (a single-tensor shard must be filled exactly), and a row count that wraps the 64-bit size; so is a
+/// table of a type this reader has no dequantizer for.
+void bad_tables_are_refused(const std::string& dir) {
+    struct Case { const Format* f; const char* what; uint32_t rows; uint64_t claimed; };
+    std::vector<Case> cases;
+    for (const Format& f : kFormats) {
+        cases.push_back({&f, "claims one row more than the file holds", 500, 501});
+        cases.push_back({&f, "claims one row less than the file holds", 500, 499});
+        cases.push_back({&f, "claims a row count that wraps 2^64", 8, (uint64_t) 0x4000000000000000ull / 3 * 2});
+    }
+    cases.push_back({&kQ5_0, "is of another type", 500, 0});
+    for (const auto& c : cases) {
+        const std::string path = write_format_table(dir, *c.f, c.rows, c.claimed);
+        if (path.empty()) { CHECK(false, "%s: no table was written", c.f->name); continue; }
+        for (k::PleIo mode : kModes) {
+            k::PleTable t;
+            std::string err;
+            k::PleIoOptions io;
+            io.mode = mode;
+            io.cache_rows = 0;
+            CHECK(!t.open(path, err, io), "%s: a table that %s was accepted (%s)", c.f->name, c.what, mode_name(mode));
+            CHECK(!err.empty(), "%s: refused without a message (%s)", c.f->name, c.what);
+            CHECK(!t.is_open(), "%s: left open after refusing (%s)", c.f->name, c.what);
         }
+        std::filesystem::remove(path);
     }
 }
 
-// #2622 (reported by @hotschmoe): gather_batch matched the prefetched tokens by position, so a prefetch of A..F
-// gathered as D,E,F,A,B,C (or A gathered as A,A,A) issued a second ticket for rows that were already in flight.
-// Every case: the bytes equal the mapped reader's, and the requested-row counter says how many rows were re-read.
-void prefetched_keys_are_reused(const std::string& dir) {
-    const k::PleFormatInfo* fmt = nullptr;
-    for (int i = 0; i < k::ple_format_count(); ++i)
-        if (std::string(k::ple_formats()[i].name) == "IQ4_NL") fmt = &k::ple_formats()[i];
-    if (fmt == nullptr) { CHECK(false, "no IQ4_NL format"); return; }
-    const std::string path = write_format_table(dir, *fmt, 4096);
-    if (path.empty()) { CHECK(false, "cannot write the prefetch table"); return; }
-    struct Case { const char* name; std::vector<int> pre, want; uint64_t extra_rows; };
-    std::vector<int> seventeen;
-    for (int i = 0; i < 17; ++i) seventeen.push_back(i);
-    const std::vector<Case> cases = {
-        {"ordered", {0, 1}, {0, 1}, 0},
-        {"permutation", {0, 1, 2, 3, 4, 5}, {3, 4, 5, 0, 1, 2}, 0},
-        {"subset", {0, 1, 2, 3, 4, 5}, {4, 1}, 0},
-        {"duplicates", {0}, {0, 0, 0}, 0},
-        {"duplicate prefetch", {0, 0, 1}, {0, 1}, 0},
-        {"missing key", {0, 1}, {0, 2}, 32},
-        {"extra prefetch", {0, 1, 2}, {1}, 0},
-        {"none", {0}, {}, 0},
-        {"over the window", {0, 1}, seventeen, 17u * k::PLE_N_HEADS},
-        {"window overflow", seventeen, {16}, 0},
-    };
-    const auto keys = [](const std::vector<int>& ids) {
+/// The read-ahead slots (`ahead`, the verify window's tokens): in every I/O mode a slot gives the bytes the mapped
+/// reader gives for its rows and holds exactly those rows until they are collected, a slot still holding rows takes
+/// others, the slots work beside a token in `issue` and are collected in any order, and each row is asked for once.
+void ahead_slots_hold_their_rows(const std::string& dir) {
+    const Format& f = kFormats[0];
+    const std::string path = write_format_table(dir, f, 4096);
+    if (path.empty()) { CHECK(false, "cannot write the read-ahead table"); return; }
+    constexpr int S = k::PleTable::kAheadSlots, kTokens = 32, kReplaced = 20, kIssued = 30;
+    const auto keys = [](int id) {                  // token `id`'s 16 rows
         std::vector<uint32_t> r;
-        for (int id : ids) for (int h = 0; h < k::PLE_N_HEADS; ++h) r.push_back((uint32_t) (id * 32 + h));
+        for (int h = 0; h < k::PLE_N_HEADS; ++h) r.push_back((uint32_t) (id * kTokens + h));
         return r;
     };
     const auto requests = [](const k::PleTable& t) {
@@ -278,75 +241,76 @@ void prefetched_keys_are_reused(const std::string& dir) {
         return std::sscanf(s.c_str(), "ple io: %llu rows", &n) == 1 ? (uint64_t) n : ~0ull;
     };
     const size_t tok = (size_t) k::PLE_N_HEADS * k::PLE_HEAD_DIM;
-    std::vector<std::vector<float>> refs(cases.size());
+    std::vector<float> ref(kTokens * tok);
     {
         k::PleTable mapped;
         k::PleIoOptions mio;
         mio.mode = k::PleIo::Mmap;
         std::string err;
         if (!mapped.open(path, err, mio)) { CHECK(false, "mapped open: %s", err.c_str()); return; }
-        for (size_t c = 0; c < cases.size(); ++c) {
-            const auto r = keys(cases[c].want);
-            refs[c].resize(cases[c].want.size() * tok);
-            CHECK(mapped.gather_batch(r.data(), cases[c].want.size(), refs[c].data(), err), "mapped gather: %s", err.c_str());
-        }
+        for (int id = 0; id < kTokens; ++id) mapped.gather(keys(id).data(), ref.data() + id * tok);
     }
-    for (uint64_t cache : {uint64_t(0), uint64_t(256)}) for (bool worker : {false, true}) {
-        for (size_t c = 0; c < cases.size(); ++c) {
-            k::PleTable t;
-            k::PleIoOptions io;
-            io.mode = k::PleIo::Direct;
-            io.cache_rows = cache;
-            io.io_thread = worker;
-            io.max_inflight = 8;
-            io.keepalive_ms = 0;
-            std::string err;
-            if (!t.open(path, err, io)) { CHECK(false, "direct open: %s", err.c_str()); return; }
-            const auto pr = keys(cases[c].pre), wr = keys(cases[c].want);
-            for (size_t i = 0; i < cases[c].pre.size(); ++i) t.prefetch_rows(pr.data() + i * k::PLE_N_HEADS);
-            const uint64_t rq = requests(t), by = t.bytes_read();
-            const float sentinel = -12345.5f;
-            std::vector<float> out(refs[c].size() + 2, sentinel);
-            const bool ok = t.gather_batch(wr.data(), cases[c].want.size(), out.data() + 1, err);
-            CHECK(ok, "%s (cache %llu worker %d): %s", cases[c].name, (unsigned long long) cache, (int) worker, err.c_str());
-            CHECK(requests(t) - rq == cases[c].extra_rows, "%s (cache %llu worker %d): %llu rows re-requested, want %llu",
-                  cases[c].name, (unsigned long long) cache, (int) worker, (unsigned long long) (requests(t) - rq),
-                  (unsigned long long) cases[c].extra_rows);
-            CHECK(t.bytes_read() - by == cases[c].want.size() * k::PLE_N_HEADS * fmt->row_bytes, "%s: bytes_read", cases[c].name);
-            CHECK(refs[c].empty() || std::memcmp(out.data() + 1, refs[c].data(), refs[c].size() * sizeof(float)) == 0,
-                  "%s (cache %llu worker %d): bytes differ from the mapped reader", cases[c].name, (unsigned long long) cache, (int) worker);
-            CHECK(out.front() == sentinel && out.back() == sentinel, "%s: wrote outside the output", cases[c].name);
+    struct Arm { const char* name; k::PleIo mode; uint64_t cache; bool worker; };
+    const Arm arms[] = {{"direct", k::PleIo::Direct, 0, false}, {"direct, worker", k::PleIo::Direct, 0, true},
+                        {"direct, row cache", k::PleIo::Direct, 256, true}, {"mmap", k::PleIo::Mmap, 0, true},
+                        {"ram", k::PleIo::Ram, 0, true}};
+    const float sentinel = -12345.5f;
+    std::vector<float> out(tok + 2);
+    for (const Arm& a : arms) {
+        k::PleTable t;
+        k::PleIoOptions io;
+        io.mode = a.mode;
+        io.cache_rows = a.cache;
+        io.io_thread = a.worker;
+        io.max_inflight = 8;
+        std::string err;
+        if (!open_table(t, path, io, err)) { CHECK(false, "%s: open: %s", a.name, err.c_str()); continue; }
+        const uint64_t rq = requests(t);
+        for (int s = 0; s < S; ++s) t.ahead(s, keys(s).data());
+        for (int s = 0; s < S; ++s)
+            CHECK(t.ahead_holds(s, keys(s).data()) && !t.ahead_holds(s, keys(s + 1).data()), "%s: slot %d holds other rows", a.name, s);
+        t.ahead(3, keys(kReplaced).data());          // a slot still holding rows takes others
+        CHECK(t.ahead_holds(3, keys(kReplaced).data()) && !t.ahead_holds(3, keys(3).data()), "%s: slot 3 kept its earlier rows", a.name);
+        CHECK(t.issue(keys(kIssued).data()), "%s: issue beside the slots", a.name);
+        std::fill(out.begin(), out.end(), sentinel);
+        CHECK(t.collect(out.data() + 1, err), "%s: collect: %s", a.name, err.c_str());
+        CHECK(std::memcmp(out.data() + 1, ref.data() + kIssued * tok, tok * sizeof(float)) == 0, "%s: the issued token differs", a.name);
+        for (int s = S - 1; s >= 0; --s) {           // collected in reverse order
+            const int id = s == 3 ? kReplaced : s;
+            std::fill(out.begin(), out.end(), sentinel);
+            CHECK(t.ahead_collect(s, out.data() + 1, err), "%s: slot %d: %s", a.name, s, err.c_str());
+            CHECK(std::memcmp(out.data() + 1, ref.data() + id * tok, tok * sizeof(float)) == 0,
+                  "%s: slot %d differs from the mapped reader", a.name, s);
+            CHECK(out.front() == sentinel && out.back() == sentinel, "%s: slot %d wrote outside the output", a.name, s);
+            CHECK(!t.ahead_holds(s, keys(id).data()), "%s: slot %d still holds its rows after the collect", a.name, s);
         }
+        err.clear();
+        CHECK(!t.ahead_collect(0, out.data(), err) && !err.empty(), "%s: an empty slot was collected", a.name);
+        t.ahead(-1, keys(0).data());                 // slots out of range are ignored
+        t.ahead(S, keys(0).data());
+        CHECK(!t.ahead_holds(S, keys(0).data()) && !t.ahead_collect(S, out.data(), err), "%s: slot %d was used", a.name, S);
+        if (a.mode == k::PleIo::Direct)              // S slots, the replaced one's new rows and the issued token
+            CHECK(requests(t) - rq == (uint64_t) (S + 2) * k::PLE_N_HEADS, "%s: %llu rows asked for, want %d", a.name,
+                  (unsigned long long) (requests(t) - rq), (S + 2) * k::PLE_N_HEADS);
     }
-    if (g_fail == 0) std::printf("ple prefetched-key reuse (reordered, duplicated, subset), Direct vs Mmap bytes: OK\n");
+    std::filesystem::remove(path);
 }
 
 void all_formats_round_trip(const std::string& dir) {
-    bf16_widening_is_exact();                      // BF16's own claim: a shift, exact for every pattern
-    bad_sizes_are_refused(dir);
-    prefetched_keys_are_reused(dir);
-    CHECK(k::ple_format_count() > 0, "no formats");
-    for (int i = 0; i < k::ple_format_count(); ++i) {
-        const k::PleFormatInfo& f = k::ple_formats()[i];
-        CHECK((int) f.id == i, "%s: the table is not in PleFormat order", f.name);
-        // NVFP4 and F8_E4M3 are both I8 bytes: the type finds the FP8 entry, `strata.ple.format` picks NVFP4 in PleTable::open
-        const k::PleFormatInfo* want = f.id == k::PleFormat::NVFP4 ? &k::ple_format_info(k::PleFormat::F8_E4M3) : &f;
-        CHECK(k::ple_format_for_type(f.gguf_type) == want, "%s: type lookup", f.name);
-        format_round_trip(dir, f, 2000);
-    }
-    CHECK(k::ple_format_for_type("Q6_K") == nullptr, "Q6_K must not be a PLE format");
+    bad_tables_are_refused(dir);
+    ahead_slots_hold_their_rows(dir);
+    for (const Format& f : kFormats) format_round_trip(dir, f, 2000);
     if (g_fail == 0) {
-        std::printf("ple formats, both readers vs their dequantizers:");
-        for (int i = 0; i < k::ple_format_count(); ++i) std::printf(" %s", k::ple_formats()[i].name);
-        std::printf(": OK\n");
+        std::printf("ple formats");
+        for (const Format& f : kFormats) std::printf(" %s", f.name);
+        std::printf(" (direct, mmap, ram) vs ple_dequant_row, bad tables refused, read-ahead slots: OK\n");
     }
 }
 
-// row_bytes: ng::ROW_BYTES (90, IQ4_NL) is the production default; 110 (#296, OrcaRouter's Q5_0 PLE rows) is
-// run too, through the exact same generic row_bytes path -- nothing here is IQ4_NL-specific, so a second row
-// size run here is the correctness evidence for lifting ngram.cpp's "Q5_0 PLE requires --ple-io mmap" refusal.
+// row_bytes: ng::ROW_BYTES (90, IQ4_NL) and k::PLE_ROW_BYTES_Q8_0 (170), the table's two row sizes, through the
+// reader's one generic row_bytes path.
 int selftest(const std::string& dir, uint32_t rb) {
-    const uint32_t N = 500000;                          // 45 MB: large enough for thousands of distinct pages
+    const uint32_t N = 500000;                          // 45-85 MB: large enough for thousands of distinct pages
     const std::string path = dir + "/ple_reader_selftest_" + std::to_string(rb) + ".bin";
     if (!make_table(path, N, rb)) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return 2; }
     std::mt19937 rng(7);
@@ -539,12 +503,9 @@ int main(int argc, char** argv) {
     bool direct_only = false;
     bool sync_submit = false;
     bool self = false;
-    std::string make_path, make_fmt, ram_path;   // --make-table PATH FORMAT (uses --rows), --ram-time PATH
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--selftest") self = true;
-        else if (a == "--make-table" && i + 2 < argc) { make_path = argv[i + 1]; make_fmt = argv[i + 2]; i += 2; }
-        else if (a == "--ram-time" && i + 1 < argc) ram_path = argv[++i];
         else if (a == "--dir" && i + 1 < argc) dir = argv[++i];
         else if (a == "--gguf" && i + 1 < argc) gguf = argv[++i];
         else if (a == "--rows" && i + 1 < argc) rows = std::atoi(argv[++i]);
@@ -556,39 +517,11 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "usage: ple_reader_test --selftest [--dir D] | --gguf SHARD2 [--rows N] [--tokens F]\n"); return 2; }
     }
     if (self) {
-        // ng::ROW_BYTES (90, IQ4_NL, production default) and 110 (#296, OrcaRouter's Q5_0 PLE rows) through the
-        // same generic row_bytes path -- see the comment on selftest().
-        all_formats_round_trip(dir);               // every format of k::ple_formats(), both readers, vs its dequantizer
+        all_formats_round_trip(dir);               // both formats, every I/O mode, vs ple_dequant_row
         if (g_fail != 0) return 1;
         const int r90 = selftest(dir, ng::ROW_BYTES);
-        const int r110 = selftest(dir, 110);
-        return r90 != 0 ? r90 : r110;
-    }
-    if (!make_path.empty()) {                      // a big synthetic table, for timing --ple-io ram's fault-in
-        for (int i = 0; i < k::ple_format_count(); ++i) {
-            const k::PleFormatInfo& f = k::ple_formats()[i];
-            if (make_fmt != f.name) continue;
-            const std::string tmp = write_format_table(std::filesystem::path(make_path).parent_path().string(), f, (uint32_t) rows);
-            if (tmp.empty()) return 1;
-            std::filesystem::rename(tmp, make_path);
-            std::printf("wrote %s: %s, %d rows, %.2f GiB\n", make_path.c_str(), f.name, rows,
-                        (double) rows * f.row_bytes / (1024.0 * 1024.0 * 1024.0));
-            return 0;
-        }
-        std::fprintf(stderr, "unknown format %s\n", make_fmt.c_str());
-        return 2;
-    }
-    if (!ram_path.empty()) {                       // open mapped and locked (--ple-io ram): the seconds it takes
-        k::PleTable t;
-        k::PleIoOptions io;
-        io.mode = k::PleIo::Mmap;
-        io.lock = true;
-        std::string err;
-        const double t0 = now_us();
-        const bool ok = t.open(ram_path, err, io);
-        std::printf("ram open: %s, format %s, locked %d, %.2f s\n", ok ? "ok" : err.c_str(), ok ? t.format() : "-", ok && t.locked(),
-                    (now_us() - t0) / 1e6);
-        return ok ? 0 : 1;
+        const int r170 = selftest(dir, k::PLE_ROW_BYTES_Q8_0);
+        return r90 != 0 ? r90 : r170;
     }
     if (!gguf.empty()) return real(gguf, rows, tokens, inflight, direct_first, direct_only, sync_submit);
     std::fprintf(stderr, "nothing to do\n");
