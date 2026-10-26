@@ -22,11 +22,10 @@ The verifier runs and commits windows whose rows are segments of different seque
 Static: build, ctest, the new two-sequence parity test, phase-1 digest gate unchanged for solo.
 Runtime: a test program feeds two prompts' tokens as interleaved windows and diffs the token streams against two solo runs. Run it on both cards.
 
-## Risk note from phase 1 (measured on the 4090 + 3090 rig)
+## Risk note from phase 1 (measured 2026-10-26, resolved)
 
-Greedy output on this branch's engine is not invariant to window shape: with identical prompts, runs whose draft
-lengths (hence window row counts and GDN commit boundaries) differed produced different token streams. If this
-holds up, "token-for-token equal to solo" is too strict a gate for multi-sequence windows and needs an agreed
-substitute (chain drift bounds from the digest, or kernel-level bitwise parity of the per-segment path instead).
-Upstream's batch tests demand token equality and pass upstream, so this is likely branch-specific; decide the
-gate with measurement before writing the parity test, not after.
+Greedy output on this branch's engine is not reproducible run to run with default flags: expert-cache adaptation
+re-tiers experts mid-run and the tiers round differently (bisect: adapt default FAIL x2, `--adapt-every 0` PASS x2,
+plus `STRATA_IQ_MT_MIN=1` throughout). Resolved for gating: every parity and digest gate in this plan runs under
+`--adapt-every 0` and `STRATA_IQ_MT_MIN=1`, where the solo path is bitwise stable. The multi-sequence equality gate
+in this phase is therefore meaningful as written, in deterministic mode.
