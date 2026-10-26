@@ -3964,6 +3964,12 @@ int main(int argc, char** argv) {
         std::fflush(stdout);
         std::string line;
         int64_t rounds = 0;
+        // STRATA_WINDOW_DIGEST: a debug-only line per verify window (the solo token-exactness baseline, see the
+        // window loop's emit).  Read once; when unset the hot loop does no extra work and nothing is printed.
+        static const bool window_digest = std::getenv("STRATA_WINDOW_DIGEST") != nullptr;
+        int64_t digest_req = 0;   // serve requests accepted (GEN/GENI): the digest lines' req field
+        int64_t digest_win = 0;   // the current request's window index
+        uint64_t digest_chain = 1469598103934665603ull;   // its accepted-token chain (FNV-1a, restarted per request)
         const int S = o.spec, W = o.max_window();   // the draft layer's windows; with prompt lookup's
         // prompt lookup: the text so far, kept across requests (a conversation's next request shares its prefix)
         strata::spec::SuffixDrafter lookup(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
@@ -4002,6 +4008,11 @@ int main(int argc, char** argv) {
             if (!geni && line.rfind("GEN ", 0) != 0) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;
+            }
+            if (window_digest) {   // a new request: restart the chain at FNV-1a's offset basis and the window index
+                ++digest_req;
+                digest_win = 0;
+                digest_chain = 1469598103934665603ull;
             }
             char* endp = nullptr;
             const long long max_new = std::strtoll(line.c_str() + (geni ? 5 : 4), &endp, 10);
@@ -4541,6 +4552,18 @@ int main(int argc, char** argv) {
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
                 std::fflush(stdout);
+                if (window_digest) {   // one line per completed window, after the commit; the chain folds the window's
+                    for (int i = 0; i <= a; ++i) {   // committed tokens, whose count is exactly the accepted= field
+                        const uint32_t tok = (uint32_t) window[(size_t) i];
+                        const unsigned char b[4] = {(unsigned char) (tok & 0xff), (unsigned char) (tok >> 8),
+                                                    (unsigned char) (tok >> 16), (unsigned char) (tok >> 24)};
+                        digest_chain = fnv1a(b, 4, digest_chain);
+                    }
+                    std::fprintf(stderr, "strata digest: req=%lld win=%lld p=%lld rows=%d accepted=%d chain=%016llx\n",
+                                 (long long) digest_req, (long long) digest_win, (long long) p, T, a + 1,
+                                 (unsigned long long) digest_chain);
+                    ++digest_win;
+                }
                 ++rounds;
                 // the next window's drafts: the lookup's when they are more than the draft layer's chain allows (the
                 // chain stops at its first draft then)
