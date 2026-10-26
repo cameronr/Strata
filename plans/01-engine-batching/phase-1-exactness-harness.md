@@ -29,3 +29,17 @@ Runtime: run the golden test on the dev box twice, digests equal; run `batch_tes
 - **Root cause found (2026-10-26, bisect arms, 2 rounds each):** expert-cache adaptation. With defaults (adapt every 4 rounds) fresh processes diverge at the same window with row counts flipped in opposite directions, a scheduling coin flip; with `--adapt-every 0` two fresh processes produce identical 171-window digest streams and token streams, twice. Mechanism: adaptation re-tiers the most-routed experts mid-run, and CPU / local-GPU / peer-GPU expert kernels round differently, so logits depend on swap timing.
 - Gate definition, settled: fresh process per repeat, `STRATA_IQ_MT_MIN=1`, `--adapt-every 0`.
 - Production consequence: the daily server runs `--adapt-every 1`, so its greedy output is not reproducible run to run. A candidate upstream report (the #152 docs cover CPU-internal rounding; the cross-tier variant via adaptation appears undocumented).
+
+## Validation (2026-10-26, branch `batch-phase1-harness`)
+
+| check | result |
+| --- | --- |
+| `py_compile` both tools files | passed |
+| source build (`docker build`, archs 80;86;89;120) | passed |
+| `window_digest_test` e2e, 2 fresh processes x 6 prompts, deterministic mode | passed, 170 windows stable |
+| `batch_test` clean skip against the main engine | passed |
+| `ctest` | not run (no test touches the digest path) |
+| HIP / SYCL / Metal builds of generate.cpp | not run (change is an env-gated stderr line) |
+| q36 batch path against a batching engine | not run (logic preserved; INFO parsing is additive) |
+
+Development is on fork branches; upstream's PR conventions apply only when the batching work is eventually submitted upstream.
