@@ -55,6 +55,7 @@
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/core/native_dense.hpp"
 #include "strata/program/logits_selection.hpp"
+#include "strata/program/slots.hpp"
 #include "strata/platform/console_quit.hpp"
 
 #include <cuda_runtime.h>
@@ -348,6 +349,10 @@ struct Options {
     bool prefill_profile = false;  ///< GPU time per section of the batched prompt path
     /// Plan v0.3 P8: stay resident and take requests on stdin (see the --serve block in main).
     bool serve = false;
+    /// Batch slots (docs/BATCHING.md): conversations kept open at once. `--batch N` / `--slots N` are the same
+    /// flag. Phase 2 (plans/01-engine-batching): parsed, sized, and fitted at startup; the engine still runs
+    /// one request at a time until the scheduler lands.
+    int parallel = 1;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
     /// --serve prompt cache: checkpoints of the sequence state kept in host memory (0 = every request starts
@@ -1298,6 +1303,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
+        else if (a == "--parallel" || a == "--batch" || a == "--slots") o.parallel = std::atoi(next("--parallel"));
         else if (a == "--main-gpu") o.main_gpu = std::atoi(next("--main-gpu"));
         else if (a == "--second-gpu") o.second_gpu = std::atoi(next("--second-gpu"));
         else if (a == "--second-gpu-gib") o.second_gpu_gib = std::atof(next("--second-gpu-gib"));
@@ -1383,6 +1389,10 @@ int main(int argc, char** argv) {
     if ((o.ple_io != "direct" && o.ple_io != "mmap" && o.ple_io != "ram") || o.ple_row_cache < 0 || o.ple_inflight < 1 ||
         o.ple_inflight > 1024 || !(o.ple_delay_us >= 0)) {
         std::fprintf(stderr, "strata generate: invalid --ple-io/--ple-row-cache/--ple-inflight/--ple-delay-us\n");
+        return 2;
+    }
+    if (o.parallel < 1 || o.parallel > 8) {
+        std::fprintf(stderr, "strata generate: --parallel N takes 1..8 (a verify window holds 8 rows)\n");
         return 2;
     }
     if (o.kv != "fp16" && o.kv != "int8" && o.kv != "k8v4" && o.kv != "q4_0") {
@@ -1747,7 +1757,12 @@ int main(int argc, char** argv) {
         strata::core::ExpertCache::set_vmm(on);
     }
 
-    void* sbuf = nullptr;
+    // The slot registry (phase 2): per-conversation state has an owner, and the solo path is slot 0. Only
+    // slot 0's resources are allocated; `--parallel N` sizes the rest and refuses at startup when they
+    // cannot fit (see the serve block), and the scheduler (phase 4) is what admits into them.
+    strata::program::SlotRegistry registry(o.parallel);
+    strata::program::Slot& solo = registry.solo();
+    void*& sbuf = solo.arena;   // the solo session's device arena, owned by its slot
     if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K)) != cudaSuccess) {
         std::fprintf(stderr, "strata generate: session state allocation failed\n");
         return 1;
@@ -1808,7 +1823,7 @@ int main(int argc, char** argv) {
         }
         strata::kernels::rope_scaling_set(rope_cfg);
     }
-    strata::core::SessionState ss;
+    strata::core::SessionState& ss = solo.ss;   // the solo conversation's state, owned by slot 0
     // **THE ENGINE RAN ON THE LEGACY DEFAULT STREAM, WHICH ON WDDM IS THE SLOW PATH.**  All four session
     // calls - `session_capture`, `session_replay`, `session_token` and `session_loop` - were handed `nullptr`,
     // i.e. stream 0.  `bench/micro/kernel_costs.cu` measures what that costs: EVERY kernel it launches through
@@ -1858,7 +1873,7 @@ int main(int argc, char** argv) {
         ss.block.dump = half_stage;
     }
 
-    strata::core::Doorbell db;
+    strata::core::Doorbell& db = solo.db;   // the solo slot's doorbell (upstream gives every slot its own)
     if (strata::core::doorbell_init(g, K, db) == 0) {
         std::fprintf(stderr, "strata generate: doorbell_init failed\n");
         return 1;
@@ -3928,14 +3943,48 @@ int main(int argc, char** argv) {
                          free_b < ((size_t) 128 << 20)
                              ? " - LOW: requests may stall; lower --max-context or raise --vram-reserve-mib" : "");
         }
-        // the penalty-history buffer: one row per window row (`penalty_rows`), allocated once for the widest window
+        // the penalty-history buffer: one row per window row (`penalty_rows`), allocated once for the widest
+        // window. It belongs to the slot: batch windows apply no penalties (docs/BATCHING.md, limits), and
+        // every slot will carry its own.
         constexpr int kPenaltyWindowCap = 4096;
         constexpr size_t kHistSlots = (size_t) kPenaltyWindowCap * (size_t) strata::kernels::kVerifyMaxT;
-        int32_t* d_hist = nullptr;
-        std::vector<int32_t> hist_stage(kHistSlots, -1);
+        int32_t*& d_hist = solo.d_hist;
+        std::vector<int32_t>& hist_stage = solo.hist_stage;
+        hist_stage.assign(kHistSlots, -1);
         if (cudaMalloc(&d_hist, kHistSlots * sizeof(int32_t)) != cudaSuccess) {
             std::fprintf(stderr, "strata serve: the penalty-history allocation failed\n");
             return 1;
+        }
+        // --parallel N (phase 2: sizing only, nothing is allocated for the extra slots yet): what each added
+        // slot costs and whether it fits, in the spirit of the q36 engine's session line and docs/BATCHING.md's
+        // "what a slot costs". The session arena is the whole per-slot session: K/V at the context, the GDN
+        // recurrence, the PLE history, and per-session scratch. Slots decode without MTP drafts (no draft state;
+        // --batch-mtp is not on this path), and each also takes host memory for its drafter and staging.
+        if (o.parallel > 1) {
+            const uint64_t kv_at_ctx = strata::core::qsa_state_bytes(g, o.max_context, true) +
+                                       (uint64_t)(g.n_qsa_layers() - 1) * strata::core::qsa_state_bytes(g, o.max_context, false);
+            const uint64_t gdn_state = (uint64_t) g.n_gdn_layers() * strata::core::gdn_state_floats(g) * 4;
+            const uint64_t ple_hist = (uint64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM * sizeof(float);
+            const uint64_t sess = strata::core::session_bytes(g, o.max_context, K);
+            const double host_ram = ((double) (size_t) o.max_context + 16.0) * 40.0 +
+                                    (double)(kHistSlots * sizeof(int32_t));   // drafter (hist, prev, index) + staging
+            size_t free_b = 0, total_b = 0;
+            cudaMemGetInfo(&free_b, &total_b);
+            std::fprintf(stderr, "strata serve: --parallel %d: each added slot takes %.2f GiB at a context of %lld "
+                         "(%.2f K/V, %.2f GDN state, %.2f PLE history, %.2f scratch), no draft state (slots decode "
+                         "without MTP drafts), plus ~%.2f GiB of host memory; %.2f GiB of VRAM free with everything "
+                         "loaded\n", o.parallel, (double) sess / (1 << 30), (long long) o.max_context,
+                         (double) kv_at_ctx / (1 << 30), (double) gdn_state / (1 << 30), (double) ple_hist / (1 << 30),
+                         (double) (sess - kv_at_ctx - gdn_state - ple_hist) / (1 << 30), host_ram / (1 << 30),
+                         (double) free_b / (1 << 30));
+            // slack for the copy staging an admission needs beyond the session itself; the reserve the cache
+            // sizing already left is in `free_b`, so this is not q36's full 1 GiB headroom again
+            if (sess * (uint64_t)(o.parallel - 1) + ((size_t) 256 << 20) > free_b) {
+                std::fprintf(stderr, "strata serve: not enough VRAM for %d slots at a context of %lld (%.2f GiB each, "
+                                     "%.2f GiB free): use fewer slots (--parallel) or a shorter --max-context\n",
+                             o.parallel, (long long) o.max_context, (double) sess / (1 << 30), (double) free_b / (1 << 30));
+                return 2;
+            }
         }
         {
             // what the server's Monitor tab shows
@@ -3972,11 +4021,12 @@ int main(int argc, char** argv) {
         uint64_t digest_chain = 1469598103934665603ull;   // its accepted-token chain (FNV-1a, restarted per request)
         const int S = o.spec, W = o.max_window();   // the draft layer's windows; with prompt lookup's
         // prompt lookup: the text so far, kept across requests (a conversation's next request shares its prefix)
-        strata::spec::SuffixDrafter lookup(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
+        solo.lookup.emplace(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
+        strata::spec::SuffixDrafter& lookup = *solo.lookup;   // the solo slot's drafter
         std::vector<int32_t> ids32, ldrafts((size_t) W, 0);
         constexpr int64_t kImStart = 248045;   // <|im_start|>: a new turn begins here
         // The previous request's prompt: where a new one leaves it, it gets a checkpoint (see `fork` below).
-        std::vector<int64_t> prev_prompt;
+        std::vector<int64_t>& prev_prompt = solo.prev_prompt;
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more strata-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt order;
         // each image's rows go to its run of <|image_pad|> tokens, whose M-RoPE positions are mtmd's: t = p,
@@ -4176,6 +4226,15 @@ int main(int argc, char** argv) {
             bool bad = false;
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
             if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
+            // The request is valid: it owns the solo slot. The state machine (slots.hpp) is bookkeeping in
+            // phase 2 - nothing schedules on it yet - and a rejected transition is an engine bug, reported and
+            // carried on from, never a request outcome.
+            const auto advance_solo = [&](strata::program::SlotState to) {
+                if (!registry.advance(solo, to))
+                    std::fprintf(stderr, "strata serve: internal: slot 0 in %s cannot go to %s\n",
+                                 strata::program::slot_state_name(solo.state), strata::program::slot_state_name(to));
+            };
+            advance_solo(strata::program::SlotState::admitted);
             // the elastic K/V: room for this prompt before the prompt cache restores or the prompt path writes a cell
             // (the decode grows it further).  A K/V far longer than the request is given back only after two such
             // requests in a row: an agent's short side requests (a title, a summary) between the turns of a long
@@ -4229,6 +4288,8 @@ int main(int argc, char** argv) {
                 pcache.clear();
                 poisoned = false;
             }
+            // the slot's session state is now bound to this conversation
+            advance_solo(strata::program::SlotState::running);
             const int64_t reuse = pcache.begin(ids, req_imgs);
             tr("request", n, reuse);
             if (!ddump.dir.empty()) {
@@ -4645,6 +4706,10 @@ int main(int argc, char** argv) {
                          prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0, (long long) produced_n, decode_ms,
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0);
             if (pcache.enabled()) std::fprintf(stderr, "strata serve: prompt cache: %s\n", pcache.summary().c_str());
+            // DONE was answered: the slot finished, is free again (it keeps its conversation), and waits empty.
+            advance_solo(strata::program::SlotState::finishing);
+            advance_solo(strata::program::SlotState::freed);
+            advance_solo(strata::program::SlotState::free);
             check_stack_limit(o.main_gpu, o.main_gpu);
             if (o.second_gpu >= 0) check_stack_limit(o.second_gpu, o.main_gpu);
             if (replace) replan();
