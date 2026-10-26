@@ -58,11 +58,24 @@ class Engine:
             env["PATH"] = os.pathsep.join(cfg.get("lib_dirs", []) + [env.get("PATH", "")])
         self.log_path = os.environ.get("BATCH_TEST_LOG") or os.path.join(tempfile.gettempdir(), "batch_test_engine.log")
         self.log = open(self.log_path, "w")
+        self.batch = batch
+        self.ready = False
+        self.info = {}   # the INFO key=value lines before READY; a batching engine announces batch_slots=N there
         self.p = subprocess.Popen([exe, "--serve", *args], cwd=cfg.get("cwd"), stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1, env=env)
         for line in self.p.stdout:
             if line.startswith("READY"):
+                self.ready = True
                 return
+            if line.startswith("INFO"):
+                for kv in line.split()[1:]:
+                    k, sep, v = kv.partition("=")
+                    if sep:
+                        self.info[k] = v
+        # An engine without batch support dies on the unknown --batch before READY; with batch asked for that is a
+        # clean skip (main), not a crash.  Without batch it stays the same hard failure.
+        if batch:
+            return
         raise SystemExit(f"the engine ended before READY - see {self.log_path}")
 
     def send(self, line):
@@ -106,6 +119,13 @@ def main():
     if a.mt_min:
         env["STRATA_IQ_MT_MIN"] = a.mt_min
     eng = Engine(a.exe, cfg, a.batch, env, a.extra.split())
+    if a.batch and not (eng.ready and "batch_slots" in eng.info):
+        print(f"skip: engine has no batch slots (INFO: {eng.info})")
+        try:
+            eng.p.terminate()
+        except OSError:
+            pass
+        return 0
     out = eng.lines()
 
     solo = []
