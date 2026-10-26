@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--max-new", type=int, default=64)
     ap.add_argument("--digest-out", default="")
+    ap.add_argument("--mt-min", default="1",
+                    help="STRATA_IQ_MT_MIN for the engine (1: exact, output independent of the drafting; empty: the default)")
     a = ap.parse_args()
     if not a.exe:
         ap.error("--exe or STRATA_EXE is required")
@@ -45,7 +47,10 @@ def main():
     digest, tokens = [], []
     for r in range(a.repeats):
         os.environ["BATCH_TEST_LOG"] = f"/tmp/ph1-digest-rep{r}.log"   # Engine reads it from the environment
-        eng = BT.Engine(a.exe, cfg, None, {"STRATA_WINDOW_DIGEST": "1"}, [])
+        env = {"STRATA_WINDOW_DIGEST": "1"}
+        if a.mt_min:
+            env["STRATA_IQ_MT_MIN"] = a.mt_min
+        eng = BT.Engine(a.exe, cfg, None, env, [])
         out = eng.lines()
         stream = []
         for ids in prompts:
