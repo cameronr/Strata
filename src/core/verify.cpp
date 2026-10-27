@@ -120,10 +120,14 @@ Verifier::~Verifier() {
     if (arena_) cudaFree(arena_);
     if (xk_dev_) cudaFree(xk_dev_);
     if (stamps_) cudaFree(stamps_);
+    if (seg_qsa_d_) cudaFree(seg_qsa_d_);
+    if (seg_gdn_d_) cudaFree(seg_gdn_d_);
+    if (seg_ple_d_) cudaFree(seg_ple_d_);
+    if (seg_idx_) cudaFree(seg_idx_);
     void* hosts[] = {h_tok_, h_val_, h_step_, h_pos_, h_commit_, h_ple_, h_out_, h_x_, h_ids_, h_w_, h_seq_, h_flag_,
                      h_ymiss_, h_bad_,
                      h_flagA_, h_plan_, h_flagB_, h_pids_, h_pw_, h_pseq_, h_pleflag_, h_rows_, h_res_, h_flag2_,
-                     h_list2_, h_xk_, h_xq1_};
+                     h_list2_, h_xk_, h_xq1_, h_seg_idx_};
     for (void* h : hosts)
         if (h) cudaFreeHost(h);
 }
@@ -235,7 +239,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(2 * T * K * 4, (void**) &h_pw_, (void**) &m_pw_) &&
               mapped(64, (void**) &h_pseq_, (void**) &m_pseq_) &&
               mapped(64, (void**) &h_pleflag_, (void**) &m_pleflag_) &&
-              mapped(T * HC * N * 4, (void**) &h_rows_, (void**) &m_rows_);
+              mapped(T * HC * N * 4, (void**) &h_rows_, (void**) &m_rows_) &&
+              mapped(T * 4, (void**) &h_seg_idx_, (void**) &m_seg_idx_);
     if (!ok) { err = "verify: mapped staging allocation failed"; return false; }
     // A plan block, one per token group: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) |
     // ptr2(cap u64) | start2(cap+1).  The main GPU's hits (`verify_hit_plan`, device) fill counts [groups, entries],
@@ -467,6 +472,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     copy_i32_from_mapped(tok_, m_tok_, T, cs);
     copy_i32_from_mapped(step_, m_step_, (int64_t) T * kStepCount, cs);
     copy_i32_from_mapped(pos_, m_pos_, (int64_t) T * NH, cs);
+    // the batch window's row -> slot index (seg_rows.hpp): every state-touching kernel resolves its row's slot
+    // state through the resident tables, so nothing per-slot bakes into a batch graph.
+    if (batch_rec_) copy_i32_from_mapped(seg_idx_, m_seg_idx_, T, cs);
     if (cudaEventRecord(shfork_, cs) != cudaSuccess || cudaStreamWaitEvent(shs_, shfork_, 0) != cudaSuccess) {
         err = "verify: the residency copy could not fork";
         return false;
@@ -638,7 +646,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                         const NativePleTokensBuffers pb{ple_nkey_ + (size_t) t * NG_HC_DIM, norm_t, ple_gate_ + t * HC,
                                                         ple_gated_ + (size_t) t * NG_HC_DIM, norm_t, Rt(t)};
                         native_ple_postops_tokens(ple_key_ + (size_t) t * NG_HC_DIM, Rt(t), ple_val_ + (size_t) t * N,
-                                                  slots_[brow_[t]]->ple.hist, pw, pb, 1, cs, hist_snap_ + (size_t) t * HS);
+                                                  seg_ple_h_[(size_t) brow_[t]].ple_hist, pw, pb, 1, cs,
+                                                  hist_snap_ + (size_t) t * HS);
                     }
                 }
             } catch (const std::exception& e) {
@@ -709,15 +718,18 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                         (int) HK, (int) HV, te, T == 1 ? one_ : nullptr, cs, tb);
                 } else {
                     // batch: one launch per row against that slot's state, each the one-token window's own call -
-                    // the row's buffers moved to the buffer's front so the kernel runs n_tok 1 at offset 0.
+                    // the row's buffers moved to the buffer's front so the kernel runs n_tok 1 at offset 0. The
+                    // state pointers come from the resident segment tables (seg_rows.hpp), never from the slot
+                    // sessions directly, so no batch graph bakes slot identity.
                     const uint64_t conv_off = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+                    const size_t nsl = slots_.size();
                     for (int t = tb; t < te; ++t)
-                        gdn_conv_l2_multi(slots_[brow_[t]]->gdn_state + (size_t) gi * gdn_floats + conv_off,
+                        gdn_conv_l2_multi(seg_gdn_h_[(size_t) gi * nsl + brow_[t]].gdn_state + conv_off,
                                           qkv + (size_t) t * C, (const float*) wc->data, hb + (size_t) t * C, (int) C,
                                           (int) (2 * HK), EPS, 1, cs, 0, true);
                     if (!wait(bjoin_) || !wait(pjoin_)) return false;
                     for (int t = tb; t < te; ++t)
-                        gdn_step_norm_multi(slots_[brow_[t]]->gdn_state + (size_t) gi * gdn_floats, hb + (size_t) t * C,
+                        gdn_step_norm_multi(seg_gdn_h_[(size_t) gi * nsl + brow_[t]].gdn_state, hb + (size_t) t * C,
                                             (int) C, gate + (size_t) t * HV, beta + (size_t) t * HV, z_ + (size_t) t * ZV,
                                             (const float*) wnm->data, EPS, y_ + (size_t) t * ZV, (int) HK, (int) HV, 1,
                                             one_, cs, 0);
@@ -762,12 +774,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                     st.max_cells, rope_scaling(), side_,
                                                     grp == 0 ? tail_snap_ + (size_t) qi * TS : nullptr);
                 } else {   // batch: each row appends into its slot's indexer; no tail snapshot, the window keeps it
+                    const size_t nsl = slots_.size();
                     for (int t = tb; t < te; ++t) {
-                        const QsaState& rst = slots_[brow_[t]]->qsa_states[qi];
-                        const QsaIndexerBuffers rib{rst.idx_tail, rst.idx_dead, rst.idx_pooled, rst.idx_block_pos};
+                        const strata::kernels::SegRow& sr = seg_qsa_h_[(size_t) qi * nsl + brow_[t]];
+                        const QsaIndexerBuffers rib{sr.idx_tail, sr.idx_dead, sr.idx_pooled, sr.idx_block_pos};
                         native_qsa_indexer_append_multi(idx_raw + (size_t) t * ID,
                                                         step_ + (size_t) t * kStepCount + kStepPos, (int) kStepCount, 1,
-                                                        0, (const float*) wikn->data, EPS, rib, s, rst.max_cells,
+                                                        0, (const float*) wikn->data, EPS, rib, s,
+                                                        st.max_cells,   // uniform across slots (init_slots)
                                                         rope_scaling(), side_, nullptr);
                     }
                 }
@@ -778,14 +792,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     qsa_block_topk(scores_ + (size_t) tb * max_blocks_, step_ + tb * kStepCount, n, max_blocks_, cap_, s,
                                    sel_ + (size_t) tb * cap_, side_);
                 } else {
-                    for (int t = tb; t < te; ++t) {
-                        const QsaState& rst = slots_[brow_[t]]->qsa_states[qi];
-                        qsa_block_scores(rst.idx_pooled, rst.idx_dead, qidx_ + (size_t) t * IQ * ID,
-                                         step_ + (size_t) t * kStepCount, 1, max_blocks_, s,
-                                         scores_ + (size_t) t * max_blocks_, side_, qsa_score_grid_blocks);
+                    qsa_block_scores_seg(seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_,
+                                         qidx_ + (size_t) tb * IQ * ID, step_ + (size_t) tb * kStepCount, te - tb,
+                                         max_blocks_, s, scores_ + (size_t) tb * max_blocks_, side_,
+                                         qsa_score_grid_blocks);
+                    for (int t = tb; t < te; ++t)
                         qsa_block_topk(scores_ + (size_t) t * max_blocks_, step_ + (size_t) t * kStepCount, 1,
                                        max_blocks_, cap_, s, sel_ + (size_t) t * cap_, side_);
-                    }
                 }
                 if (!mark(side_, bjoin_)) return false;
                 quant(xm, N);
@@ -821,13 +834,11 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           attn_scratch_ + (size_t) tb * attn_scratch_floats_, attn32_ + tb * NH * HD, n, cs,
                                           qfull_ + tb * NH * 2 * HD);
                 } else {
-                    for (int t = tb; t < te; ++t) {
-                        const QsaAttnPools pools = qsa_attn_pools(slots_[brow_[t]]->qsa_states[qi]);
-                        qsa_decode_attn_batch(qcur_ + (size_t) t * NH * HD, pools, sel_ + (size_t) t * cap_,
-                                              step_ + (size_t) t * kStepCount, cap_, s,
-                                              attn_scratch_ + (size_t) t * attn_scratch_floats_,
-                                              attn32_ + (size_t) t * NH * HD, 1, cs, qfull_ + (size_t) t * NH * 2 * HD);
-                    }
+                    qsa_decode_attn_seg(seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_, qcur_ + tb * NH * HD,
+                                        sel_ + (size_t) tb * cap_, step_ + (size_t) tb * kStepCount, cap_, s,
+                                        seg_qsa_h_[(size_t) qi * slots_.size() + brow_[tb]].kv,
+                                        attn_scratch_ + (size_t) tb * attn_scratch_floats_, attn32_ + tb * NH * HD,
+                                        te - tb, cs, qfull_ + tb * NH * 2 * HD);
                 }
                 quant(attn32_ + tb * NH * HD, NH * HD);
                 proj(wo, bo_ + tb * N, NH * HD, N, cs);
@@ -1229,6 +1240,9 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
         err = "verify: init_slots wants 1.." + std::to_string(strata::kernels::kVerifyMaxT) + " sessions";
         return false;
     }
+    int n_qsa_pre = 0;
+    for (int64_t l = 0; l < g_->n_layers; ++l)
+        if (is_qsa_layer(*g_, l)) ++n_qsa_pre;
     for (SessionState* x : slots) {
         // every buffer a batch row's kernels size by (cap_, max_blocks_, the attn scratch) comes from `ss_`'s
         // max_cells, and the PLE row collection reads them out of one table - the slots must be cut from the
@@ -1239,8 +1253,78 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
             err = "verify: a slot's session is not carved like the verifier's own (context, k, PLE)";
             return false;
         }
+        // the fused attention launches pick their kernel from the pools' format once per window: a mixed KV
+        // format across slots would make that a per-row decision again (qsa_decode_attn_seg's assumption).
+        for (int qi = 0; qi < n_qsa_pre; ++qi)
+            if (x->qsa_states[qi].kv != ss_->qsa_states[qi].kv) {
+                err = "verify: batch slots must share one KV format";
+                return false;
+            }
     }
     slots_ = slots;
+    // the resident segment tables (seg_rows.hpp): one entry per (stateful layer, slot), derived from the sessions.
+    // Re-registration rebuilds them in place (host-serialized: no window is in flight while init_slots runs).
+    const ModelGeometry& g = *g_;
+    int n_qsa = 0, n_gdn = 0;
+    for (int64_t l = 0; l < g.n_layers; ++l)
+        (is_qsa_layer(g, l) ? n_qsa : n_gdn)++;
+    const size_t n = slots.size();
+    const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
+                                (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+    seg_qsa_h_.assign((size_t) n_qsa * n, {});
+    seg_gdn_h_.assign((size_t) n_gdn * n, {});
+    seg_ple_h_.assign(n, {});
+    for (size_t b = 0; b < n; ++b) {
+        int64_t qi = 0, gi = 0;
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            if (is_qsa_layer(g, l)) {
+                const QsaState& qs = slots[b]->qsa_states[(size_t) qi];
+                strata::kernels::SegRow& e = seg_qsa_h_[(size_t) qi * n + b];
+                e.idx_tail = qs.idx_tail;
+                e.idx_dead = qs.idx_dead;
+                e.idx_pooled = qs.idx_pooled;
+                e.idx_block_pos = qs.idx_block_pos;
+                e.kv = qsa_attn_pools(qs);
+                ++qi;
+            } else {
+                seg_gdn_h_[(size_t) gi * n + b].gdn_state = slots[b]->gdn_state + (size_t) gi * gdn_floats;
+                ++gi;
+            }
+        }
+        seg_ple_h_[b].ple_hist = slots[b]->ple.hist;
+    }
+    const size_t qsa_bytes = seg_qsa_h_.size() * sizeof(strata::kernels::SegRow);
+    const size_t gdn_bytes = seg_gdn_h_.size() * sizeof(strata::kernels::SegRow);
+    const size_t ple_bytes = seg_ple_h_.size() * sizeof(strata::kernels::SegRow);
+    // the device tables live at fixed addresses (batch graphs bake them): a re-registration may rebuild the
+    // contents at the same size, but growing the slots wants a fresh Verifier (a phase-5 scheduler registers
+    // once). The index table is sized by the window cap, not the slot count.
+    if (seg_qsa_d_ == nullptr) {
+        bool tables = cudaMalloc((void**) &seg_qsa_d_, qsa_bytes) == cudaSuccess &&
+                      cudaMalloc((void**) &seg_gdn_d_, gdn_bytes) == cudaSuccess &&
+                      cudaMalloc((void**) &seg_ple_d_, ple_bytes) == cudaSuccess &&
+                      cudaMalloc((void**) &seg_idx_, strata::kernels::kVerifyMaxT * sizeof(int32_t)) == cudaSuccess;
+        if (!tables) {
+            err = "verify: init_slots could not allocate the segment tables";
+            slots_.clear();
+            return false;
+        }
+    } else if (qsa_bytes != seg_qsa_bytes_ || gdn_bytes != seg_gdn_bytes_ || ple_bytes != seg_ple_bytes_) {
+        err = "verify: re-registering slots with a different count wants a fresh Verifier";
+        slots_.clear();
+        return false;
+    }
+    seg_qsa_bytes_ = qsa_bytes;
+    seg_gdn_bytes_ = gdn_bytes;
+    seg_ple_bytes_ = ple_bytes;
+    bool up = cudaMemcpy(seg_qsa_d_, seg_qsa_h_.data(), qsa_bytes, cudaMemcpyHostToDevice) == cudaSuccess &&
+              cudaMemcpy(seg_gdn_d_, seg_gdn_h_.data(), gdn_bytes, cudaMemcpyHostToDevice) == cudaSuccess &&
+              cudaMemcpy(seg_ple_d_, seg_ple_h_.data(), ple_bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+    if (!up) {
+        err = "verify: init_slots could not upload the segment tables";
+        slots_.clear();
+        return false;
+    }
     return true;
 }
 
@@ -1291,6 +1375,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
         h_tok_[t] = tokens[t];
         qsa_step_fill(h_step_ + t * kStepCount, pos[t], s);
         for (int64_t h = 0; h < g.n_head; ++h) h_pos_[t * g.n_head + h] = (int32_t) pos[t];
+        h_seg_idx_[t] = rows[t];   // the window's only segment input: row -> slot (the tables hold the pointers)
     }
     if (ss_->ple.ready()) {   // each row's PLE rows read from its own slot's token window, into the row's slot
         for (int t = 0; t < S; ++t) {

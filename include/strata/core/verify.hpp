@@ -33,6 +33,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/core/split_head.hpp"
+#include "strata/kernels/seg_rows.hpp"
 #include "strata/kernels/sampler.hpp"
 
 #include <cuda_runtime.h>
@@ -259,6 +260,17 @@ private:
     int last_batch_S_ = 0;
     int8_t last_batch_rows_[8] = {};
     int32_t last_batch_tok_[8] = {};
+    // resident segment tables (seg_rows.hpp), built by `init_slots` from the slot sessions: device copies at fixed
+    // addresses and the host mirrors the capture reads. QSA and GDN tables are [layer * n_slots + slot]; the PLE
+    // table is [slot]. Rebuilt on re-registration, serialized with any in-flight window (host-side, none running).
+    std::vector<strata::kernels::SegRow> seg_qsa_h_, seg_gdn_h_, seg_ple_h_;
+    strata::kernels::SegRow *seg_qsa_d_ = nullptr, *seg_gdn_d_ = nullptr, *seg_ple_d_ = nullptr;
+    size_t seg_qsa_bytes_ = 0, seg_gdn_bytes_ = 0, seg_ple_bytes_ = 0;   // allocation sizes (fixed addresses)
+    // the row -> slot index, the only segment data a window contributes: mapped staging, graph-head copy, fixed
+    // device table (the m_step_ pattern; fill before launch is the single-writer invariant)
+    int32_t* h_seg_idx_ = nullptr;
+    int32_t* m_seg_idx_ = nullptr;
+    int32_t* seg_idx_ = nullptr;
 
     int64_t n_vocab_ = 0;
     cudaStream_t cs_ = nullptr;
