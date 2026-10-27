@@ -29,6 +29,20 @@
 
 namespace strata::kernels {
 
+/// The QSA pools a table entry can WRITE (KV append stores codes and scales): the same arrays as `kv`, the same
+/// per-format nulls, with the const off.  `QsaAttnPools` stays the read-only view the attention launchers take.
+struct SegWritePools {
+    int8_t* k_q = nullptr;
+    uint16_t* k_scale = nullptr;
+    int8_t* v_q = nullptr;
+    uint16_t* v_scale = nullptr;
+    uint8_t* k_q4 = nullptr;
+    uint16_t* k_q4s = nullptr;
+    uint8_t* v_q4 = nullptr;
+    uint16_t* v_q4s = nullptr;
+    int32_t* page_table = nullptr;
+};
+
 /// One sequence's state-touching pointers, as one table entry.  Pure data: every size a kernel needs is uniform
 /// across the window's rows.
 struct SegRow {
@@ -39,6 +53,7 @@ struct SegRow {
     float* idx_pooled = nullptr;
     int32_t* idx_block_pos = nullptr;
     QsaAttnPools kv{};               ///< QSA: the K/V pools and page table for attention and KV append
+    SegWritePools wr{};              ///< QSA: the same pools writable, for the KV append
 };
 
 }  // namespace strata::kernels

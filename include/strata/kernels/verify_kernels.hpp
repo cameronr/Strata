@@ -14,6 +14,8 @@
 // Everything that varies per window (token ids, `n_keep`) is read from DEVICE memory so the kernels can be captured.
 #pragma once
 
+#include "strata/kernels/seg_rows.hpp"   // the batch window's segment table (gdn_conv_l2_seg, gdn_step_norm_seg)
+
 #include <cstdint>
 
 namespace strata::kernels {
@@ -40,6 +42,15 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
 /// state.
 void gdn_step_commit(float* state, const float* h, int conv_channels, const float* gate, const float* beta, int h_k,
                      int h_v, int n_tok, const int32_t* n_keep, void* stream);
+/// The batch window's forms (seg_rows.hpp): one token per row, the row's conv history (at gdn_state + conv_off)
+/// and recurrent state resolved through the resident segment table.  Bitwise the per-row gdn_conv_l2_multi and
+/// gdn_step_norm_multi calls with n_tok = 1 and commit (the same __device__ bodies).  `n_keep` names the row's
+/// token (the one-token window's `one_`).
+void gdn_conv_l2_seg(const SegRow* seg, const int32_t* row_slot, const float* qkv, const float* conv_w, float* h,
+                     int channels, int qk_heads, float eps, int n_rows, uint64_t conv_off, void* stream);
+void gdn_step_norm_seg(const SegRow* seg, const int32_t* row_slot, const float* h, int conv_channels,
+                       const float* gate, const float* beta, const float* z, const float* gamma, float eps, float* y,
+                       int h_k, int h_v, int n_rows, const int32_t* n_keep, void* stream);
 /// Spin until *flag >= value (a mapped host flag).  The value is fixed at capture, so several rings can be
 /// outstanding at once (the split verify window keeps two).
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream);

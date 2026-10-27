@@ -318,6 +318,20 @@ if(STRATA_ENABLE_CUDA)
   add_test(NAME qsa_sel_seg_parity COMMAND qsa_sel_seg_parity)
   set_tests_properties(qsa_sel_seg_parity PROPERTIES SKIP_RETURN_CODE 77)
 
+  # the batch window's KV append in one launch over rows (seg_rows.hpp): appended pools byte-identical per row
+  add_executable(qsa_kv_seg_parity src/kernels/qsa_kv_seg_parity.cpp)
+  target_include_directories(qsa_kv_seg_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(qsa_kv_seg_parity PRIVATE strata_kernels CUDA::cudart)
+  add_test(NAME qsa_kv_seg_parity COMMAND qsa_kv_seg_parity)
+  set_tests_properties(qsa_kv_seg_parity PROPERTIES SKIP_RETURN_CODE 77)
+
+  # the batch window's indexer, GDN and PLE stages in one launch over rows (seg_rows.hpp): state byte-identical
+  add_executable(gdn_seg_parity src/kernels/gdn_seg_parity.cpp)
+  target_include_directories(gdn_seg_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(gdn_seg_parity PRIVATE strata_kernels CUDA::cudart)
+  add_test(NAME gdn_seg_parity COMMAND gdn_seg_parity)
+  set_tests_properties(gdn_seg_parity PROPERTIES SKIP_RETURN_CODE 77)
+
   add_executable(iq_parity src/kernels/iq_parity.cpp)
   target_include_directories(iq_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(iq_parity PRIVATE strata_kernels CUDA::cudart)

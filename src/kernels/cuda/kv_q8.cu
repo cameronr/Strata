@@ -1,6 +1,7 @@
 // src/kernels/cuda/kv_q8.cu - see include/strata/kernels/kv_q8.hpp.
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/f16_bits.hpp"
+#include "strata/kernels/seg_rows.hpp"   // the batch window's segment table (kv_append_q8_seg)
 
 #include <cuda_runtime.h>
 
@@ -27,13 +28,14 @@ void validate(const QsaShapes& s, const char* what) {
 }
 
 // One block = one 64-value group of one KV head of K (blockIdx.z = 0) or V (1); 64 threads, one value each.
-__global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q,
-                                    uint16_t* __restrict__ k_scale, uint16_t* __restrict__ v_scale,
-                                    const int32_t* __restrict__ table, const int32_t* __restrict__ step,
-                                    const float* __restrict__ kcur, const float* __restrict__ vcur, int kv_heads,
-                                    int head_dim, int page_size, int step_stride, int sides) {
-    // blockIdx.z = 2 * token + (0 K, 1 V), or the token when one side is appended
-    const int tok = sides == 3 ? blockIdx.z >> 1 : blockIdx.z;
+// The body the per-row kernel and the batch seg kernel share (program identity, seg_rows.hpp): quantize the
+// token's value and store it at the row `table` maps to, in the pools the caller names.
+__device__ __forceinline__ void kv_append_q8_body(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q,
+                                                  uint16_t* __restrict__ k_scale, uint16_t* __restrict__ v_scale,
+                                                  const int32_t* __restrict__ table, const int32_t* __restrict__ step,
+                                                  const float* __restrict__ kcur, const float* __restrict__ vcur,
+                                                  int kv_heads, int head_dim, int page_size, int step_stride,
+                                                  int sides, int tok) {
     step += (size_t) tok * step_stride;
     kcur += (size_t) tok * kv_heads * head_dim;
     vcur += (size_t) tok * kv_heads * head_dim;
@@ -60,6 +62,30 @@ __global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict
     const long long row = (page * kv_heads + h) * page_size + (pos % page_size);
     (is_v ? v_q : k_q)[row * head_dim + g * KV_Q8_GROUP + t] = (int8_t) q;
     if (t == 0) (is_v ? v_scale : k_scale)[row * groups + g] = sbits;
+}
+
+__global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict__ v_q,
+                                    uint16_t* __restrict__ k_scale, uint16_t* __restrict__ v_scale,
+                                    const int32_t* __restrict__ table, const int32_t* __restrict__ step,
+                                    const float* __restrict__ kcur, const float* __restrict__ vcur, int kv_heads,
+                                    int head_dim, int page_size, int step_stride, int sides) {
+    // blockIdx.z = 2 * token + (0 K, 1 V), or the token when one side is appended
+    const int tok = sides == 3 ? blockIdx.z >> 1 : blockIdx.z;
+    kv_append_q8_body(k_q, v_q, k_scale, v_scale, table, step, kcur, vcur, kv_heads, head_dim, page_size, step_stride,
+                      sides, tok);
+}
+
+// One launch over a batch window's rows (one token each): row r's pools and page table come from the resident
+// segment table through the window's row -> slot index. The same body, the same grid; the INT8 arrays of the
+// window's format (init_slots refuses F16 batch slots, so there is a pool to write on every row).
+__global__ void kv_append_q8_seg_kernel(const SegRow* __restrict__ seg, const int32_t* __restrict__ row_slot,
+                                        const int32_t* __restrict__ step, const float* __restrict__ kcur,
+                                        const float* __restrict__ vcur, int kv_heads, int head_dim, int page_size,
+                                        int step_stride, int sides) {
+    const int tok = sides == 3 ? blockIdx.z >> 1 : blockIdx.z;
+    const SegRow sr = seg[row_slot[tok]];
+    kv_append_q8_body(sr.wr.k_q, sr.wr.v_q, sr.wr.k_scale, sr.wr.v_scale, sr.wr.page_table, step, kcur, vcur,
+                      kv_heads, head_dim, page_size, step_stride, sides, tok);
 }
 
 // One thread = 4 consecutive values of one cell and head (as the FP16 gather does with uint2).
@@ -113,6 +139,17 @@ void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v
         k_q, v_q, k_scale, v_scale, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim,
         (int) s.page_size, step_stride, sides);
     check("kv_append_q8 launch");
+}
+
+void kv_append_q8_seg(const SegRow* seg, const int32_t* row_slot, const int32_t* step, int step_stride,
+                      const float* kcur, const float* vcur, int n_rows, const QsaShapes& s, void* stream, int sides) {
+    validate(s, "kv_append_q8_seg");
+    if (n_rows < 1 || sides < 1 || sides > 3) return;
+    const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / KV_Q8_GROUP),
+                    (unsigned) ((sides == 3 ? 2 : 1) * n_rows));
+    kv_append_q8_seg_kernel<<<grid, KV_Q8_GROUP, 0, (cudaStream_t) stream>>>(
+        seg, row_slot, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim, (int) s.page_size, step_stride, sides);
+    check("kv_append_q8_seg launch");
 }
 
 void kv_gather_q8_step(const int8_t* k_q, const int8_t* v_q, const uint16_t* k_scale, const uint16_t* v_scale,

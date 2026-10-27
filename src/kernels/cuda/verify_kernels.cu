@@ -24,11 +24,12 @@ void check(const char* what) {
 }
 
 // `commit` (one token): the history then keeps it - [hist1, hist2, x_0], each thread its channel's, after reading them
-__global__ void __launch_bounds__(S) gdn_conv_l2_multi_kernel(float* hist, const float* __restrict__ qkv,
-                                                              const float* __restrict__ w, float* __restrict__ h,
-                                                              int C, int qk_heads, float eps, int t_begin, bool commit) {
+// The body the per-row kernel and the batch seg kernel share (program identity, seg_rows.hpp): token t of the
+// staged qkv/h rows against the history the caller names.
+__device__ __forceinline__ void gdn_conv_l2_body(float* hist, const float* __restrict__ qkv, const float* __restrict__ w,
+                                                 float* __restrict__ h, int C, int qk_heads, float eps, int t,
+                                                 bool commit) {
     __shared__ float part[S / 32];
-    const int t = t_begin + blockIdx.y;
     const int c = blockIdx.x * S + threadIdx.x;
     // the window of token t: [hist0, hist1, hist2, x_0, ..., x_t], its last four entries
     float win[3];
@@ -54,6 +55,24 @@ __global__ void __launch_bounds__(S) gdn_conv_l2_multi_kernel(float* hist, const
         y *= rsqrtf(ss + eps);
     }
     h[(size_t) t * C + c] = y;
+}
+
+__global__ void __launch_bounds__(S) gdn_conv_l2_multi_kernel(float* hist, const float* __restrict__ qkv,
+                                                              const float* __restrict__ w, float* __restrict__ h,
+                                                              int C, int qk_heads, float eps, int t_begin, bool commit) {
+    gdn_conv_l2_body(hist, qkv, w, h, C, qk_heads, eps, t_begin + (int) blockIdx.y, commit);
+}
+
+// The batch window's form (seg_rows.hpp): one token per row, the row's conv history resolved through the resident
+// segment table at + conv_off.  Same body, commit always (a batch window's token is kept).
+__global__ void __launch_bounds__(S) gdn_conv_l2_seg_kernel(const SegRow* __restrict__ seg,
+                                                            const int32_t* __restrict__ row_slot,
+                                                            const float* __restrict__ qkv, const float* __restrict__ w,
+                                                            float* __restrict__ h, int C, int qk_heads, float eps,
+                                                            uint64_t conv_off) {
+    const int r = blockIdx.y;
+    gdn_conv_l2_body(seg[row_slot[r]].gdn_state + conv_off, qkv + (size_t) r * C, w, h + (size_t) r * C, C, qk_heads,
+                     eps, 0, true);
 }
 
 __global__ void gdn_conv_commit_kernel(float* __restrict__ hist, const float* __restrict__ qkv, int C,
@@ -123,14 +142,12 @@ __global__ void __launch_bounds__(256) gdn_ab_multi_kernel(const float* __restri
 // the unnormalized output (o times rsqrt(S)) of tokens t_out_begin.. into y, normalized by gdn_out_norm_kernel; else
 // the state only (the commit's replay).
 constexpr int GS_COLS = 32;
+// The body the per-row kernel and the batch seg kernel share (program identity, seg_rows.hpp).
 template <bool OUT>
-__global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __restrict__ state,
-                                                                      const float* __restrict__ hbuf, int C,
-                                                                      const float* __restrict__ gate,
-                                                                      const float* __restrict__ beta,
-                                                                      float* __restrict__ y, int h_k, int h_v, int T,
-                                                                      const int32_t* __restrict__ n_keep,
-                                                                      int t_out_begin) {
+__device__ __forceinline__ void gdn_step_split_body(float* __restrict__ state, const float* __restrict__ hbuf, int C,
+                                                    const float* __restrict__ gate, const float* __restrict__ beta,
+                                                    float* __restrict__ y, int h_k, int h_v, int T,
+                                                    const int32_t* __restrict__ n_keep, int t_out_begin) {
     __shared__ float sk[S], sq[S];
     __shared__ float red[RG][GS_COLS];
     const int head = blockIdx.x;
@@ -183,6 +200,31 @@ __global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __r
 #pragma unroll
         for (int r = 0; r < RPG; ++r) base[r * row_stride] = s[r];
     }
+}
+
+template <bool OUT>
+__global__ void __launch_bounds__(GS_COLS * RG) gdn_step_split_kernel(float* __restrict__ state,
+                                                                      const float* __restrict__ hbuf, int C,
+                                                                      const float* __restrict__ gate,
+                                                                      const float* __restrict__ beta,
+                                                                      float* __restrict__ y, int h_k, int h_v, int T,
+                                                                      const int32_t* __restrict__ n_keep,
+                                                                      int t_out_begin) {
+    gdn_step_split_body<OUT>(state, hbuf, C, gate, beta, y, h_k, h_v, T, n_keep, t_out_begin);
+}
+
+// The batch window's form (seg_rows.hpp): one token per row (n_keep names it, as in the one-token window), the
+// row's state resolved through the resident segment table; the staged h/gate/beta/y rows move to the front.
+template <bool OUT>
+__global__ void __launch_bounds__(GS_COLS * RG)
+gdn_step_split_seg_kernel(const SegRow* __restrict__ seg, const int32_t* __restrict__ row_slot,
+                          const float* __restrict__ hbuf, int C, const float* __restrict__ gate,
+                          const float* __restrict__ beta, float* __restrict__ y, int h_k, int h_v,
+                          const int32_t* __restrict__ n_keep) {
+    const int r = blockIdx.z;
+    gdn_step_split_body<OUT>(seg[row_slot[r]].gdn_state, hbuf + (size_t) r * C, C, gate + (size_t) r * h_v,
+                             beta + (size_t) r * h_v, y ? y + (size_t) r * (S * h_v) : nullptr, h_k, h_v, 1, n_keep,
+                             0);
 }
 
 // y = o * rsqrt(mean(o^2) + eps) * gamma * sigmoid(z) per head and output token, the squares summed by the same warps
@@ -682,6 +724,36 @@ void gdn_step_norm_multi(float* state, const float* h, int conv_channels, const 
         gdn_out_norm_kernel<<<dim3((unsigned) h_v, (unsigned) (n_tok - t_out_begin)), S, 0, (cudaStream_t) stream>>>(
             z, gamma, eps, y, h_v, n_tok, n_keep, t_out_begin);
     check("gdn_step_norm_multi");
+}
+
+void gdn_conv_l2_seg(const SegRow* seg, const int32_t* row_slot, const float* qkv, const float* conv_w, float* h,
+                     int channels, int qk_heads, float eps, int n_rows, uint64_t conv_off, void* stream) {
+    if (!seg || !row_slot || !qkv || !conv_w || !h || channels % S != 0 || n_rows < 1 || n_rows > 65535) {
+        std::fprintf(stderr, "gdn_conv_l2_seg: invalid arguments\n");
+        std::exit(1);
+    }
+    gdn_conv_l2_seg_kernel<<<dim3((unsigned) (channels / S), (unsigned) n_rows), S, 0, (cudaStream_t) stream>>>(
+        seg, row_slot, qkv, conv_w, h, channels, qk_heads, eps, conv_off);
+    check("gdn_conv_l2_seg");
+}
+
+void gdn_step_norm_seg(const SegRow* seg, const int32_t* row_slot, const float* h, int conv_channels,
+                       const float* gate, const float* beta, const float* z, const float* gamma, float eps, float* y,
+                       int h_k, int h_v, int n_rows, const int32_t* n_keep, void* stream) {
+    if (!seg || !row_slot || !h || !gate || !beta || !z || !gamma || !y || h_k <= 0 || h_v % h_k || n_rows < 1 ||
+        n_rows > 65535 || !n_keep) {
+        std::fprintf(stderr, "gdn_step_norm_seg: invalid arguments\n");
+        std::exit(1);
+    }
+    // n_keep names the row's one token (the one-token window's `one_`), so the state write-back fires. The out
+    // norm indexes y and z by token and a row IS its token: launched with n_keep off and T = rows, the same
+    // kernel with the keep-guard never firing.
+    gdn_step_split_seg_kernel<true><<<dim3((unsigned) h_v, S / GS_COLS, (unsigned) n_rows), dim3(GS_COLS, RG), 0,
+                                       (cudaStream_t) stream>>>(seg, row_slot, h, conv_channels, gate, beta, y, h_k,
+                                                                 h_v, n_keep);
+    gdn_out_norm_kernel<<<dim3((unsigned) h_v, (unsigned) n_rows), S, 0, (cudaStream_t) stream>>>(
+        z, gamma, eps, y, h_v, n_rows, nullptr, 0);
+    check("gdn_step_norm_seg");
 }
 
 void gdn_step_commit(float* state, const float* h, int conv_channels, const float* gate, const float* beta, int h_k,

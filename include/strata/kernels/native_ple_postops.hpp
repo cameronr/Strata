@@ -1,5 +1,6 @@
 #pragma once
 #include "strata/kernels/ple.hpp"
+#include "strata/kernels/seg_rows.hpp"   // the batch window's segment table (native_ple_postops_tokens_seg)
 
 namespace strata::kernels {
 
@@ -43,5 +44,11 @@ struct NativePleTokensBuffers {
 void native_ple_postops_tokens(const float* projected_key, const float* hidden, const float* value,
                                float* history, const PleWeights& weights, const NativePleTokensBuffers& buffers,
                                int n_tok, void* stream, float* snaps = nullptr);
+// The batch window's form (seg_rows.hpp): one token per row, row t's history (and snapshot row) resolved through
+// the resident segment table.  Bitwise n_rows per-row native_ple_postops_tokens calls with n_tok = 1.
+void native_ple_postops_tokens_seg(const float* projected_key, const float* hidden, const float* value,
+                                   const SegRow* seg, const int32_t* row_slot, const PleWeights& weights,
+                                   const NativePleTokensBuffers& buffers, int n_rows, void* stream,
+                                   float* snaps = nullptr);
 
 } // namespace strata::kernels

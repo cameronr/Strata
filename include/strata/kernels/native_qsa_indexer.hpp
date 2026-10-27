@@ -2,6 +2,7 @@
 
 #include "strata/kernels/rope_scaling.hpp"
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/seg_rows.hpp"
 
 namespace strata::kernels {
 
@@ -48,5 +49,13 @@ void native_qsa_indexer_append_multi(const float* raw, const int32_t* relative_p
                                      const QsaIndexerBuffers& buffers, const QsaShapes& shapes,
                                      int64_t max_cells, const RopeScaling& scaling, void* stream,
                                      float* tail_snap = nullptr);
+// The batch window's form (seg_rows.hpp): one token per row, the row's indexer buffers resolved through the
+// resident segment table (`seg[row_slot[r]]`).  Bitwise n_rows calls of native_qsa_indexer_append_multi with
+// n_tok = 1 (the same append_one body, one block per row).  No tail snapshot: batch windows keep their own.
+void native_qsa_indexer_append_multi_seg(const SegRow* seg, const int32_t* row_slot, const float* raw,
+                                         const int32_t* relative_pos_device, int pos_stride, int n_rows,
+                                         int32_t pos_base, const float* gamma, float epsilon,
+                                         const QsaShapes& shapes, int64_t max_cells, const RopeScaling& scaling,
+                                         void* stream);
 
 } // namespace strata::kernels

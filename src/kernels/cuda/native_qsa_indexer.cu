@@ -117,6 +117,21 @@ __global__ void append(const float* __restrict__ raw, const int32_t* __restrict_
         __syncthreads();   // this token's tail and pooled writes before the next token reads them
     }
 }
+// The batch window's form (seg_rows.hpp): one token per row, the row's indexer buffers resolved through the
+// resident segment table.  One block per row - the per-row calls launched this kernel with n_tok = 1, one block
+// each - and the same append_one body, so the appended bytes are program-identical.  No tail snapshot: it is the
+// solo backtracking machinery, and a batch window keeps its own (verify.cpp).
+template <int MODE>
+__global__ void append_seg(const SegRow* __restrict__ seg, const int32_t* __restrict__ row_slot,
+                           const float* __restrict__ raw, const int32_t* __restrict__ pos_dev, int pos_stride,
+                           int pos_base, const float* __restrict__ gamma, float epsilon, int max_cells,
+                           float theta_scale, const int32_t* __restrict__ mtab, const RopeKernelArgs k,
+                           const RopeTab rt) {
+    const SegRow sr = seg[row_slot[blockIdx.x]];
+    append_one<MODE>(raw + std::size_t(blockIdx.x) * D, pos_dev[std::size_t(blockIdx.x) * pos_stride], pos_base,
+                     gamma, epsilon, sr.idx_tail, sr.idx_dead, sr.idx_pooled, sr.idx_block_pos, max_cells,
+                     theta_scale, mtab, k, rt);
+}
 // ---- C-2: the batched append.  The pooled key of a completed block b (its last cell pos = 4b+3), computed with
 // the single append's arithmetic: keys rounded through F16, summed tail[0]+tail[1]+tail[2]+incoming in that order,
 // the RMS norm, gamma, the rotation at pos_base + 4b.  `k(j)` is the key of the block's cell j: a row of this batch
@@ -270,6 +285,42 @@ void native_qsa_indexer_append_multi(const float* raw, const int32_t* relative_p
     else
         append<ROPE_PLAIN><<<1,THREADS,0,st>>>(raw,relative_pos_device,pos_stride,n_tok,pos_base,gamma,
             epsilon,b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,mrope_table(),tail_snap,k,rt);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+}
+void native_qsa_indexer_append_multi_seg(const SegRow* seg, const int32_t* row_slot, const float* raw,
+                                         const int32_t* relative_pos_device, int pos_stride, int n_rows,
+                                         int32_t pos_base, const float* gamma, float epsilon, const QsaShapes& s,
+                                         int64_t max_cells, const RopeScaling& scaling, void* stream) {
+    // the same contract as native_qsa_indexer_append_multi with n_tok = 1 per row; the per-row buffers are not
+    // span-checked here (they live in the segment table, built by Verifier::init_slots from one carved session)
+    if (n_rows < 1 || pos_stride < 1 || !seg || !row_slot)
+        throw std::invalid_argument("native QSA indexer (segment table): rows with a positive position stride");
+    if (!stream || s.idx_dim != D || s.idx_block != R || s.n_rot != ROT ||
+        max_cells < 1 || max_cells > INT32_MAX || pos_base < 0 || pos_base % R ||
+        int64_t(pos_base) + max_cells > INT32_MAX || !std::isfinite(epsilon) || epsilon <= 0.0f ||
+        rope_scaling_invalid(scaling) != nullptr)
+        throw std::invalid_argument("native QSA indexer (segment table) requires fixed geometry, aligned position base, positive capacity/epsilon, valid frequency and explicit stream");
+    validate(Span{raw, std::size_t(n_rows) * D * 4});
+    validate(Span{relative_pos_device, (std::size_t(n_rows - 1) * pos_stride + 1) * 4});
+    validate(Span{gamma, D * 4});
+    const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
+    const RopeKernelArgs k = scaling.kernel_args(ROT);
+    RopeTab rt;
+    const int mode = rope_mode(scaling, rt);
+    const cudaStream_t st = static_cast<cudaStream_t>(stream);
+    if (mode == ROPE_TABLE)
+        append_seg<ROPE_TABLE><<<n_rows, THREADS, 0, st>>>(seg, row_slot, raw, relative_pos_device, pos_stride,
+                                                           pos_base, gamma, epsilon, int(max_cells), theta_scale,
+                                                           mrope_table(), k, rt);
+    else if (mode == ROPE_SCALED)
+        append_seg<ROPE_SCALED><<<n_rows, THREADS, 0, st>>>(seg, row_slot, raw, relative_pos_device, pos_stride,
+                                                            pos_base, gamma, epsilon, int(max_cells), theta_scale,
+                                                            mrope_table(), k, rt);
+    else
+        append_seg<ROPE_PLAIN><<<n_rows, THREADS, 0, st>>>(seg, row_slot, raw, relative_pos_device, pos_stride,
+                                                           pos_base, gamma, epsilon, int(max_cells), theta_scale,
+                                                           mrope_table(), k, rt);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

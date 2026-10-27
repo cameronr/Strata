@@ -13,6 +13,7 @@
 #pragma once
 
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/seg_rows.hpp"   // the batch window's segment table (kv_append_q8_seg)
 
 #include <cstdint>
 
@@ -34,6 +35,12 @@ void kv_append_q8_step(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_
 void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale, const int32_t* page_table,
                         const int32_t* step, int step_stride, const float* kcur, const float* vcur, int n_tok,
                         const QsaShapes& s, void* stream, int sides = 3);
+
+/// `kv_append_q8_steps` over a batch window's rows (one token per row, seg_rows.hpp): row r's pools and page table
+/// come from `seg[row_slot[r]]`.  Bitwise the per-row appends (the same __device__ body, the same grid).
+void kv_append_q8_seg(const SegRow* seg, const int32_t* row_slot, const int32_t* step, int step_stride,
+                      const float* kcur, const float* vcur, int n_rows, const QsaShapes& s, void* stream,
+                      int sides = 3);
 
 /// Gather step[kStepWidth] cells named by `ids` into FP16 scratch `[id][kv_head][head_dim]`; the grid is sized by
 /// `max_ids` (capacity), the kernel reads the real count from `step`.

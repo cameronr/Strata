@@ -14,6 +14,7 @@
 #pragma once
 
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/seg_rows.hpp"   // the batch window's segment table (kv_append_q4_seg)
 
 #include <cstdint>
 
@@ -32,6 +33,12 @@ inline uint64_t kv_q4_bytes_per_side(const QsaShapes& s) {
 void kv_append_q4_steps(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* v_q4s, const int32_t* page_table,
                         const int32_t* step, int step_stride, const float* kcur, const float* vcur, int n_tok,
                         const QsaShapes& s, void* stream);
+
+/// `kv_append_q4_steps` over a batch window's rows (one token per row, seg_rows.hpp): row r's pools and page table
+/// come from `seg[row_slot[r]]`, and `sides` (2 K and V, 1 the window's format's 4-bit side alone) sizes the grid.
+/// Bitwise the per-row appends (the same __device__ body, the same grid).
+void kv_append_q4_seg(const SegRow* seg, const int32_t* row_slot, const int32_t* step, int step_stride,
+                      const float* kcur, const float* vcur, int n_rows, const QsaShapes& s, void* stream, int sides);
 
 /// The prompt path's form: T cells from position pos0, token t's K and V rows at K/V + t * ld.
 void kv_append_q4_rows(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* v_q4s, const int32_t* page_table,

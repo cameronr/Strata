@@ -29,15 +29,16 @@ void validate(const QsaShapes& s, const char* what) {
 
 // One warp per (token, KV head, side): the head's 256 values (lane l: values l + 32 i) rotated, then block b - register
 // b of every lane - quantized: its value of largest magnitude (on a tie the larger value, so every lane agrees) over
-// -8 is the scale.  STEP: the position from the token's step record, else pos0 + token.
+// -8 is the scale.  STEP: the position from the token's step record, else pos0 + token.  The body the per-row kernel
+// and the batch seg kernel share (program identity, seg_rows.hpp); the side follows the K pool's nullness, which the
+// segment rows carry per format exactly as the QsaStates do.
 template <bool STEP>
-__global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ k_q4, uint16_t* __restrict__ k_q4s,
-                                                          uint8_t* __restrict__ v_q4, uint16_t* __restrict__ v_q4s,
-                                                          const int32_t* __restrict__ table,
-                                                          const int32_t* __restrict__ step, int step_stride,
-                                                          int64_t pos0, const float* __restrict__ K,
-                                                          const float* __restrict__ V, int64_t ld, int kv_heads,
-                                                          int page_size) {
+__device__ __forceinline__ void kv_append_q4_body(uint8_t* __restrict__ k_q4, uint16_t* __restrict__ k_q4s,
+                                                  uint8_t* __restrict__ v_q4, uint16_t* __restrict__ v_q4s,
+                                                  const int32_t* __restrict__ table, const int32_t* __restrict__ step,
+                                                  int step_stride, int64_t pos0, const float* __restrict__ K,
+                                                  const float* __restrict__ V, int64_t ld, int kv_heads,
+                                                  int page_size) {
     const int t = blockIdx.x, h = blockIdx.y, lane = threadIdx.x;
     const bool is_v = blockIdx.z + (k_q4 == nullptr ? 1 : 0) == 1;
     const float* x = (is_v ? V : K) + (size_t) t * ld + (size_t) h * 256;
@@ -67,6 +68,29 @@ __global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ 
     }
 }
 
+template <bool STEP>
+__global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ k_q4, uint16_t* __restrict__ k_q4s,
+                                                          uint8_t* __restrict__ v_q4, uint16_t* __restrict__ v_q4s,
+                                                          const int32_t* __restrict__ table,
+                                                          const int32_t* __restrict__ step, int step_stride,
+                                                          int64_t pos0, const float* __restrict__ K,
+                                                          const float* __restrict__ V, int64_t ld, int kv_heads,
+                                                          int page_size) {
+    kv_append_q4_body<STEP>(k_q4, k_q4s, v_q4, v_q4s, table, step, step_stride, pos0, K, V, ld, kv_heads, page_size);
+}
+
+// One launch over a batch window's rows (one token each, STEP positions): row r's pools and page table come from
+// the resident segment table through the window's row -> slot index.  The same body, the same grid.
+__global__ void __launch_bounds__(32) kv_append_q4_seg_kernel(const SegRow* __restrict__ seg,
+                                                              const int32_t* __restrict__ row_slot,
+                                                              const int32_t* __restrict__ step, int step_stride,
+                                                              const float* __restrict__ K, const float* __restrict__ V,
+                                                              int64_t ld, int kv_heads, int page_size) {
+    const SegRow sr = seg[row_slot[blockIdx.x]];
+    kv_append_q4_body<true>(sr.wr.k_q4, sr.wr.k_q4s, sr.wr.v_q4, sr.wr.v_q4s, sr.wr.page_table, step, step_stride, 0,
+                            K, V, ld, kv_heads, page_size);
+}
+
 __global__ void __launch_bounds__(128) fwht256_rows_kernel(float* __restrict__ x, int64_t n_rows) {
     const int64_t r = (int64_t) blockIdx.x * 4 + (threadIdx.x >> 5);
     if (r >= n_rows) return;
@@ -93,6 +117,17 @@ void kv_append_q4_steps(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t*
         k_q4, k_q4s, v_q4, v_q4s, page_table, step, step_stride, 0, kcur, vcur, s.n_head_kv * s.head_dim,
         (int) s.n_head_kv, (int) s.page_size);
     check("kv_append_q4_steps launch");
+}
+
+void kv_append_q4_seg(const SegRow* seg, const int32_t* row_slot, const int32_t* step, int step_stride,
+                      const float* kcur, const float* vcur, int n_rows, const QsaShapes& s, void* stream, int sides) {
+    validate(s, "kv_append_q4_seg");
+    if (n_rows < 1 || sides < 1 || sides > 2) return;
+    const dim3 grid((unsigned) n_rows, (unsigned) s.n_head_kv, (unsigned) sides);
+    kv_append_q4_seg_kernel<<<grid, 32, 0, (cudaStream_t) stream>>>(seg, row_slot, step, step_stride, kcur, vcur,
+                                                                    s.n_head_kv * s.head_dim, (int) s.n_head_kv,
+                                                                    (int) s.page_size);
+    check("kv_append_q4_seg launch");
 }
 
 void kv_append_q4_rows(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* v_q4s, const int32_t* page_table,

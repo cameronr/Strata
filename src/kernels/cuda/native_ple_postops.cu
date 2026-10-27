@@ -92,13 +92,14 @@ __global__ void broadcast_tokens_kernel(const float* value, const float* gate, f
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < size_t(n_tok) * D) gated[i] = __fmul_rn(value[i / D * N + i % N], gate[i / N]);
 }
-__global__ void conv_residual_tokens_kernel(const float* history, const float* normalized,
-                                           const uint16_t* weights, const float* hidden,
-                                           const float* gated, float* result, int n_tok) {
-    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= size_t(n_tok) * D) return;
-    const int t = int(i / D), c = int(i % D);
+// The body the per-row kernel and the batch seg kernel share (program identity, seg_rows.hpp); the history the
+// caller names, element index i = t * D + c.
+__device__ __forceinline__ void conv_residual_body(const float* history, const float* normalized,
+                                                   const uint16_t* weights, const float* hidden, const float* gated,
+                                                   float* result, size_t i) {
+    const int c = int(i % D);
     float sum = 0;
+    const int t = int(i / D);
 #pragma unroll
     for (int k = 0; k < 4; ++k) {
         const int j = t - HISTORY + 3 * k;
@@ -110,9 +111,30 @@ __global__ void conv_residual_tokens_kernel(const float* history, const float* n
     const float activation = sum / (1.0f + expf(-sum));
     result[i] = __fadd_rn(hidden[i], __fadd_rn(gated[i], activation));
 }
+__global__ void conv_residual_tokens_kernel(const float* history, const float* normalized,
+                                           const uint16_t* weights, const float* hidden,
+                                           const float* gated, float* result, int n_tok) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(n_tok) * D) return;
+    conv_residual_body(history, normalized, weights, hidden, gated, result, i);
+}
+// The batch window's form (seg_rows.hpp): row t's history comes from the resident segment table; one token per
+// row, so every row is its OWN chunk start (history taps at 3k, not shifted by the row) - the per-row call's
+// pattern: the row's staged bases moved to the front and the body runs at the local index.
+__global__ void conv_residual_tokens_seg_kernel(const SegRow* __restrict__ seg, const int32_t* __restrict__ row_slot,
+                                                const float* __restrict__ normalized, const uint16_t* __restrict__ weights,
+                                                const float* __restrict__ hidden, const float* __restrict__ gated,
+                                                float* __restrict__ result, int n_tok) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(n_tok) * D) return;
+    const size_t r = i / D;
+    conv_residual_body(seg[row_slot[r]].ple_hist, normalized + r * D, weights, hidden + r * D, gated + r * D,
+                       result + r * D, i % D);
+}
 // The history after the chunk: its last nine normalized rows, older rows moved up when the chunk is shorter; with
-// `snaps`, the history after each of its tokens too.
-__global__ void history_tokens_kernel(float* history, const float* normalized, int n_tok, float* snaps) {
+// `snaps`, the history after each of its tokens too.  The body the per-row kernel and the batch seg kernel share.
+__device__ __forceinline__ void history_tokens_body(float* history, const float* normalized, int n_tok,
+                                                    float* snaps) {
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= D) return;
     float old[HISTORY];
@@ -131,6 +153,16 @@ __global__ void history_tokens_kernel(float* history, const float* normalized, i
         const int j = n_tok - HISTORY + r;
         history[c * HISTORY + r] = j >= 0 ? normalized[size_t(j) * D + c] : old[r + n_tok];
     }
+}
+__global__ void history_tokens_kernel(float* history, const float* normalized, int n_tok, float* snaps) {
+    history_tokens_body(history, normalized, n_tok, snaps);
+}
+// The batch window's form: row t advances its own history and fills its own snapshot row (one token per row).
+__global__ void history_tokens_seg_kernel(const SegRow* __restrict__ seg, const int32_t* __restrict__ row_slot,
+                                          const float* __restrict__ normalized, float* __restrict__ snaps) {
+    const int r = blockIdx.y;
+    history_tokens_body(seg[row_slot[r]].ple_hist, normalized + (size_t) r * D, 1,
+                        snaps != nullptr ? snaps + (size_t) r * HISTORY * D : nullptr);
 }
 struct Span { const void* p; size_t bytes; size_t alignment; };
 bool overlaps(Span a, Span b) {
@@ -217,6 +249,50 @@ void native_ple_postops_tokens(const float* projected_key, const float* hidden, 
     native_gr_rms_norm_weighted_repeat(b.gated,w.norm_conv,b.normalized,N,R,H,NG_RMS_EPS,stream);
     conv_residual_tokens_kernel<<<blocks,256,0,st>>>(history,b.normalized,w.conv1d_f16,hidden,b.gated,b.result,n_tok);
     history_tokens_kernel<<<D/256,256,0,st>>>(history,b.normalized,n_tok,snaps);
+    launch_check();
+}
+
+void native_ple_postops_tokens_seg(const float* projected_key, const float* hidden, const float* value,
+                                   const SegRow* seg, const int32_t* row_slot, const PleWeights& w,
+                                   const NativePleTokensBuffers& b, int n_rows, void* stream, float* snaps) {
+    // the same sequence as native_ple_postops_tokens over the rows; the history (and its snapshots) resolve per
+    // row through the resident segment table, so the per-row history spans are not span-checked here
+    if (!stream || n_rows < 1 || !seg || !row_slot)
+        throw std::invalid_argument("native PLE postops (segment table): rows, stream, table and index");
+    const size_t rows = size_t(n_rows) * D * 4;
+    const Span inputs[] = {{projected_key,rows,4}, {hidden,rows,4}, {value,size_t(n_rows)*N*4,4},
+        {w.norm_key,D*4,4}, {w.norm_query,D*4,4}, {w.norm_conv,D*4,4}, {w.conv1d_f16,4*D*2,2}};
+    const Span outputs[] = {{b.key,rows,4}, {b.query,rows,4}, {b.gate,size_t(n_rows)*H*4,4},
+        {b.gated,rows,4}, {b.normalized,rows,4}, {b.result,rows,4}};
+    for (const auto& span : inputs) validate(span);
+    for (const auto& span : outputs) validate(span);
+    for (size_t i = 0; i < 6; ++i) {
+        for (size_t j = 0; j < 7; ++j)
+            if (!(i == 5 && j == 1 && b.result == hidden) && overlaps(outputs[i], inputs[j]))
+                throw std::invalid_argument("native PLE postops (segment table) output overlaps an input or a weight");
+        for (size_t j = i + 1; j < 6; ++j)
+            if (!(i == 1 && j == 4 && b.query == b.normalized) && overlaps(outputs[i], outputs[j]))
+                throw std::invalid_argument("native PLE postops (segment table) writable spans overlap");
+    }
+    if (snaps != nullptr) {
+        const Span s{snaps, size_t(n_rows) * HISTORY * D * 4, 4};
+        validate(s);
+        for (const auto& span : inputs)
+            if (overlaps(s, span)) throw std::invalid_argument("native PLE postops: the snapshots overlap an input");
+        for (const auto& span : outputs)
+            if (overlaps(s, span)) throw std::invalid_argument("native PLE postops: the snapshots overlap an output");
+    }
+    const int R = H * n_rows;
+    const unsigned blocks = unsigned((size_t(n_rows) * D + 255) / 256);
+    auto st = static_cast<cudaStream_t>(stream);
+    native_gr_rms_norm_weighted_repeat(projected_key,w.norm_key,b.key,N,R,H,NG_RMS_EPS,stream);
+    native_gr_rms_norm_weighted_repeat(hidden,w.norm_query,b.query,N,R,H,NG_RMS_EPS,stream);
+    gate_kernel<<<R,512,0,st>>>(b.key,b.query,b.gate,1.0f / std::sqrt(float(N)));
+    broadcast_tokens_kernel<<<blocks,256,0,st>>>(value,b.gate,b.gated,n_rows);
+    launch_check();
+    native_gr_rms_norm_weighted_repeat(b.gated,w.norm_conv,b.normalized,N,R,H,NG_RMS_EPS,stream);
+    conv_residual_tokens_seg_kernel<<<blocks,256,0,st>>>(seg,row_slot,b.normalized,w.conv1d_f16,hidden,b.gated,b.result,n_rows);
+    history_tokens_seg_kernel<<<dim3(D/256, unsigned(n_rows)),256,0,st>>>(seg,row_slot,b.normalized,snaps);
     launch_check();
 }
 } // namespace strata::kernels
