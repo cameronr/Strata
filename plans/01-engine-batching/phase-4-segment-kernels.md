@@ -34,7 +34,9 @@ The design arena (`.p4-arena/synthesis.md`, scratch) ported the resident-table s
 - One-launch batch forms: `qsa_block_scores_seg` + `qsa_block_topk`, `qsa_kv_append_steps_seg`, `native_qsa_indexer_append_multi_seg`,
   `qsa_decode_attn_seg`, GDN conv/step over rows, `native_ple_postops_tokens_seg`.  Each is the one-token window's own
   `__device__` body with a row index: bitwise equality is by program identity (same body, same grid dims, same derived scalars),
-  never by cross-kernel numeric comparison.
+  never by cross-kernel numeric comparison.  Top-k reuses the per-row launcher but pins its chunk count to the nq = 1 value
+  (`qsa_block_topk_nch(1, ...)`, an override the fused call passes): letting nq = S derive nch would shrink the threshold
+  histogram's granularity whenever `resident/S < want`, which is selection-visible at ties.
 - PLE: every batch row is its own chunk start, so conv history taps read at `3k`, not `row + 3k`; the fixed seg kernel passes
   per-row bases plus the local index into the shared body.
 - MoE: no change needed.  Rows already resolve experts through the drive plan (phase 3); no segment tables enter the expert path.
@@ -61,6 +63,7 @@ The design arena (`.p4-arena/synthesis.md`, scratch) ported the resident-table s
 | same, `--shuffle` (rotated row -> slot map), S=2 | passed - `SHUFFLE-ENGAGED` (engine log confirms rotation ran) |
 | same, `--shuffle`, S=8 (`--max-context 2048 --expert-cache 4000`) | passed - all 8 slots equal, eight rotations exercised, one S=8 graph |
 | microbench, wall time of the parity leg, deterministic config | fused +0.3% at S=2 ctx 8192 (27.2 s vs 27.1 s, noise) and +1.5% at S=8 ctx 2048 (54.8 s vs 54.0 s) - matches the synthesis threshold: no regression at S=2, win at S=8 |
+| audit round (architect + correctness review of `4a17e225f..0e41a9ebc`), then re-gate after the hardening commit | passed - suites 3/3 (indexer case now at the engine's pos_stride, strict skip/empty semantics), SASS identity re-run, digests identical, identity + shuffled S=2 and S=8 parity with the rotation marker enforced in the committed harness |
 | ctest | not run (tree builds `STRATA_BUILD_TESTS=OFF`, as phase 3) |
 
 ## Findings
@@ -77,4 +80,9 @@ The design arena (`.p4-arena/synthesis.md`, scratch) ported the resident-table s
   savings are noise at S=2 and ~1.5% of wall at S=8.  The constant-node-count win (graph replay CPU) is hidden in the GPU
   pipeline at these sizes; it matters to the phase-5 scheduler, which pays replay CPU per window across churn.
 - **A passing shuffle leg must prove it shuffled**: the gate greps the engine log for the rotation marker, so a silently
-  unparsed `SHUFFLE` directive fails the gate instead of degrading to an identity run.
+  unparsed `SHUFFLE` directive fails the gate instead of degrading to an identity run.  The check lives in the committed
+  harness (`--shuffle`), not only in the scratch gate script.
+- **The audit round caught one site where "program identity" was empirical**: top-k derived its chunk count from nq, so
+  the fused nq = S call could histogram at a different granularity than the per-row calls it replaces (selection-visible
+  at ties; equal on the rig's cards only because resident >> want there).  Pinned to the nq = 1 value, the same override
+  the suite now uses - the taxonomy is structural again at every fused site.
