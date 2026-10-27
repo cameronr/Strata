@@ -61,6 +61,15 @@
 #include <cuda_runtime.h>
 
 #include <chrono>
+#include <cerrno>
+// read(2) for the serve stdin thread (see its comment: no FILE lock, no exit deadlock).
+#ifdef _WIN32
+  #include <io.h>
+  #define STRATA_FD_READ(fd, buf, n) _read((fd), (buf), (unsigned)(n))
+#else
+  #include <unistd.h>
+  #define STRATA_FD_READ(fd, buf, n) ::read((fd), (buf), (n))
+#endif
 #include <algorithm>
 #include <iostream>
 #include <thread>
@@ -3823,13 +3832,33 @@ int main(int argc, char** argv) {
         std::deque<std::string> in_lines;
         bool in_eof = false;
         std::thread([&] {
-            std::string l;
-            while (std::getline(std::cin, l)) {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                if (l == "STOP") { stop_req.store(true); continue; }
-                std::lock_guard<std::mutex> lk(in_mu);
-                in_lines.push_back(l);
-                in_cv.notify_one();
+            // **READ(2) ON FD 0, NOT std::cin.**  A blocking `getline(std::cin, ...)` holds stdin's FILE lock
+            // while it waits, and `exit()`'s stdio cleanup (`_IO_flush_all`) waits for that lock forever once
+            // serve ends: the QUIT path read its line, the thread looped back into the read, and the process
+            // never left `exit` (measured 2026-10-26: the backtrace is `_IO_flush_all` on `_IO_stdfile_0_lock`
+            // against a thread in `read(0)`; every tool only saw a "slow" exit because each killed the engine
+            // at its own timeout, and production hides it because SIGTERM does not wait for `exit`).  Raw
+            // reads lock nothing, so every return from the serve block can exit normally.
+            std::string buf;
+            char chunk[65536];
+            for (;;) {
+                const long n = STRATA_FD_READ(0, chunk, sizeof chunk);   // long: ssize_t is not on MSVC
+                if (n > 0) {
+                    buf.append(chunk, (size_t) n);
+                    size_t nl;
+                    while ((nl = buf.find('\n')) != std::string::npos) {
+                        std::string l = buf.substr(0, nl);
+                        buf.erase(0, nl + 1);
+                        if (!l.empty() && l.back() == '\r') l.pop_back();
+                        if (l == "STOP") { stop_req.store(true); continue; }
+                        std::lock_guard<std::mutex> lk(in_mu);
+                        in_lines.push_back(l);
+                        in_cv.notify_one();
+                    }
+                    continue;
+                }
+                if (n < 0 && errno == EINTR) continue;
+                break;   // EOF or a dead pipe: the engine ends as it does on QUIT
             }
             std::lock_guard<std::mutex> lk(in_mu);
             in_eof = true;
