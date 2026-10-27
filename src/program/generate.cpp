@@ -4044,11 +4044,14 @@ int main(int argc, char** argv) {
         // Drives batch windows over registry slots 0..S-1 - prompt reads and greedy decode, one window per step
         // over every slot still running - writes each slot's token stream to the script's OUT file, and exits.
         // The harness (tools/batch_parity_test.py) wrote the prompts and compares the streams against the same
-        // conversations run solo through GEN. Without the env var the serve loop below is untouched.
+        // conversations run solo through GEN. `SHUFFLE 1` rotates the row -> slot map every window: the fused
+        // graphs key on S and read the map from the device tables, so the streams must not care. Without the
+        // env var the serve loop below is untouched.
         if (const char* bp = std::getenv("STRATA_BATCH_PARITY")) {
             std::ifstream bf(bp);
             if (!bf) { std::fprintf(stderr, "strata parity: cannot open %s\n", bp); return 1; }
             int bp_slots = 0;
+            int bp_shuffle = 0;
             long long bp_n = 0;
             std::string bp_out, bp_line;
             std::vector<std::vector<int64_t>> bp_prompts;
@@ -4057,6 +4060,7 @@ int main(int argc, char** argv) {
                 std::string key;
                 ls >> key;
                 if (key == "SLOTS") ls >> bp_slots;
+                else if (key == "SHUFFLE") ls >> bp_shuffle;   // 1: rotate the row -> slot map each window
                 else if (key == "N") ls >> bp_n;
                 else if (key == "OUT") ls >> bp_out;
                 else if (key == "PROMPT") {
@@ -4126,14 +4130,18 @@ int main(int argc, char** argv) {
             for (const auto& p : bp_prompts) plen_max = std::max(plen_max, p.size());
             for (size_t j = 0; j < plen_max; ++j) {   // feed: each step's window covers the slots still reading
                 std::vector<int> rows;
+                for (int i = 0; i < bp_slots; ++i)
+                    if (j < bp_prompts[(size_t) i].size()) rows.push_back(i);
+                // SHUFFLE 1: the same rows, a rotated row -> slot map (the fused graphs read the map from the
+                // device tables, so a window's tokens must not care which row names which slot)
+                if (bp_shuffle && rows.size() > 1)
+                    std::rotate(rows.begin(), rows.begin() + (long long)(j % rows.size()), rows.end());
                 std::vector<int32_t> toks;
                 std::vector<int64_t> ps;
-                for (int i = 0; i < bp_slots; ++i)
-                    if (j < bp_prompts[(size_t) i].size()) {
-                        rows.push_back(i);
-                        toks.push_back((int32_t) bp_prompts[(size_t) i][j]);
-                        ps.push_back((int64_t) j);
-                    }
+                for (int r : rows) {
+                    toks.push_back((int32_t) bp_prompts[(size_t) r][j]);
+                    ps.push_back((int64_t) j);
+                }
                 o_toks.assign(rows.size(), 0);
                 if (!step(rows, toks, ps, o_toks)) return step_fail("feed window");
                 for (size_t r = 0; r < rows.size(); ++r) {
@@ -4143,15 +4151,20 @@ int main(int argc, char** argv) {
             }
             for (long long i = 0; i < bp_n; ++i) {   // decode: every slot advances one token per window
                 std::vector<int> rows((size_t) bp_slots);
-                for (int s2 = 0; s2 < bp_slots; ++s2) rows[(size_t) s2] = s2;
-                const std::vector<int32_t> toks = pick;
-                const std::vector<int64_t> ps = pos;
+                const int rot = bp_shuffle ? (int)(i % bp_slots) : 0;
+                for (int s2 = 0; s2 < bp_slots; ++s2) rows[(size_t) s2] = (s2 + rot) % bp_slots;
+                std::vector<int32_t> toks((size_t) bp_slots);
+                std::vector<int64_t> ps((size_t) bp_slots);
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    toks[r] = pick[rows[r]];
+                    ps[r] = pos[rows[r]];
+                }
                 o_toks.assign((size_t) bp_slots, 0);
                 if (!step(rows, toks, ps, o_toks)) return step_fail("decode window");
-                for (int s2 = 0; s2 < bp_slots; ++s2) {
-                    streams[(size_t) s2].push_back(toks[(size_t) s2]);   // the window kept it: it is emitted
-                    pick[(size_t) s2] = o_toks[(size_t) s2];
-                    ++pos[(size_t) s2];
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    streams[(size_t) rows[r]].push_back(toks[r]);   // the window kept it: it is emitted
+                    pick[(size_t) rows[r]] = o_toks[r];
+                    ++pos[(size_t) rows[r]];
                 }
             }
             std::ofstream bo(bp_out);
@@ -4161,7 +4174,8 @@ int main(int argc, char** argv) {
                 bo << "\n";
             }
             bo.close();
-            std::fprintf(stderr, "strata parity: %d slots x %lld tokens -> %s\n", bp_slots, bp_n, bp_out.c_str());
+            std::fprintf(stderr, "strata parity: %d slots x %lld tokens%s -> %s\n", bp_slots, bp_n,
+                         bp_shuffle ? " (rows rotated per window)" : "", bp_out.c_str());
             std::fflush(stdout);
             std::fflush(stderr);
             return 0;

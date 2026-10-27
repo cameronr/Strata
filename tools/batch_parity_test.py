@@ -12,7 +12,7 @@ window's, so a slot's batch tokens must equal its solo tokens exactly - that is 
 `--context` shrinks the context so the slot sessions fit the VRAM the sizing block left (see the phase 2
 gate: at 32K prod settings two slots do not fit this rig).
 """
-import argparse, json, os, sys, time
+import argparse, json, os, shlex, sys, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -47,10 +47,12 @@ def solo_streams(exe, cfg, prompts, max_new, extra_args, log):
     return streams
 
 
-def batch_streams(exe, cfg, prompts, max_new, extra_args, work, log):
+def batch_streams(exe, cfg, prompts, max_new, extra_args, work, log, shuffle=False):
     script = Path(work) / "parity-script.txt"
     out_file = Path(work) / "parity-out.txt"
     lines = [f"SLOTS {len(prompts)}", f"N {max_new}"]
+    if shuffle:
+        lines.append("SHUFFLE 1")   # rotate the row -> slot map every window (phase 4 S-key check)
     for i, ids in enumerate(prompts):
         lines.append(f"PROMPT {i} " + " ".join(str(t) for t in ids))
     lines.append(f"OUT {out_file}")
@@ -76,6 +78,9 @@ def main():
     ap.add_argument("--max-new", type=int, default=48)
     ap.add_argument("--context", type=int, default=8192, help="--max-context for both legs")
     ap.add_argument("--work-dir", default=".batch-parity")
+    ap.add_argument("--shuffle", action="store_true",
+                    help="rotate the row -> slot map every window (the phase-4 S-keyed-graph check)")
+    ap.add_argument("--extra", default="", help="extra engine args, e.g. a smaller --expert-cache to fit slots")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text())
     tok = BT.tokenizer(cfg["tokenizer"])
@@ -85,14 +90,14 @@ def main():
         prompts.append(tok.encode(text, parse_special=True))
     work = Path(a.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    extra = ["--max-context", str(a.context)]
+    extra = ["--max-context", str(a.context)] + shlex.split(a.extra)
     t0 = time.time()
     os.environ["BATCH_TEST_LOG"] = str(work / "solo-engine.log")
     solo = solo_streams(a.exe, cfg, prompts, a.max_new, extra, str(work / "solo-engine.log"))
     print(f"solo legs done ({time.time() - t0:.0f}s): " + ", ".join(f"{len(s)} tok" for s in solo))
     t1 = time.time()
     os.environ["BATCH_TEST_LOG"] = str(work / "batch-engine.log")
-    batch = batch_streams(a.exe, cfg, prompts, a.max_new, extra, work, str(work / "batch-engine.log"))
+    batch = batch_streams(a.exe, cfg, prompts, a.max_new, extra, work, str(work / "batch-engine.log"), a.shuffle)
     print(f"batch leg done ({time.time() - t1:.0f}s): " + ", ".join(f"{len(s)} tok" for s in batch))
     ok = True
     for i, (s, b) in enumerate(zip(solo, batch)):

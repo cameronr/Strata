@@ -223,7 +223,8 @@ private:
     bool capture(int T, std::string& err);
     bool capture_commit(std::string& err);
     bool record_window(int T, cudaStream_t cs, std::string& err);
-    /// The batch graph of one row layout, captured on first use (`batch_rec_`/`brow_` steer `record_window`).
+    /// The batch graph of one window size (fused) or one row layout (STRATA_BATCH_FUSE=0), captured on first
+    /// use (`batch_rec_` steers `record_window`; the fallback also reads `brow_`).
     bool capture_batch(const int* rows, int S, cudaGraphExec_t* ex, std::string& err);
     /// Everything `run` does between launching the window's graph and reading its picks back: the PLE row
     /// collection, the per-layer ring loop (the pool, the prediction), the split head, the picks. `batched`
@@ -250,13 +251,16 @@ private:
     int last_t_ = 0;
     int64_t last_pos0_ = 0;
     int32_t last_tokens_[8] = {};
-    // the batch window (`init_slots`): the slot sessions, the row -> slot map the capture records by, the
-    // graphs keyed by row layout, and the last batch window's rows for `commit_slots`
+    // the batch window (`init_slots`): the slot sessions and the graphs.  Fused (the default) graphs read the
+    // row -> slot map from the device segment tables at replay, so they key on S alone (`exec_bs_`).  With
+    // STRATA_BATCH_FUSE=0 `record_window` records the phase-3 per-row launches instead; those bake the layout
+    // at capture, so that fallback still keys by row layout (`brow_`/`exec_bm_`, a bisection tool only).
     std::vector<SessionState*> slots_;
     bool batch_rec_ = false;
+    cudaGraphExec_t exec_bs_[9] = {};   // indexed by S (1..kVerifyMaxT), like exec_
     int8_t brow_[8] = {};
     std::map<std::vector<int8_t>, cudaGraphExec_t> exec_bm_;
-    static constexpr size_t kMaxBatchGraphs = 64;   // a scheduler that churns layouts stops here (phase 5 bounds it)
+    static constexpr size_t kMaxBatchGraphs = 64;   // the fallback's layout churn cap (phase 5 bounds it)
     int last_batch_S_ = 0;
     int8_t last_batch_rows_[8] = {};
     int32_t last_batch_tok_[8] = {};
