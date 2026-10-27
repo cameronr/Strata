@@ -128,10 +128,10 @@ public:
     // Greedy only, no drafts in a batch window, and not with the split window (`--spec-split`).  Fused graphs
     // read the row -> slot map from the device tables at replay and key on the window size alone; only the
     // STRATA_BATCH_FUSE=0 fallback captures per row layout (the cap below is what a churning scheduler would
-    // hit there).  A slot may be the verifier's own session - the phase-4 harness passes `ss_` as slot 0 - and
-    // then a batch row on it advances `ss_`'s QSA/GDN/PLE state: phase 5 must not run solo GEN and batch rows
-    // on one Verifier until solo and slot 0 stop sharing.  Call it only with no window in flight (it syncs
-    // `cs_` itself); the slot count and per-slot shapes are then fixed for the Verifier's life.
+    // hit there).  Slots are DEDICATED sessions, never the verifier's own `ss_` (phase 5 carves N at startup
+    // and registers them; solo GEN runs `ss_` and batch rows run the slots, and neither aliases the other).
+    // Call it only with no window in flight (it syncs `cs_` itself); the slot count and per-slot shapes are
+    // then fixed for the Verifier's life.
     bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
     int n_slots() const { return (int) slots_.size(); }
     /// One batch window over S distinct slots: row t is slot `rows[t]`, token `tokens[t]`, position `pos[t]`;

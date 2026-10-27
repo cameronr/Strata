@@ -1767,9 +1767,10 @@ int main(int argc, char** argv) {
     }
 
     // The slot registry (phase 2): per-conversation state has an owner, and the solo path is slot 0. Only
-    // slot 0's resources are allocated; `--parallel N` sizes the rest and refuses at startup when they
-    // cannot fit (see the serve block), and the scheduler (phase 4) is what admits into them.
-    strata::program::SlotRegistry registry(o.parallel);
+    // slot 0's resources are allocated; `--parallel N` (phase 5) is the count of BATCH slots: N dedicated
+    // sessions, registry.at(1..N), registered with the verifier once at startup and never resized (the fused
+    // graphs bake the resident segment tables; see Verifier::init_slots). The solo session stays separate.
+    strata::program::SlotRegistry registry(o.parallel + 1);
     strata::program::Slot& solo = registry.solo();
     void*& sbuf = solo.arena;   // the solo session's device arena, owned by its slot
     if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K)) != cudaSuccess) {
@@ -3984,11 +3985,11 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata serve: the penalty-history allocation failed\n");
             return 1;
         }
-        // --parallel N (phase 2: sizing only, nothing is allocated for the extra slots yet): what each added
-        // slot costs and whether it fits, in the spirit of the q36 engine's session line and docs/BATCHING.md's
-        // "what a slot costs". The session arena is the whole per-slot session: K/V at the context, the GDN
-        // recurrence, the PLE history, and per-session scratch. Slots decode without MTP drafts (no draft state;
-        // --batch-mtp is not on this path), and each also takes host memory for its drafter and staging.
+        // --parallel N (phases 2 and 5): what each batch slot costs, whether it fits, and if so carve the N
+        // dedicated sessions and register them with the verifier once (docs/BATCHING.md's "what a slot costs").
+        // The engine never refuses a count it cannot run: it says so in the log and runs without batch slots
+        // (the INFO line then omits batch_slots, and tools/batch_test.py skips on exactly that).
+        bool batch_on = false;
         if (o.parallel > 1) {
             const uint64_t kv_at_ctx = strata::core::qsa_state_bytes(g, o.max_context, true) +
                                        (uint64_t)(g.n_qsa_layers() - 1) * strata::core::qsa_state_bytes(g, o.max_context, false);
@@ -4008,24 +4009,67 @@ int main(int argc, char** argv) {
                          (double) free_b / (1 << 30));
             // slack for the copy staging an admission needs beyond the session itself; the reserve the cache
             // sizing already left is in `free_b`, so this is not q36's full 1 GiB headroom again
-            if (sess * (uint64_t)(o.parallel - 1) + ((size_t) 256 << 20) > free_b) {
-                std::fprintf(stderr, "strata serve: not enough VRAM for %d slots at a context of %lld (%.2f GiB each, "
-                                     "%.2f GiB free): use fewer slots (--parallel) or a shorter --max-context\n",
-                             o.parallel, (long long) o.max_context, (double) sess / (1 << 30), (double) free_b / (1 << 30));
-                return 2;
+            if (sess * (uint64_t) o.parallel + ((size_t) 256 << 20) > free_b) {
+                std::fprintf(stderr, "strata serve: not enough VRAM for %d slots at a context of %lld (%.2f GiB "
+                                     "each, %.2f GiB free): running without batch slots; use fewer slots "
+                                     "(--parallel) or a shorter --max-context\n",
+                             o.parallel, (long long) o.max_context, (double) sess / (1 << 30),
+                             (double) free_b / (1 << 30));
+            } else if (o.kv == "fp16") {
+                std::fprintf(stderr, "strata serve: batch slots want quantized KV pools (--kv int8|k8v4|q4_0): "
+                                     "running without batch slots\n");
+            } else {
+                // the N dedicated sessions: carved like the verifier's own (init_slots enforces it), zeroed,
+                // each with its own PLE history over the shared weights and read table. Registered once at the
+                // maximum: the resident segment tables live at baked addresses for the Verifier's life.
+                std::vector<strata::core::SessionState*> bslots((size_t) o.parallel);
+                bool carved = true;
+                for (int i = 1; i <= o.parallel && carved; ++i) {
+                    strata::program::Slot& sl = registry.at(i);
+                    if (cudaMalloc(&sl.arena, sess) != cudaSuccess) {
+                        carved = false;
+                        break;
+                    }
+                    strata::core::session_init(g, o.max_context, K, sl.arena, sl.ss);
+                    strata::core::session_zero(sl.ss, g, nullptr, main_stream);
+                    sl.ss.ple = ss.ple;
+                    sl.ss.ple.token = &sl.ss.ple_token;
+                    sl.ss.ple.prev = &sl.ss.ple_prev[0];
+                    sl.ss.ple.hist = sl.ss.ple_hist;
+                    bslots[(size_t) i - 1] = &sl.ss;
+                }
+                cudaStreamSynchronize(main_stream);
+                std::string serr;
+                if (carved && ver.init_slots(bslots, serr))
+                    batch_on = true;
+                else {
+                    std::fprintf(stderr, "strata serve: the batch slots could not be registered (%s): running "
+                                 "without batch slots\n", carved ? serr.c_str() : "a slot's session arena");
+                    for (int i = 1; i <= o.parallel; ++i)
+                        if (registry.at(i).arena != nullptr) {
+                            cudaFree(registry.at(i).arena);
+                            registry.at(i).arena = nullptr;
+                        }
+                }
             }
         }
         {
-            // what the server's Monitor tab shows
+            // what the server's Monitor tab shows; batch_slots/slot_cache (docs/BATCHING.md's protocol table)
+            // announce that BGEN slots are live - the server enables batching, and tools/batch_test.py skips,
+            // on exactly these keys
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
+            const std::string batch_info =
+                batch_on ? " batch_slots=" + std::to_string(o.parallel) +
+                               " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0)
+                         : "";
             std::printf("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=0 arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
-                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom\n",
+                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom%s\n",
                         (long long) o.max_context, o.kv.c_str(), (long long) xcache.slots(),
                         (long long) (xcache.bytes() >> 20), o.spec, o.spec, o.spec_lookup, (long long) (free_b >> 20),
                         (long long) (strata::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
-                        o.spec_min_p, o.second_gpu, (long long) o.tail_role_token);
+                        o.spec_min_p, o.second_gpu, (long long) o.tail_role_token, batch_info.c_str());
         }
         // --ple-io ram: READY only once the table is in RAM.  While it loads, its 28.8 GB of reads compete with the
         // requests and the rows still come from the SSD: a first chat right after READY decoded at ~21 tok/s instead
@@ -4090,24 +4134,12 @@ int main(int argc, char** argv) {
                 return bp_fail("script wants SLOTS, that many PROMPT lines, N and OUT");
             if (bp_slots > o.parallel)
                 return bp_fail("the script wants more slots than --parallel");
-            for (int i = 1; i < bp_slots; ++i) {   // slot 0 is the verifier's own session, already carved
-                strata::program::Slot& sl = registry.at(i);
-                if (cudaMalloc(&sl.arena, strata::core::session_bytes(g, o.max_context, K)) != cudaSuccess)
-                    return bp_fail("a slot's session arena does not fit");
-                strata::core::session_init(g, o.max_context, K, sl.arena, sl.ss);
-                strata::core::session_zero(sl.ss, g, nullptr, main_stream);
-                // the PLE's weights and read table are shared (the script's legs run one at a time); its
-                // history and token window are the slot's own session state.
-                sl.ss.ple = ss.ple;
-                sl.ss.ple.token = &sl.ss.ple_token;
-                sl.ss.ple.prev = &sl.ss.ple_prev[0];
-                sl.ss.ple.hist = sl.ss.ple_hist;
-            }
-            cudaStreamSynchronize(main_stream);
+            if (!batch_on)
+                return bp_fail("batch slots are not live (see the serve log above)");
+            // the dedicated sessions the serve startup carved and registered (phase 5): the parity legs never
+            // touch the verifier's own session, and the tables are already uploaded (init_slots ran at READY)
             std::vector<strata::core::SessionState*> bslots((size_t) bp_slots);
-            bslots[0] = &ss;
-            for (int i = 1; i < bp_slots; ++i) bslots[i] = &registry.at((int) i).ss;
-            if (!ver.init_slots(bslots, err)) return bp_fail("init_slots");
+            for (int i = 0; i < bp_slots; ++i) bslots[i] = &registry.at(i + 1).ss;
             const auto step = [&](const std::vector<int>& rows, const std::vector<int32_t>& toks,
                                   const std::vector<int64_t>& ps, std::vector<int32_t>& o_toks) -> bool {
                 drive.d.layers = 0;
