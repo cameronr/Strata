@@ -188,9 +188,14 @@ bool check(int fmt, int m, const int64_t* pos, uint32_t seed) {
 
 int main() {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    const cudaError_t de = cudaGetDeviceCount(&devices);
+    if (de == cudaErrorNoDevice || (de == cudaSuccess && devices == 0)) {
         std::puts("SKIP: no CUDA device");
         return 77;
+    }
+    if (de != cudaSuccess) {   // an enumeration failure must not skip a bitwise gate
+        std::fprintf(stderr, "FAIL: cudaGetDeviceCount: %s\n", cudaGetErrorString(de));
+        return 1;
     }
     // append positions per row: page boundaries, first and last page, mid-context
     const int64_t pos[8] = {1500, 37, 64, 2049, 8191, 63, 4000, 4096};
@@ -212,6 +217,10 @@ int main() {
             }
     }
     if (failed) return 1;
+    if (cases == 0) {   // a STRATA_P4_ONLY filter that matched nothing is not a pass
+        std::fprintf(stderr, "FAIL: no cases ran (STRATA_P4_ONLY matched nothing?)\n");
+        return 1;
+    }
     std::printf("PASS: %d cases on %d device(s) (3 KV formats x 1/2/4/8 rows of different slots): appended pools "
                 "byte-identical to one call per row\n", cases, devices);
     return 0;

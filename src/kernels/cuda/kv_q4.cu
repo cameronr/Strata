@@ -122,7 +122,12 @@ void kv_append_q4_steps(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t*
 void kv_append_q4_seg(const SegRow* seg, const int32_t* row_slot, const int32_t* step, int step_stride,
                       const float* kcur, const float* vcur, int n_rows, const QsaShapes& s, void* stream, int sides) {
     validate(s, "kv_append_q4_seg");
-    if (n_rows < 1 || sides < 1 || sides > 2) return;
+    if (n_rows < 1) return;
+    if (sides < 1 || sides > 2) {
+        std::fprintf(stderr, "kv_append_q4_seg: sides %d out of range (a skipped append would corrupt the pools)\n",
+                     sides);
+        std::exit(1);
+    }
     const dim3 grid((unsigned) n_rows, (unsigned) s.n_head_kv, (unsigned) sides);
     kv_append_q4_seg_kernel<<<grid, 32, 0, (cudaStream_t) stream>>>(seg, row_slot, step, step_stride, kcur, vcur,
                                                                     s.n_head_kv * s.head_dim, (int) s.n_head_kv,

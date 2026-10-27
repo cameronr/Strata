@@ -967,8 +967,34 @@ int64_t qsa_select_max_cells(const QsaShapes& s) {
     return ints > 0 ? ints / 64 * TOPK_T * R : 0;
 }
 
+namespace {
+// the multi-branch chunk count: from the capacity, at most what stays resident with the other queries'
+// (the barriers).  Shared by the launcher and qsa_block_topk_nch, so an override pin and a derivation agree.
+int mt_resident_blocks() {
+    static std::mutex mu;
+    static std::unordered_map<int, int> resident_of;
+    int dev = 0;
+    cudaGetDevice(&dev);
+    const std::lock_guard<std::mutex> lock(mu);
+    int& r = resident_of[dev];
+    if (r == 0) {
+        int sms = 0, per_sm = 0;
+        cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, block_topk_multi_kernel, MT_T, 0);
+        r = sms * per_sm;
+    }
+    return r;
+}
+}  // namespace
+
+int qsa_block_topk_nch(int64_t nq, int64_t max_blocks) {
+    if (nq < 1) nq = 1;
+    const int64_t want = (max_blocks - 1 + MT_CHUNK - 1) / MT_CHUNK;
+    return (int) std::max<int64_t>(1, std::min<int64_t>({want, (int64_t) MT_MAXCH, mt_resident_blocks() / nq}));
+}
+
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
-                    const QsaShapes& s, int32_t* ids, void* stream) {
+                    const QsaShapes& s, int32_t* ids, void* stream, int nch_override) {
     if (nq <= 0) return;
     const int64_t tab_rows = topk_tab_rows(max_blocks);
     const size_t smem = topk_smem_bytes(tab_rows, cap);
@@ -977,24 +1003,7 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
         std::exit(1);
     }
     if (nq <= MT_MAXQ) {
-        // the chunks a query: from the capacity, at most what stays resident with the other queries' (the barriers)
-        static std::mutex mu;
-        static std::unordered_map<int, int> resident_of;
-        int dev = 0, resident = 0;
-        cudaGetDevice(&dev);
-        {
-            const std::lock_guard<std::mutex> lock(mu);
-            int& r = resident_of[dev];
-            if (r == 0) {
-                int sms = 0, per_sm = 0;
-                cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
-                cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, block_topk_multi_kernel, MT_T, 0);
-                r = sms * per_sm;
-            }
-            resident = r;
-        }
-        const int64_t want = (max_blocks - 1 + MT_CHUNK - 1) / MT_CHUNK;
-        const int64_t nch = std::max<int64_t>(1, std::min<int64_t>({want, (int64_t) MT_MAXCH, resident / nq}));
+        const int nch = nch_override > 0 ? nch_override : qsa_block_topk_nch(nq, max_blocks);
         block_topk_multi_kernel<<<dim3((unsigned) nch, (unsigned) nq), MT_T, 0, (cudaStream_t) stream>>>(
             scores, steps, max_blocks, cap, ids);
         const cudaError_t e = cudaGetLastError();

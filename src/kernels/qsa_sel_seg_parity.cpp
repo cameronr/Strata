@@ -5,13 +5,13 @@
 // and the attention output must be bitwise identical. The fused form resolves each row's state through a resident
 // segment table and a permuted row -> slot index, exactly as the engine stages them. Synthetic data, no model.
 //
-// What each leg's equality rests on (seg_rows.hpp's taxonomy): scores and the attention chunk are program identity
-// (the same __device__ body, the same grid.x, the splits pinned to the per-row n_q=1 value); top-k equality is the
-// selection's invariance to its chunk count, which this suite PINS (the launcher's chunk count is
-// min(want, MT_MAXCH, resident/n_q), so rows and per-row calls can differ in chunking on small cards); the merge
-// is row-independent by construction and this suite pins that too. No launcher declines in this tree (the KV
-// format is global and n <= kVerifyMaxT by the window cap), so there is no skip-on-decline; with no CUDA device
-// the whole suite skips (77). Cases run on every visible device: the grids and splits are device-derived.
+// What each leg's equality rests on (seg_rows.hpp's taxonomy): scores, top-k and the attention chunk are program
+// identity (the same __device__ body, the same grid.x; top-k pins its chunk count to the n_q = 1 value exactly as
+// the engine's batch call site does, so the fused launch cannot derive a smaller one; the attention splits are
+// pinned to the per-row n_q=1 value); the merge is row-independent by construction and this suite pins that too.
+// No launcher declines in this tree (the KV format is global and n <= kVerifyMaxT by the window cap), so there is
+// no skip-on-decline; with no CUDA device the whole suite skips (77), but a device-enumeration error FAILS.
+// Cases run on every visible device: the grids and splits are device-derived.
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/qsa.hpp"
@@ -177,7 +177,7 @@ bool check(int fmt, int m, const int64_t* ctx, uint32_t seed) {
                             k::qsa_score_grid_blocks);
     std::puts("  v1 topk");
     std::fflush(stdout);
-    k::qsa_block_topk(sc[1], d_steps, m, max_blocks, cap, s, sel[1], nullptr);
+    k::qsa_block_topk(sc[1], d_steps, m, max_blocks, cap, s, sel[1], nullptr, k::qsa_block_topk_nch(1, max_blocks));
     std::puts("  v1 attn");
     std::fflush(stdout);
     k::qsa_decode_attn_seg(seg_d, idx_d, d_qcur, sel[1], d_steps, cap, s, seg_h[(size_t) row_slot[0]].kv, scratch[1],
@@ -216,9 +216,14 @@ bool check(int fmt, int m, const int64_t* ctx, uint32_t seed) {
 
 int main() {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    const cudaError_t de = cudaGetDeviceCount(&devices);
+    if (de == cudaErrorNoDevice || (de == cudaSuccess && devices == 0)) {
         std::puts("SKIP: no CUDA device");
         return 77;
+    }
+    if (de != cudaSuccess) {   // an enumeration failure must not skip a bitwise gate
+        std::fprintf(stderr, "FAIL: cudaGetDeviceCount: %s\n", cudaGetErrorString(de));
+        return 1;
     }
     // contexts per row: under and over the selection width (2048 cells), partial and complete indexer blocks
     const int64_t ctx[8] = {1500, 37, 9000, 2049, 32768, 300, 20001, 4096};
@@ -240,6 +245,10 @@ int main() {
             }
     }
     if (failed) return 1;
+    if (cases == 0) {   // a STRATA_P4_ONLY filter that matched nothing is not a pass
+        std::fprintf(stderr, "FAIL: no cases ran (STRATA_P4_ONLY matched nothing?)\n");
+        return 1;
+    }
     std::printf("PASS: %d cases on %d device(s) (4 KV formats x 1/2/4/8 rows of different slots): scores, ids and "
                 "attention bitwise identical to one call per row\n", cases, devices);
     return 0;

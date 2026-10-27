@@ -56,7 +56,13 @@ void qsa_block_scores_seg(const SegRow* seg, const int32_t* row_slot, const floa
 int64_t qsa_select_max_cells(const QsaShapes& s);
 
 /// ids [nq, cap] (cells, ascending); `cap` >= the largest selection width.
+/// `nch_override` > 0 pins the chunk count instead of deriving it from nq: the batch windows pass the nq = 1
+/// value so a fused multi-row launch is program-identical (same grid.x, same histogram granularity) to the
+/// per-row calls it replaces.  0 derives, which is what every single-sequence caller wants.
 void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
-                    const QsaShapes& s, int32_t* ids, void* stream);
+                    const QsaShapes& s, int32_t* ids, void* stream, int nch_override = 0);
+
+/// The chunk count qsa_block_topk would derive for nq queries on the current device (1 = the per-row shape).
+int qsa_block_topk_nch(int64_t nq, int64_t max_blocks);
 
 }  // namespace strata::kernels

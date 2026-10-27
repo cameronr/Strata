@@ -828,10 +828,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                          qidx_ + (size_t) tb * IQ * ID, step_ + (size_t) tb * kStepCount, te - tb,
                                          max_blocks_, s, scores_ + (size_t) tb * max_blocks_, side_,
                                          qsa_score_grid_blocks);
-                    // top-k needs no variant: the same launcher over the rows (qsa_sel_seg_parity pins the
-                    // selection's invariance to the chunk count the nq = rows call derives)
+                    // top-k needs no seg variant, but it does need the per-row chunk count: the nq = rows call
+                    // would derive a smaller nch (the residency barrier splits across rows), and the threshold
+                    // histogram's granularity is selection-visible at ties.  Pinning nch to the nq = 1 value
+                    // keeps this program-identical to the per-row calls, like every other fused site.
                     qsa_block_topk(scores_ + (size_t) tb * max_blocks_, step_ + (size_t) tb * kStepCount, te - tb,
-                                   max_blocks_, cap_, s, sel_ + (size_t) tb * cap_, side_);
+                                   max_blocks_, cap_, s, sel_ + (size_t) tb * cap_, side_, batch_topk_nch_);
                 } else {   // unfused: scores and top-k per row against that slot's indexer
                     for (int t = tb; t < te; ++t) {
                         const QsaState& rst = slots_[(size_t) brow_[t]]->qsa_states[qi];
@@ -1267,7 +1269,18 @@ bool Verifier::capture_batch(const int* rows, int S, cudaGraphExec_t* ex_out, st
         return false;
     }
     std::string rerr;
-    const bool ok = record_window(S, cs_, rerr);
+    bool ok = false;
+    try {
+        ok = record_window(S, cs_, rerr);
+    } catch (const std::exception& e) {
+        // the seg launchers throw on refused geometries; end the capture so cs_ is usable again
+        batch_rec_ = false;
+        cudaGraph_t poisoned = nullptr;
+        cudaStreamEndCapture(cs_, &poisoned);
+        if (poisoned) cudaGraphDestroy(poisoned);
+        err = std::string("verify: batch capture: ") + e.what();
+        return false;
+    }
     batch_rec_ = false;
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs_, &graph);
@@ -1314,6 +1327,9 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
     int n_qsa_pre = 0;
     for (int64_t l = 0; l < g_->n_layers; ++l)
         if (is_qsa_layer(*g_, l)) ++n_qsa_pre;
+    // the table upload below must not race a window's seg-kernel reads: serialize against in-flight work
+    // here rather than trusting the caller (the phase-5 scheduler will call this between async windows).
+    cudaStreamSynchronize(cs_);
     for (SessionState* x : slots) {
         // every buffer a batch row's kernels size by (cap_, max_blocks_, the attn scratch) comes from `ss_`'s
         // max_cells, and the PLE row collection reads them out of one table - the slots must be cut from the
@@ -1339,9 +1355,8 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
             }
         }
     }
-    slots_ = slots;
     // the resident segment tables (seg_rows.hpp): one entry per (stateful layer, slot), derived from the sessions.
-    // Re-registration rebuilds them in place (host-serialized: no window is in flight while init_slots runs).
+    // Re-registration rebuilds them in place (init_slots serialized above against any in-flight window).
     const ModelGeometry& g = *g_;
     int n_qsa = 0, n_gdn = 0;
     for (int64_t l = 0; l < g.n_layers; ++l)
@@ -1392,13 +1407,18 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
                       cudaMalloc((void**) &seg_ple_d_, ple_bytes) == cudaSuccess &&
                       cudaMalloc((void**) &seg_idx_, strata::kernels::kVerifyMaxT * sizeof(int32_t)) == cudaSuccess;
         if (!tables) {
+            // leave no half-built tables: a transient failure must not brick re-registration
+            cudaFree(seg_qsa_d_);
+            cudaFree(seg_gdn_d_);
+            cudaFree(seg_ple_d_);
+            cudaFree(seg_idx_);
+            seg_qsa_d_ = seg_gdn_d_ = seg_ple_d_ = nullptr;
+            seg_idx_ = nullptr;
             err = "verify: init_slots could not allocate the segment tables";
-            slots_.clear();
             return false;
         }
     } else if (qsa_bytes != seg_qsa_bytes_ || gdn_bytes != seg_gdn_bytes_ || ple_bytes != seg_ple_bytes_) {
         err = "verify: re-registering slots with a different count wants a fresh Verifier";
-        slots_.clear();
         return false;
     }
     seg_qsa_bytes_ = qsa_bytes;
@@ -1409,8 +1429,16 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
               cudaMemcpy(seg_ple_d_, seg_ple_h_.data(), ple_bytes, cudaMemcpyHostToDevice) == cudaSuccess;
     if (!up) {
         err = "verify: init_slots could not upload the segment tables";
-        slots_.clear();
         return false;
+    }
+    // the registration is installed only on success: a failed call leaves the previous one (and its tables) intact
+    slots_ = slots;
+    batch_topk_nch_ = strata::kernels::qsa_block_topk_nch(1, max_blocks_);
+    if (!exec_bm_.empty()) {
+        // re-registration: the fallback's graphs baked the previous registration's slot pointers
+        for (auto& [layout, ex] : exec_bm_)
+            if (ex) cudaGraphExecDestroy(ex);
+        exec_bm_.clear();
     }
     return true;
 }
@@ -1500,7 +1528,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
 }
 
 bool Verifier::commit_slots(std::string& err) {
-    if (last_batch_S_ < 1) {
+    if (last_batch_S_ < 1 || slots_.empty()) {   // the empty check: a window before a failed re-registration
         err = "verify: commit_slots without a batch window";
         return false;
     }

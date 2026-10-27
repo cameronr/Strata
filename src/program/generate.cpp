@@ -4059,6 +4059,7 @@ int main(int argc, char** argv) {
                 std::istringstream ls(bp_line);
                 std::string key;
                 ls >> key;
+                if (key.empty()) continue;
                 if (key == "SLOTS") ls >> bp_slots;
                 else if (key == "SHUFFLE") ls >> bp_shuffle;   // 1: rotate the row -> slot map each window
                 else if (key == "N") ls >> bp_n;
@@ -4073,6 +4074,11 @@ int main(int argc, char** argv) {
                     if ((int) bp_prompts.size() <= slot) bp_prompts.resize((size_t) slot + 1);
                     long long v;
                     while (ls >> v) bp_prompts[(size_t) slot].push_back(v);
+                } else {
+                    // a silently ignored directive could degrade a check to nothing (a lost SHUFFLE 1 would
+                    // pass as an identity-map run)
+                    std::fprintf(stderr, "strata parity: unknown script directive '%s'\n", key.c_str());
+                    return 1;
                 }
             }
             const auto bp_fail = [&](const std::string& why) {

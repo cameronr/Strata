@@ -34,6 +34,7 @@
 #include "strata/core/session.hpp"
 #include "strata/core/split_head.hpp"
 #include "strata/kernels/seg_rows.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/sampler.hpp"
 
 #include <cuda_runtime.h>
@@ -124,9 +125,13 @@ public:
     // and `commit_slots` is the host-side PLE token-window bookkeeping only - there is no batch commit graph and
     // no rollback (a window that does not finish loses its tokens, as a one-token window's would).
     //
-    // Greedy only, no drafts in a batch window, and not with the split window (`--spec-split`).  The batch graphs
-    // are captured per row layout (the session pointers bake in), so a scheduler that keeps its layouts stable
-    // pays the capture once per shape; the cap below is what a churning scheduler would hit (phase 5 bounds it).
+    // Greedy only, no drafts in a batch window, and not with the split window (`--spec-split`).  Fused graphs
+    // read the row -> slot map from the device tables at replay and key on the window size alone; only the
+    // STRATA_BATCH_FUSE=0 fallback captures per row layout (the cap below is what a churning scheduler would
+    // hit there).  A slot may be the verifier's own session - the phase-4 harness passes `ss_` as slot 0 - and
+    // then a batch row on it advances `ss_`'s QSA/GDN/PLE state: phase 5 must not run solo GEN and batch rows
+    // on one Verifier until solo and slot 0 stop sharing.  Call it only with no window in flight (it syncs
+    // `cs_` itself); the slot count and per-slot shapes are then fixed for the Verifier's life.
     bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
     int n_slots() const { return (int) slots_.size(); }
     /// One batch window over S distinct slots: row t is slot `rows[t]`, token `tokens[t]`, position `pos[t]`;
@@ -257,13 +262,14 @@ private:
     // at capture, so that fallback still keys by row layout (`brow_`/`exec_bm_`, a bisection tool only).
     std::vector<SessionState*> slots_;
     bool batch_rec_ = false;
-    cudaGraphExec_t exec_bs_[9] = {};   // indexed by S (1..kVerifyMaxT), like exec_
-    int8_t brow_[8] = {};
+    cudaGraphExec_t exec_bs_[strata::kernels::kVerifyMaxT + 1] = {};   // indexed by S (1..kVerifyMaxT), like exec_
+    int8_t brow_[strata::kernels::kVerifyMaxT] = {};
     std::map<std::vector<int8_t>, cudaGraphExec_t> exec_bm_;
     static constexpr size_t kMaxBatchGraphs = 64;   // the fallback's layout churn cap (phase 5 bounds it)
     int last_batch_S_ = 0;
-    int8_t last_batch_rows_[8] = {};
-    int32_t last_batch_tok_[8] = {};
+    int8_t last_batch_rows_[strata::kernels::kVerifyMaxT] = {};
+    int32_t last_batch_tok_[strata::kernels::kVerifyMaxT] = {};
+    int batch_topk_nch_ = 0;   // the nq = 1 top-k chunk count, pinned at `init_slots` (program identity, F3)
     // resident segment tables (seg_rows.hpp), built by `init_slots` from the slot sessions: device copies at fixed
     // addresses and the host mirrors the capture reads. QSA and GDN tables are [layer * n_slots + slot]; the PLE
     // table is [slot]. Rebuilt on re-registration, serialized with any in-flight window (host-side, none running).

@@ -73,13 +73,13 @@ bool check_indexer(int m, uint32_t seed, cudaStream_t s) {
     const float* d_gamma = up(gamma);
     std::vector<float> raw((size_t) m * D);
     for (auto& x : raw) x = edgy(r);
-    std::vector<int32_t> pos((size_t) m);
+    std::vector<int32_t> pos((size_t) m * k::kStepCount, 0);   // the engine's step-array shape: pos at stride kStepCount
     const int starts[8] = {0, 1, 3, 1022, 7, 2, 4095, 5};
-    for (int t = 0; t < m; ++t) pos[(size_t) t] = starts[t];
+    for (int t = 0; t < m; ++t) pos[(size_t) t * k::kStepCount] = starts[t];
     const float* d_raw = up(raw);
     const int32_t* d_pos = up(pos);
     std::vector<std::vector<float>> init_tail;
-    std::vector<k::SegRow> seg0((size_t) m), seg1((size_t) m);
+    std::vector<k::SegRow> seg1((size_t) m);
     std::vector<float*> t0, t1, p0, p1, dd0, dd1;
     std::vector<int32_t*> b0, b1;
     for (int i = 0; i < m; ++i) {
@@ -90,7 +90,6 @@ bool check_indexer(int m, uint32_t seed, cudaStream_t s) {
         init_tail.push_back(tail);
         t0.push_back(up(tail)); dd0.push_back(up(dead)); p0.push_back(up(pooled)); b0.push_back(up(std::vector<int32_t>{-7}));
         t1.push_back(up(tail)); dd1.push_back(up(dead)); p1.push_back(up(pooled)); b1.push_back(up(std::vector<int32_t>{-7}));
-        seg0[(size_t) i] = k::SegRow{};
         seg1[(size_t) i] = k::SegRow{};
         seg1[(size_t) i].idx_tail = t1[(size_t) i];
         seg1[(size_t) i].idx_dead = dd1[(size_t) i];
@@ -106,11 +105,11 @@ bool check_indexer(int m, uint32_t seed, cudaStream_t s) {
     for (int t = 0; t < m; ++t) {
         const int i = row_slot[(size_t) t];
         const k::QsaIndexerBuffers ib{t0[(size_t) i], dd0[(size_t) i], p0[(size_t) i], b0[(size_t) i]};
-        k::native_qsa_indexer_append_multi(d_raw + (size_t) t * D, d_pos + t, 1, 1, 0, d_gamma, 1e-6f, ib, sh,
-                                           max_cells, kRope, s);
+        k::native_qsa_indexer_append_multi(d_raw + (size_t) t * D, d_pos + (size_t) t * k::kStepCount, k::kStepCount,
+                                           1, 0, d_gamma, 1e-6f, ib, sh, max_cells, kRope, s);
     }
-    k::native_qsa_indexer_append_multi_seg(seg_d, idx_d, d_raw, d_pos, 1, m, 0, d_gamma, 1e-6f, sh, max_cells, kRope,
-                                           s);
+    k::native_qsa_indexer_append_multi_seg(seg_d, idx_d, d_raw, d_pos, k::kStepCount, m, 0, d_gamma, 1e-6f, sh,
+                                           max_cells, kRope, s);
     ck(cudaStreamSynchronize(s));
     bool ok = true;
     for (int i = 0; i < m && ok; ++i) {
@@ -311,9 +310,14 @@ bool check_ple(int m, uint32_t seed, cudaStream_t s) {
 
 int main() {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices == 0) {
+    const cudaError_t de = cudaGetDeviceCount(&devices);
+    if (de == cudaErrorNoDevice || (de == cudaSuccess && devices == 0)) {
         std::puts("SKIP: no CUDA device");
         return 77;
+    }
+    if (de != cudaSuccess) {   // an enumeration failure must not skip a bitwise gate
+        std::fprintf(stderr, "FAIL: cudaGetDeviceCount: %s\n", cudaGetErrorString(de));
+        return 1;
     }
     const char* only = std::getenv("STRATA_P4_ONLY");   // debug: "stage:rows" (0 indexer, 1 gdn, 2 ple)
     cudaStream_t s = cudaStreamPerThread;
@@ -337,6 +341,10 @@ int main() {
             }
     }
     if (failed) return 1;
+    if (cases == 0) {   // a STRATA_P4_ONLY filter that matched nothing is not a pass
+        std::fprintf(stderr, "FAIL: no cases ran (STRATA_P4_ONLY matched nothing?)\n");
+        return 1;
+    }
     std::printf("PASS: %d cases on %d device(s) (indexer, GDN and PLE stages x 1/2/4/8 rows of different slots): "
                 "state and outputs byte-identical to one call per row\n", cases, devices);
     return 0;

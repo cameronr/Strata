@@ -67,6 +67,10 @@ def batch_streams(exe, cfg, prompts, max_new, extra_args, work, log, shuffle=Fal
     streams = []
     for line in out_file.read_text().splitlines():
         streams.append([int(t) for t in line.split()[1:]])
+    if shuffle:
+        # gate integrity: a silently unparsed SHUFFLE directive would degrade to an identity-map pass
+        if "rows rotated per window" not in Path(log).read_text(errors="replace"):
+            raise SystemExit(f"--shuffle was requested but the engine log has no rotation marker - see {log}")
     return streams
 
 
@@ -100,6 +104,10 @@ def main():
     batch = batch_streams(a.exe, cfg, prompts, a.max_new, extra, work, str(work / "batch-engine.log"), a.shuffle)
     print(f"batch leg done ({time.time() - t1:.0f}s): " + ", ".join(f"{len(s)} tok" for s in batch))
     ok = True
+    if len(solo) != len(batch) or len(batch) != len(prompts):
+        raise SystemExit(f"legs disagree on slot count: solo {len(solo)}, batch {len(batch)}, prompts {len(prompts)}")
+    if any(len(s) == 0 for s in batch) or any(len(s) == 0 for s in solo):
+        raise SystemExit("an empty token stream: the legs produced nothing to compare (engine died mid-run?)")
     for i, (s, b) in enumerate(zip(solo, batch)):
         if s == b:
             print(f"slot {i}: equal ({len(s)} tokens)")
