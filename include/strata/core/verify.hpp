@@ -38,6 +38,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -106,6 +107,34 @@ public:
     /// before anything outside the next `run` reads the sequence state.
     bool commit(int n_keep, std::string& err, bool wait = true);
     bool wait_commit(std::string& err);
+
+    // ================================ BATCH WINDOWS: SEVERAL SEQUENCES IN ONE WINDOW ================================
+    //
+    // A batch window holds S INDEPENDENT sequences, one token each: row t is slot `rows[t]`, at that slot's own
+    // position, reading and writing that slot's own state (GDN recurrence and conv history, QSA K/V and indexer,
+    // PLE history) from the sessions given to `init_slots` - each carved like the verifier's own session, same
+    // context.  Everything that is per row already (hyper-connections, dense projections, the router, the shared
+    // expert, the routed experts, the head) runs once over the S rows, so those weights are read once per window
+    // for all the sequences; the state-touching kernels run per row with that row's session, one token each -
+    // row t's arithmetic is the one-token window's, so a slot's greedy tokens are its solo greedy tokens
+    // (modulo the multi-token CPU kernel choice: STRATA_IQ_MT_MIN=1).  Phase 4 fuses those per-row launches.
+    //
+    // Like the one-token window, a batch window keeps every row: it advances each listed slot's state itself,
+    // and `commit_slots` is the host-side PLE token-window bookkeeping only - there is no batch commit graph and
+    // no rollback (a window that does not finish loses its tokens, as a one-token window's would).
+    //
+    // Greedy only, no drafts in a batch window, and not with the split window (`--spec-split`).  The batch graphs
+    // are captured per row layout (the session pointers bake in), so a scheduler that keeps its layouts stable
+    // pays the capture once per shape; the cap below is what a churning scheduler would hit (phase 5 bounds it).
+    bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
+    int n_slots() const { return (int) slots_.size(); }
+    /// One batch window over S distinct slots: row t is slot `rows[t]`, token `tokens[t]`, position `pos[t]`;
+    /// `out[t]` = the greedy pick after token t.  The slots not listed keep their state untouched.
+    bool run_slot_rows(const int* rows, int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool,
+                       void* user, int32_t* out, std::string& err);
+    /// The PLE token windows of every row of the last batch window (the state itself advanced with the window).
+    bool commit_slots(std::string& err);
+
     /// The first token of the last window whose logits held a NaN or an infinity, or -1 (upstream #879): its picks are
     /// not to be used, and the sequence state behind them is poisoned.  Read from flags the head's argmax wrote.
     /// STRATA_NAN_GUARD=0: always -1.  STRATA_NAN_INJECT=n[,n...]: the n-th call reports token 0 (a test of the path).
@@ -193,6 +222,13 @@ private:
     bool capture(int T, std::string& err);
     bool capture_commit(std::string& err);
     bool record_window(int T, cudaStream_t cs, std::string& err);
+    /// The batch graph of one row layout, captured on first use (`batch_rec_`/`brow_` steer `record_window`).
+    bool capture_batch(const int* rows, int S, cudaGraphExec_t* ex, std::string& err);
+    /// Everything `run` does between launching the window's graph and reading its picks back: the PLE row
+    /// collection, the per-layer ring loop (the pool, the prediction), the split head, the picks. `batched`
+    /// windows are single-group; the solo window's group count is the one its capture recorded in `groups_`.
+    bool drive_window(int T, int64_t sample_pos, PoolMultiFn pool, void* user, int32_t* out, std::string& err,
+                      bool batched = false);
 
     strata::kernels::SamplerParams sampling_ = [] {
         strata::kernels::SamplerParams s;
@@ -213,6 +249,17 @@ private:
     int last_t_ = 0;
     int64_t last_pos0_ = 0;
     int32_t last_tokens_[8] = {};
+    // the batch window (`init_slots`): the slot sessions, the row -> slot map the capture records by, the
+    // graphs keyed by row layout, and the last batch window's rows for `commit_slots`
+    std::vector<SessionState*> slots_;
+    bool batch_rec_ = false;
+    int8_t brow_[8] = {};
+    std::map<std::vector<int8_t>, cudaGraphExec_t> exec_bm_;
+    static constexpr size_t kMaxBatchGraphs = 64;   // a scheduler that churns layouts stops here (phase 5 bounds it)
+    int last_batch_S_ = 0;
+    int8_t last_batch_rows_[8] = {};
+    int32_t last_batch_tok_[8] = {};
+
     int64_t n_vocab_ = 0;
     cudaStream_t cs_ = nullptr;
     cudaGraphExec_t exec_[9] = {};

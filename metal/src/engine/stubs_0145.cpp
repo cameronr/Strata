@@ -71,7 +71,6 @@
 #include "strata/prefill/share_rules.hpp"
 #include "strata/prefill/xmx_moe.hpp"
 #include "strata/core/arch_defaults.hpp"
-#include "strata/core/batch_rows.hpp"
 #include "strata/core/conversation_buffer.hpp"
 #include "strata/core/conversation_cache.hpp"
 #include "strata/core/conversation_file.hpp"

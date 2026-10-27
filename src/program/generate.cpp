@@ -4040,6 +4040,132 @@ int main(int argc, char** argv) {
         }
         std::printf("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
         std::fflush(stdout);
+        // STRATA_BATCH_PARITY=<script>: the phase 3 multi-sequence parity script (plans/01-engine-batching/).
+        // Drives batch windows over registry slots 0..S-1 - prompt reads and greedy decode, one window per step
+        // over every slot still running - writes each slot's token stream to the script's OUT file, and exits.
+        // The harness (tools/batch_parity_test.py) wrote the prompts and compares the streams against the same
+        // conversations run solo through GEN. Without the env var the serve loop below is untouched.
+        if (const char* bp = std::getenv("STRATA_BATCH_PARITY")) {
+            std::ifstream bf(bp);
+            if (!bf) { std::fprintf(stderr, "strata parity: cannot open %s\n", bp); return 1; }
+            int bp_slots = 0;
+            long long bp_n = 0;
+            std::string bp_out, bp_line;
+            std::vector<std::vector<int64_t>> bp_prompts;
+            while (std::getline(bf, bp_line)) {
+                std::istringstream ls(bp_line);
+                std::string key;
+                ls >> key;
+                if (key == "SLOTS") ls >> bp_slots;
+                else if (key == "N") ls >> bp_n;
+                else if (key == "OUT") ls >> bp_out;
+                else if (key == "PROMPT") {
+                    int slot = -1;
+                    ls >> slot;
+                    if (slot < 0 || (bp_slots > 0 && slot >= bp_slots)) {
+                        std::fprintf(stderr, "strata parity: PROMPT slot %d out of range\n", slot);
+                        return 1;
+                    }
+                    if ((int) bp_prompts.size() <= slot) bp_prompts.resize((size_t) slot + 1);
+                    long long v;
+                    while (ls >> v) bp_prompts[(size_t) slot].push_back(v);
+                }
+            }
+            const auto bp_fail = [&](const std::string& why) {
+                std::fprintf(stderr, "strata parity: FAIL: %s (%s)\n", why.c_str(), err.c_str());
+                std::fflush(stderr);
+                return 1;
+            };
+            if (bp_slots < 1 || (int) bp_prompts.size() != bp_slots || bp_out.empty() || bp_n < 1)
+                return bp_fail("script wants SLOTS, that many PROMPT lines, N and OUT");
+            if (bp_slots > o.parallel)
+                return bp_fail("the script wants more slots than --parallel");
+            for (int i = 1; i < bp_slots; ++i) {   // slot 0 is the verifier's own session, already carved
+                strata::program::Slot& sl = registry.at(i);
+                if (cudaMalloc(&sl.arena, strata::core::session_bytes(g, o.max_context, K)) != cudaSuccess)
+                    return bp_fail("a slot's session arena does not fit");
+                strata::core::session_init(g, o.max_context, K, sl.arena, sl.ss);
+                strata::core::session_zero(sl.ss, g, nullptr, main_stream);
+                // the PLE's weights and read table are shared (the script's legs run one at a time); its
+                // history and token window are the slot's own session state.
+                sl.ss.ple = ss.ple;
+                sl.ss.ple.token = &sl.ss.ple_token;
+                sl.ss.ple.prev = &sl.ss.ple_prev[0];
+                sl.ss.ple.hist = sl.ss.ple_hist;
+            }
+            cudaStreamSynchronize(main_stream);
+            std::vector<strata::core::SessionState*> bslots((size_t) bp_slots);
+            bslots[0] = &ss;
+            for (int i = 1; i < bp_slots; ++i) bslots[i] = &registry.at((int) i).ss;
+            if (!ver.init_slots(bslots, err)) return bp_fail("init_slots");
+            const auto step = [&](const std::vector<int>& rows, const std::vector<int32_t>& toks,
+                                  const std::vector<int64_t>& ps, std::vector<int32_t>& o_toks) -> bool {
+                drive.d.layers = 0;
+                drive.d.experts = 0;
+                drive.d.failed = false;
+                drive.adapt_next = drive.flush_next = false;
+                if (!ver.run_slot_rows(rows.data(), (int) rows.size(), toks.data(), ps.data(), &drive_pool_multi,
+                                       &drive, o_toks.data(), err) || drive.d.failed)
+                    return false;
+                if (ver.nonfinite((int) rows.size()) >= 0) {
+                    err = "a batch window's logits were non-finite";
+                    return false;
+                }
+                return ver.commit_slots(err);
+            };
+            const auto step_fail = [&](const char* where) {
+                std::fprintf(stderr, "strata parity: FAIL: %s: %s\n", where, err.c_str());
+                std::fflush(stderr);
+                return 1;
+            };
+            std::vector<std::vector<int32_t>> streams((size_t) bp_slots);
+            std::vector<int64_t> pos((size_t) bp_slots, 0);       // each slot's next position
+            std::vector<int32_t> pick((size_t) bp_slots, -1);     // the pick after the slot's last fed token
+            std::vector<int32_t> o_toks;
+            size_t plen_max = 0;
+            for (const auto& p : bp_prompts) plen_max = std::max(plen_max, p.size());
+            for (size_t j = 0; j < plen_max; ++j) {   // feed: each step's window covers the slots still reading
+                std::vector<int> rows;
+                std::vector<int32_t> toks;
+                std::vector<int64_t> ps;
+                for (int i = 0; i < bp_slots; ++i)
+                    if (j < bp_prompts[(size_t) i].size()) {
+                        rows.push_back(i);
+                        toks.push_back((int32_t) bp_prompts[(size_t) i][j]);
+                        ps.push_back((int64_t) j);
+                    }
+                o_toks.assign(rows.size(), 0);
+                if (!step(rows, toks, ps, o_toks)) return step_fail("feed window");
+                for (size_t r = 0; r < rows.size(); ++r) {
+                    pick[(size_t) rows[r]] = o_toks[r];
+                    pos[(size_t) rows[r]] = (int64_t) j + 1;
+                }
+            }
+            for (long long i = 0; i < bp_n; ++i) {   // decode: every slot advances one token per window
+                std::vector<int> rows((size_t) bp_slots);
+                for (int s2 = 0; s2 < bp_slots; ++s2) rows[(size_t) s2] = s2;
+                const std::vector<int32_t> toks = pick;
+                const std::vector<int64_t> ps = pos;
+                o_toks.assign((size_t) bp_slots, 0);
+                if (!step(rows, toks, ps, o_toks)) return step_fail("decode window");
+                for (int s2 = 0; s2 < bp_slots; ++s2) {
+                    streams[(size_t) s2].push_back(toks[(size_t) s2]);   // the window kept it: it is emitted
+                    pick[(size_t) s2] = o_toks[(size_t) s2];
+                    ++pos[(size_t) s2];
+                }
+            }
+            std::ofstream bo(bp_out);
+            for (int i = 0; i < bp_slots; ++i) {
+                bo << i;
+                for (int32_t t : streams[(size_t) i]) bo << ' ' << t;
+                bo << "\n";
+            }
+            bo.close();
+            std::fprintf(stderr, "strata parity: %d slots x %lld tokens -> %s\n", bp_slots, bp_n, bp_out.c_str());
+            std::fflush(stdout);
+            std::fflush(stderr);
+            return 0;
+        }
         std::string line;
         int64_t rounds = 0;
         // STRATA_WINDOW_DIGEST: a debug-only line per verify window (the solo token-exactness baseline, see the
