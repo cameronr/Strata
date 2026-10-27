@@ -640,15 +640,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                     ple_gated_ + (size_t) tb * NG_HC_DIM, norm, Rt(tb)};
                     native_ple_postops_tokens(key, Rt(tb), ple_val_ + tb * N, ss.ple.hist, pw, pb, n, cs,
                                               hist_snap_ + (size_t) tb * HS);
-                } else {   // batch: each row advances its slot's PLE history, the one-token window's own call
-                    for (int t = tb; t < te; ++t) {
-                        float* norm_t = ple_norm_ + (size_t) t * NG_HC_DIM;
-                        const NativePleTokensBuffers pb{ple_nkey_ + (size_t) t * NG_HC_DIM, norm_t, ple_gate_ + t * HC,
-                                                        ple_gated_ + (size_t) t * NG_HC_DIM, norm_t, Rt(t)};
-                        native_ple_postops_tokens(ple_key_ + (size_t) t * NG_HC_DIM, Rt(t), ple_val_ + (size_t) t * N,
-                                                  seg_ple_h_[(size_t) brow_[t]].ple_hist, pw, pb, 1, cs,
-                                                  hist_snap_ + (size_t) t * HS);
-                    }
+                } else {   // batch: rows advance their slot's PLE history through the table, one launch chain
+                    const NativePleTokensBuffers pb{ple_nkey_ + (size_t) tb * NG_HC_DIM, norm,
+                                                    ple_gate_ + tb * HC, ple_gated_ + (size_t) tb * NG_HC_DIM, norm,
+                                                    Rt(tb)};
+                    native_ple_postops_tokens_seg(ple_key_ + (size_t) tb * NG_HC_DIM, Rt(tb),
+                                                  ple_val_ + (size_t) tb * N, seg_ple_d_, seg_idx_, pw, pb, te - tb,
+                                                  cs, hist_snap_ + (size_t) tb * HS);
                 }
             } catch (const std::exception& e) {
                 err = std::string("verify PLE: ") + e.what();
@@ -717,22 +715,18 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_,
                                         (int) HK, (int) HV, te, T == 1 ? one_ : nullptr, cs, tb);
                 } else {
-                    // batch: one launch per row against that slot's state, each the one-token window's own call -
-                    // the row's buffers moved to the buffer's front so the kernel runs n_tok 1 at offset 0. The
-                    // state pointers come from the resident segment tables (seg_rows.hpp), never from the slot
-                    // sessions directly, so no batch graph bakes slot identity.
+                    // batch: one launch per stage over the rows, each row's state resolved through the resident
+                    // segment tables (seg_rows.hpp), never from the slot sessions - so no batch graph bakes slot
+                    // identity.  Bitwise the per-row one-token calls (the same __device__ bodies).
                     const uint64_t conv_off = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
-                    const size_t nsl = slots_.size();
-                    for (int t = tb; t < te; ++t)
-                        gdn_conv_l2_multi(seg_gdn_h_[(size_t) gi * nsl + brow_[t]].gdn_state + conv_off,
-                                          qkv + (size_t) t * C, (const float*) wc->data, hb + (size_t) t * C, (int) C,
-                                          (int) (2 * HK), EPS, 1, cs, 0, true);
+                    gdn_conv_l2_seg(seg_gdn_d_ + (size_t) gi * slots_.size(), seg_idx_, qkv + (size_t) tb * C,
+                                    (const float*) wc->data, hb + (size_t) tb * C, (int) C, (int) (2 * HK), EPS,
+                                    te - tb, conv_off, cs);
                     if (!wait(bjoin_) || !wait(pjoin_)) return false;
-                    for (int t = tb; t < te; ++t)
-                        gdn_step_norm_multi(seg_gdn_h_[(size_t) gi * nsl + brow_[t]].gdn_state, hb + (size_t) t * C,
-                                            (int) C, gate + (size_t) t * HV, beta + (size_t) t * HV, z_ + (size_t) t * ZV,
-                                            (const float*) wnm->data, EPS, y_ + (size_t) t * ZV, (int) HK, (int) HV, 1,
-                                            one_, cs, 0);
+                    gdn_step_norm_seg(seg_gdn_d_ + (size_t) gi * slots_.size(), seg_idx_, hb + (size_t) tb * C,
+                                      (int) C, gate + (size_t) tb * HV, beta + (size_t) tb * HV,
+                                      z_ + (size_t) tb * ZV, (const float*) wnm->data, EPS, y_ + (size_t) tb * ZV,
+                                      (int) HK, (int) HV, te - tb, one_, cs);
                 }
                 quant(y_ + (size_t) tb * ZV, ZV);
                 proj(wout, bo_ + tb * N, ZV, N, cs);
@@ -773,17 +767,13 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                     (int) kStepCount, n, 0, (const float*) wikn->data, EPS, ib, s,
                                                     st.max_cells, rope_scaling(), side_,
                                                     grp == 0 ? tail_snap_ + (size_t) qi * TS : nullptr);
-                } else {   // batch: each row appends into its slot's indexer; no tail snapshot, the window keeps it
-                    const size_t nsl = slots_.size();
-                    for (int t = tb; t < te; ++t) {
-                        const strata::kernels::SegRow& sr = seg_qsa_h_[(size_t) qi * nsl + brow_[t]];
-                        const QsaIndexerBuffers rib{sr.idx_tail, sr.idx_dead, sr.idx_pooled, sr.idx_block_pos};
-                        native_qsa_indexer_append_multi(idx_raw + (size_t) t * ID,
-                                                        step_ + (size_t) t * kStepCount + kStepPos, (int) kStepCount, 1,
-                                                        0, (const float*) wikn->data, EPS, rib, s,
-                                                        st.max_cells,   // uniform across slots (init_slots)
-                                                        rope_scaling(), side_, nullptr);
-                    }
+                } else {   // batch: rows append through the indexer table; no tail snapshot, the window keeps it
+                    native_qsa_indexer_append_multi_seg(seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_,
+                                                        idx_raw + (size_t) tb * ID,
+                                                        step_ + (size_t) tb * kStepCount + kStepPos,
+                                                        (int) kStepCount, te - tb, 0, (const float*) wikn->data, EPS,
+                                                        s, st.max_cells,   // uniform across slots (init_slots)
+                                                        rope_scaling(), side_);
                 }
                 norm_rope(qidx_ + tb * IQ * ID, (int) ID, qidx_ + tb * IQ * ID, wiqn, (int) IQ, (int) ID, side_);
                 if (!batch_rec_) {
@@ -796,9 +786,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                          qidx_ + (size_t) tb * IQ * ID, step_ + (size_t) tb * kStepCount, te - tb,
                                          max_blocks_, s, scores_ + (size_t) tb * max_blocks_, side_,
                                          qsa_score_grid_blocks);
-                    for (int t = tb; t < te; ++t)
-                        qsa_block_topk(scores_ + (size_t) t * max_blocks_, step_ + (size_t) t * kStepCount, 1,
-                                       max_blocks_, cap_, s, sel_ + (size_t) t * cap_, side_);
+                    // top-k needs no variant: the same launcher over the rows (qsa_sel_seg_parity pins the
+                    // selection's invariance to the chunk count the nq = rows call derives)
+                    qsa_block_topk(scores_ + (size_t) tb * max_blocks_, step_ + (size_t) tb * kStepCount, te - tb,
+                                   max_blocks_, cap_, s, sel_ + (size_t) tb * cap_, side_);
                 }
                 if (!mark(side_, bjoin_)) return false;
                 quant(xm, N);
@@ -821,10 +812,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     qsa_kv_append_steps(st, g, step_ + tb * kStepCount, (int) kStepCount, kcur_ + tb * NKV * HD,
                                         vcur_ + tb * NKV * HD, n, cs);
                 } else {
-                    for (int t = tb; t < te; ++t)
-                        qsa_kv_append_steps(slots_[brow_[t]]->qsa_states[qi], g, step_ + (size_t) t * kStepCount,
-                                            (int) kStepCount, kcur_ + (size_t) t * NKV * HD, vcur_ + (size_t) t * NKV * HD,
-                                            1, cs);
+                    qsa_kv_append_steps_seg(st.kv, seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_,
+                                            step_ + (size_t) tb * kStepCount, (int) kStepCount,
+                                            kcur_ + (size_t) tb * NKV * HD, vcur_ + (size_t) tb * NKV * HD, te - tb,
+                                            g, cs);
                 }
                 if (!wait(bjoin_) || !wait(pjoin_)) return false;
                 if (!batch_rec_) {
@@ -834,11 +825,12 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                           attn_scratch_ + (size_t) tb * attn_scratch_floats_, attn32_ + tb * NH * HD, n, cs,
                                           qfull_ + tb * NH * 2 * HD);
                 } else {
+                    // the probe only names the KV format (init_slots refuses mixed formats across slots, so the
+                    // session's own pools name it too); the rows' pools resolve through the device table
                     qsa_decode_attn_seg(seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_, qcur_ + tb * NH * HD,
                                         sel_ + (size_t) tb * cap_, step_ + (size_t) tb * kStepCount, cap_, s,
-                                        seg_qsa_h_[(size_t) qi * slots_.size() + brow_[tb]].kv,
-                                        attn_scratch_ + (size_t) tb * attn_scratch_floats_, attn32_ + tb * NH * HD,
-                                        te - tb, cs, qfull_ + tb * NH * 2 * HD);
+                                        qsa_attn_pools(st), attn_scratch_ + (size_t) tb * attn_scratch_floats_,
+                                        attn32_ + tb * NH * HD, te - tb, cs, qfull_ + tb * NH * 2 * HD);
                 }
                 quant(attn32_ + tb * NH * HD, NH * HD);
                 proj(wo, bo_ + tb * N, NH * HD, N, cs);
@@ -1255,11 +1247,18 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
         }
         // the fused attention launches pick their kernel from the pools' format once per window: a mixed KV
         // format across slots would make that a per-row decision again (qsa_decode_attn_seg's assumption).
-        for (int qi = 0; qi < n_qsa_pre; ++qi)
+        for (int qi = 0; qi < n_qsa_pre; ++qi) {
             if (x->qsa_states[qi].kv != ss_->qsa_states[qi].kv) {
                 err = "verify: batch slots must share one KV format";
                 return false;
             }
+            // the batch KV append is fused for the quantized pools only (the F16 append is a host loop over the
+            // per-token kernel, which would bake the slot's pointers into the graph)
+            if (x->qsa_states[qi].kv == KvFormat::F16) {
+                err = "verify: batch slots require quantized KV pools";
+                return false;
+            }
+        }
     }
     slots_ = slots;
     // the resident segment tables (seg_rows.hpp): one entry per (stateful layer, slot), derived from the sessions.
@@ -1285,6 +1284,15 @@ bool Verifier::init_slots(const std::vector<SessionState*>& slots, std::string& 
                 e.idx_pooled = qs.idx_pooled;
                 e.idx_block_pos = qs.idx_block_pos;
                 e.kv = qsa_attn_pools(qs);
+                e.wr.k_q = qs.k_q;
+                e.wr.k_scale = qs.k_scale;
+                e.wr.v_q = qs.v_q;
+                e.wr.v_scale = qs.v_scale;
+                e.wr.k_q4 = qs.k_q4;
+                e.wr.k_q4s = qs.k_q4s;
+                e.wr.v_q4 = qs.v_q4;
+                e.wr.v_q4s = qs.v_q4s;
+                e.wr.page_table = qs.page_table;
                 ++qi;
             } else {
                 seg_gdn_h_[(size_t) gi * n + b].gdn_state = slots[b]->gdn_state + (size_t) gi * gdn_floats;

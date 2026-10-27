@@ -804,6 +804,29 @@ void qsa_kv_append_steps(const QsaState& st, const ModelGeometry& g, const int32
                            stream);
     }
 }
+void qsa_kv_append_steps_seg(KvFormat kv, const kernels::SegRow* seg, const int32_t* row_slot, const int32_t* step,
+                             int step_stride, const float* kcur, const float* vcur, int n_rows,
+                             const ModelGeometry& g, void* stream) {
+    using namespace strata::kernels;
+    const QsaShapes s = qsa_shapes(g);
+    switch (kv) {
+    case KvFormat::Int8:
+        kv_append_q8_seg(seg, row_slot, step, step_stride, kcur, vcur, n_rows, s, stream);
+        break;
+    case KvFormat::Q4:
+        kv_append_q4_seg(seg, row_slot, step, step_stride, kcur, vcur, n_rows, s, stream, 2);
+        break;
+    case KvFormat::K8V4:
+        kv_append_q8_seg(seg, row_slot, step, step_stride, kcur, vcur, n_rows, s, stream, 1);
+        kv_append_q4_seg(seg, row_slot, step, step_stride, kcur, vcur, n_rows, s, stream, 1);
+        break;
+    default:
+        // F16 pools have no fused append (the solo path runs the per-token kernel in a host loop). Unreachable:
+        // init_slots refuses F16 KV pools for batch slots, so no batch graph can bake this branch.
+        std::fprintf(stderr, "strata: batch KV append needs quantized pools\n");
+        std::abort();
+    }
+}
 void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     const QsaShapes s = qsa_shapes(g);
     cudaStream_t cs = (cudaStream_t) stream;

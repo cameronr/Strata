@@ -40,6 +40,7 @@
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/ple.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/kernels/seg_rows.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -288,6 +289,12 @@ strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st);
 /// its K and V rows at kcur/vcur + t * n_head_kv * head_dim (4-bit sides rotated and quantized here).
 void qsa_kv_append_steps(const QsaState& st, const ModelGeometry& g, const int32_t* step, int step_stride,
                          const float* kcur, const float* vcur, int n_tok, void* stream);
+/// The batch window's form (seg_rows.hpp): one token per row, the pools and page table of row r read from
+/// `seg[row_slot[r]]`.  Bitwise the per-row appends.  `kv` is the window's (global) format; F16 never reaches it -
+/// `Verifier::init_slots` refuses F16 KV pools for batch slots.
+void qsa_kv_append_steps_seg(KvFormat kv, const strata::kernels::SegRow* seg, const int32_t* row_slot,
+                             const int32_t* step, int step_stride, const float* kcur, const float* vcur, int n_rows,
+                             const ModelGeometry& g, void* stream);
 /// The state's K/V arrays, laid out [page][kv_head][page_size][...] (with an identity page table the first cells
 /// are one prefix of each), and their bytes per cell and KV head.
 struct KvArray {
