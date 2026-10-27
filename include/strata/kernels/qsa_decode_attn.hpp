@@ -20,6 +20,8 @@
 
 namespace strata::kernels {
 
+struct SegRow;   // the batch window's segment table entry (seg_rows.hpp)
+
 /// The K and V pools of one QSA layer: FP16 (k_pool, v_pool), INT8 (k_q ... v_scale), INT8 K with 4-bit V (k_q,
 /// k_scale, v_q4, v_q4s: k8v4) or 4-bit K and V (k_q4 ... v_q4s: q4_0).
 struct QsaAttnPools {
@@ -49,6 +51,17 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
 void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream,
                            const float* gate = nullptr);
+
+/// The batch window's attention in ONE launch (seg_rows.hpp): query r of [0, n) attends over its own slot's pools,
+/// read as `seg[row_slot[r]].kv`. Row r's program is the per-row `qsa_decode_attn_batch(n_q = 1)` call's exactly:
+/// same `__device__` body, same grid per row, and the SPLITS ARE PINNED to `decode_splits(cap, 1, n_kv)` - the
+/// per-row call's value - because the split count fixes the partials' layout and the merge's sum order. `probe` is
+/// the first row's pools (host-side): the kernel form and the format checks come from it, and the window's KV
+/// format is uniform because `Verifier::init_slots` refuses mixed formats across slots. The merge runs once over
+/// the n rows (it is already row-independent).
+void qsa_decode_attn_seg(const SegRow* seg, const int32_t* row_slot, const float* q, const int32_t* ids,
+                         const int32_t* steps, int64_t cap, const QsaShapes& s, const QsaAttnPools& probe,
+                         float* scratch, float* attn, int64_t n, void* stream, const float* gate = nullptr);
 
 /// The prompt path's form of qsa_decode_attn_batch (no scratch): a block per (KV head, query) walks all of the
 /// query's cells, so no partial sums go through memory.

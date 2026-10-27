@@ -11,6 +11,9 @@
 #include <type_traits>
 #include <unordered_map>
 
+// src/core/verify.cpp's batch windows: see include/strata/kernels/seg_rows.hpp for the segment table contract.
+#include "strata/kernels/seg_rows.hpp"
+
 namespace strata::kernels {
 namespace {
 
@@ -78,11 +81,11 @@ __device__ __forceinline__ void group_scores(const float4 (&k)[SCORE_KB][4], con
 
 // 8-lane groups of SCORE_KB consecutive key blocks each, read once for all the queries, which go through shared
 // memory SCORE_QC at a time.  Block n_bid of a query is its incomplete tail: the `dead` key, +1e9 when it has cells.
-__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_kernel(const float* __restrict__ pooled,
-                                                                        const float* __restrict__ dead,
-                                                                        const float* __restrict__ q_idx,
-                                                                        const int32_t* __restrict__ steps, int nq,
-                                                                        int64_t max_blocks, float* __restrict__ out) {
+// The body is shared with the batch form (block_scores_seg_kernel): one launch whose rows are queries of different
+// slots, each row program-identical to a per-row nq=1 call of this kernel.
+__device__ __forceinline__ void block_scores_body(const float* __restrict__ pooled, const float* __restrict__ dead,
+                                                  const float* __restrict__ q_idx, const int32_t* __restrict__ steps,
+                                                  int nq, int64_t max_blocks, float* __restrict__ out) {
     __shared__ __align__(16) float qs[SCORE_QC * IDX_HEADS * IDX_DIM];
     __shared__ int s_nkv[SCORE_QC], s_nbid[SCORE_QC];
     const int t = threadIdx.x, lane = t & 31, j = lane & 7;
@@ -133,6 +136,28 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_kernel(const fl
             }
         }
     }
+}
+
+__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_kernel(const float* __restrict__ pooled,
+                                                                        const float* __restrict__ dead,
+                                                                        const float* __restrict__ q_idx,
+                                                                        const int32_t* __restrict__ steps, int nq,
+                                                                        int64_t max_blocks, float* __restrict__ out) {
+    block_scores_body(pooled, dead, q_idx, steps, nq, max_blocks, out);
+}
+
+// The batch window's form (qsa_block_scores_seg): row blockIdx.y is one query of its own slot, whose keys the
+// resident segment table names. One row's program IS the nq=1 per-row call's - same body, same grid.x, and the
+// per-row launcher always picks block_scores_kernel at nq=1, so no cross-kernel parity is relied on. The table
+// entry is one dependent global load per block; rows never index a parameter array (that spills to local memory).
+__global__ void __launch_bounds__(SCORE_WARPS * 32)
+block_scores_seg_kernel(const SegRow* __restrict__ seg, const int32_t* __restrict__ row_slot,
+                        const float* __restrict__ q_idx, const int32_t* __restrict__ steps, int64_t max_blocks,
+                        float* __restrict__ out) {
+    const unsigned r = blockIdx.y;
+    const SegRow row = seg[row_slot[r]];
+    block_scores_body(row.idx_pooled, row.idx_dead, q_idx + (int64_t) r * QD, steps + (int64_t) r * kStepCount, 1,
+                      max_blocks, out + (int64_t) r * max_blocks);
 }
 
 // The decode windows' scores with the queries in registers: a warp a key block, lane l holding leaf l (dims
@@ -845,6 +870,13 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_kernel(const float* __r
 
 }  // namespace
 
+// the block_scores_kernel grid.x: the covered blocks in tiles of SCORE_TILE. One source for the per-row launcher
+// and the batch seg launcher, so a batch row's blocks tile the same key blocks in the same rounds.
+static int64_t score_grid_x(int64_t grid_blocks, int64_t max_blocks) {
+    const int64_t covered = grid_blocks < max_blocks ? grid_blocks : max_blocks;
+    return (covered + SCORE_TILE - 1) / SCORE_TILE;
+}
+
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                       int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t grid_blocks) {
     if (nq <= 0) return;
@@ -874,7 +906,7 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
         batch_scores_kernel<<<grid, BATCH_T, smem, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
                                                                             max_blocks, scores);
     } else {
-        const unsigned grid = (unsigned) ((covered + SCORE_TILE - 1) / SCORE_TILE);
+        const unsigned grid = (unsigned) score_grid_x(grid_blocks, max_blocks);
         const cudaStream_t st = (cudaStream_t) stream;
         if (nq == 2) block_scores_reg_kernel<2><<<grid, SCORE_WARPS * 32, 0, st>>>(pooled, dead, q_idx, steps, 2, max_blocks, scores);
         else if (nq >= 3 && nq <= 8)
@@ -884,6 +916,23 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
     }
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores: %s\n", cudaGetErrorString(e)); std::exit(1); }
+}
+
+void qsa_block_scores_seg(const SegRow* seg, const int32_t* row_slot, const float* q_idx, const int32_t* steps,
+                          int64_t n, int64_t max_blocks, const QsaShapes& s, float* scores, void* stream,
+                          int64_t grid_blocks) {
+    if (n <= 0) return;
+    if (s.idx_dim != IDX_DIM || s.idx_n_head != IDX_HEADS || s.idx_block != R || n > 65535 || grid_blocks < 1) {
+        std::fprintf(stderr, "qsa_block_scores_seg: unsupported indexer geometry\n");
+        std::exit(1);
+    }
+    // no decline path: the per-row nq=1 call always runs block_scores_kernel, which is exactly what the seg
+    // kernel is. n <= kVerifyMaxT (8) by the verifier's window cap; the rows are validated by run_slot_rows.
+    const dim3 grid((unsigned) score_grid_x(grid_blocks, max_blocks), (unsigned) n);
+    block_scores_seg_kernel<<<grid, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(seg, row_slot, q_idx, steps,
+                                                                                   max_blocks, scores);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores_seg: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
 
 namespace {

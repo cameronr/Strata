@@ -30,6 +30,8 @@
 
 namespace strata::kernels {
 
+struct SegRow;   // the batch window's segment table entry (seg_rows.hpp)
+
 /// scores [nq, max_blocks]; q_idx [nq, idx_n_head, idx_dim] (normed and rotated); steps [nq, kStepCount].
 /// The grid covers the first `grid_blocks` blocks and goes round for the rest: a captured graph passes a fixed size
 /// (qsa_score_grid_blocks), the prompt path the batch's largest n_bid + 1.
@@ -39,6 +41,15 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
 /// The block-score grid of the decode paths, whatever the context: 164 thread blocks of 64 key blocks, one wave on
 /// the RTX 3090 (two per SM); longer contexts go round.
 constexpr int64_t qsa_score_grid_blocks = 10496;
+
+/// The batch window's scores in ONE launch (seg_rows.hpp): row r of [0, n) scores the keys of its own slot, read
+/// as `seg[row_slot[r]]` - the resident segment table and the window's row -> slot index, both at fixed addresses.
+/// Row r's program is the per-row `qsa_block_scores(nq = 1)` call's exactly (same body, same grid.x): the per-row
+/// launcher always picks block_scores_kernel at nq=1, so there is no decline path. `row_slot` entries are
+/// validated by the caller (Verifier::run_slot_rows).
+void qsa_block_scores_seg(const SegRow* seg, const int32_t* row_slot, const float* q_idx, const int32_t* steps,
+                          int64_t n, int64_t max_blocks, const QsaShapes& s, float* scores, void* stream,
+                          int64_t grid_blocks);
 
 /// The most cells qsa_block_topk selects over on the current device, --max-context's limit: its tables take 512 bytes
 /// of shared memory per 4,096 cells (1,466,368 on the RTX 3090's 99 KiB, 630,784 on a 48 KiB card).

@@ -311,6 +311,13 @@ if(STRATA_ENABLE_CUDA)
   target_link_libraries(s2_gemv_parity PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME s2_gemv_parity COMMAND s2_gemv_parity --selftest)
 
+  # the batch window's QSA selection in one launch over rows (seg_rows.hpp): bitwise equal to one call per row
+  add_executable(qsa_sel_seg_parity src/kernels/qsa_sel_seg_parity.cpp)
+  target_include_directories(qsa_sel_seg_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(qsa_sel_seg_parity PRIVATE strata_kernels CUDA::cudart)
+  add_test(NAME qsa_sel_seg_parity COMMAND qsa_sel_seg_parity)
+  set_tests_properties(qsa_sel_seg_parity PROPERTIES SKIP_RETURN_CODE 77)
+
   add_executable(iq_parity src/kernels/iq_parity.cpp)
   target_include_directories(iq_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(iq_parity PRIVATE strata_kernels CUDA::cudart)

@@ -2,6 +2,7 @@
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/seg_rows.hpp"   // the batch window's segment table (qsa_decode_attn_seg)
 
 #include "fwht.cuh"
 
@@ -54,11 +55,11 @@ __host__ __device__ __forceinline__ int split_cells(int n, int splits) {
 // thread (dimension pair, cell parity) accumulates its two dimensions of the 12 heads over every other cell; the
 // parities are added at the end.
 template <bool SPLIT>
-__global__ void __launch_bounds__(THREADS) attn_f16_kernel(const float* __restrict__ q, QsaAttnPools p,
-                                                           const int32_t* __restrict__ ids,
-                                                           const int32_t* __restrict__ steps, int n_kv_heads,
-                                                           int page_size, float scale, float* __restrict__ attn,
-                                                           int cap, Partials part) {
+__device__ __forceinline__ void attn_f16_body(const float* __restrict__ q, QsaAttnPools p,
+                                              const int32_t* __restrict__ ids,
+                                              const int32_t* __restrict__ steps, int n_kv_heads,
+                                              int page_size, float scale, float* __restrict__ attn,
+                                              int cap, Partials part) {
     const int kvh = blockIdx.x;
     const size_t qi = blockIdx.y;
     const size_t head0 = qi * (size_t) (n_kv_heads * G) + (size_t) kvh * G;
@@ -211,6 +212,29 @@ __global__ void __launch_bounds__(THREADS) attn_f16_kernel(const float* __restri
     }
 }
 
+template <bool SPLIT>
+__global__ void __launch_bounds__(THREADS) attn_f16_kernel(const float* __restrict__ q, QsaAttnPools p,
+                                                           const int32_t* __restrict__ ids,
+                                                           const int32_t* __restrict__ steps, int n_kv_heads,
+                                                           int page_size, float scale, float* __restrict__ attn,
+                                                           int cap, Partials part) {
+    attn_f16_body<SPLIT>(q, p, ids, steps, n_kv_heads, page_size, scale, attn, cap, part);
+}
+
+// The batch window's FP16 form (qsa_decode_attn_seg, seg_rows.hpp): query blockIdx.y attends over its own slot's
+// pools, read from the resident segment table by the window's row -> slot index. The rest is attn_f16_kernel's
+// batched form - same body, same grid, same splits - so a row's program is the per-row call's exactly.
+template <bool SPLIT>
+__global__ void __launch_bounds__(THREADS) attn_f16_seg_kernel(const SegRow* __restrict__ seg,
+                                                               const int32_t* __restrict__ row_slot,
+                                                               const float* __restrict__ q,
+                                                               const int32_t* __restrict__ ids,
+                                                               const int32_t* __restrict__ steps, int n_kv_heads,
+                                                               int page_size, float scale, float* __restrict__ attn,
+                                                               int cap, Partials part) {
+    attn_f16_body<SPLIT>(q, seg[row_slot[blockIdx.y]].kv, ids, steps, n_kv_heads, page_size, scale, attn, cap, part);
+}
+
 // ---- INT8 pools: the codes on the tensor cores (mma m16n8k32, int8).  A block per (KV head, query), or per (KV head,
 // query, split) with SPLIT, its 12 query heads the rows of the 16-row fragments, 64 cells a tile.  q and the
 // probabilities enter as 24-bit fixed point, three 8-bit limbs each; the integer sums are exact, so the error is the
@@ -333,11 +357,11 @@ __device__ __forceinline__ void scales_in(uint2* d, const uint16_t* src, bool ok
 }  // namespace pf
 
 template <bool SPLIT, bool KQ4, bool VQ4>
-__global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __restrict__ q, QsaAttnPools p,
-                                                             const int32_t* __restrict__ ids,
-                                                             const int32_t* __restrict__ steps, int n_kv_heads,
-                                                             int page_size, float scale, float* __restrict__ attn,
-                                                             int cap, Partials part) {
+__device__ __forceinline__ void attn_mma_body(const float* __restrict__ q, QsaAttnPools p,
+                                              const int32_t* __restrict__ ids,
+                                              const int32_t* __restrict__ steps, int n_kv_heads,
+                                              int page_size, float scale, float* __restrict__ attn,
+                                              int cap, Partials part) {
     using namespace pf;
     using SM = Smem<KQ4, VQ4>;
     extern __shared__ __align__(16) uint8_t smem_raw[];
@@ -889,6 +913,29 @@ __global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __rest
     }
 }
 
+template <bool SPLIT, bool KQ4, bool VQ4>
+__global__ void __launch_bounds__(pf::NT, 1) attn_mma_kernel(const float* __restrict__ q, QsaAttnPools p,
+                                                             const int32_t* __restrict__ ids,
+                                                             const int32_t* __restrict__ steps, int n_kv_heads,
+                                                             int page_size, float scale, float* __restrict__ attn,
+                                                             int cap, Partials part) {
+    attn_mma_body<SPLIT, KQ4, VQ4>(q, p, ids, steps, n_kv_heads, page_size, scale, attn, cap, part);
+}
+
+// The batch window's tensor-core form (qsa_decode_attn_seg, seg_rows.hpp): query blockIdx.y over its own slot's
+// pools from the resident segment table; everything else is attn_mma_kernel's, splits included.
+template <bool SPLIT, bool KQ4, bool VQ4>
+__global__ void __launch_bounds__(pf::NT, 1) attn_mma_seg_kernel(const SegRow* __restrict__ seg,
+                                                                 const int32_t* __restrict__ row_slot,
+                                                                 const float* __restrict__ q,
+                                                                 const int32_t* __restrict__ ids,
+                                                                 const int32_t* __restrict__ steps, int n_kv_heads,
+                                                                 int page_size, float scale, float* __restrict__ attn,
+                                                                 int cap, Partials part) {
+    attn_mma_body<SPLIT, KQ4, VQ4>(q, seg[row_slot[blockIdx.y]].kv, ids, steps, n_kv_heads, page_size, scale, attn,
+                                   cap, part);
+}
+
 // x * sigmoid(raw) as native_qsa_gate_apply computes it: its TU's fast-math instructions
 __device__ __forceinline__ float gated(float x, float raw) {
     float r;
@@ -1034,6 +1081,23 @@ void launch_kv(Kv kv, dim3 grid, cudaStream_t st, const float* q, const QsaAttnP
                                                          scale, attn, (int) cap, part);
 }
 
+// the batch window's tensor-core form, shared memory set once per form and device (the seg kernels are their own)
+template <bool SPLIT, bool KQ4, bool VQ4>
+void launch_mma_seg(dim3 grid, cudaStream_t st, const SegRow* seg, const int32_t* row_slot, const float* q,
+                    const int32_t* ids, const int32_t* steps, const QsaShapes& s, float scale, int64_t cap,
+                    const Partials& part) {
+    static bool set[64] = {};   // per device
+    int dev = 0;
+    cudaGetDevice(&dev);
+    if (dev >= 0 && dev < 64 && !set[dev]) {
+        cudaFuncSetAttribute(attn_mma_seg_kernel<SPLIT, KQ4, VQ4>, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                             (int) sizeof(pf::Smem<KQ4, VQ4>));
+        set[dev] = true;
+    }
+    attn_mma_seg_kernel<SPLIT, KQ4, VQ4><<<grid, pf::NT, sizeof(pf::Smem<KQ4, VQ4>), st>>>(
+        seg, row_slot, q, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, nullptr, (int) cap, part);
+}
+
 }  // namespace
 
 void qsa_prefill_attn(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
@@ -1089,6 +1153,42 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
 
 uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s) {
     return (uint64_t) max_splits(cap) * (uint64_t) s.n_head * (HD + 2) + 64;
+}
+
+void qsa_decode_attn_seg(const SegRow* seg, const int32_t* row_slot, const float* q, const int32_t* ids,
+                         const int32_t* steps, int64_t cap, const QsaShapes& s, const QsaAttnPools& probe,
+                         float* scratch, float* attn, int64_t n, void* stream, const float* gate) {
+    if (n <= 0) return;
+    const Kv kv = kv_of(probe);   // the rows' format is uniform: init_slots refuses mixed KV formats across slots
+    if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
+        !probe.page_table || !kv_complete(probe, kv)) {
+        std::fprintf(stderr, "qsa_decode_attn_seg: unsupported geometry or missing buffers\n");
+        std::exit(1);
+    }
+    // LOAD-BEARING: the splits are the per-row call's (n_q = 1). The split count fixes the partials' layout and
+    // the merge's sum order, so re-deriving it from n would silently change every row's bits.
+    const int splits = decode_splits(cap, 1, s.n_head_kv);
+    const Partials part = partials(scratch, splits, s.n_head, (long long) qsa_decode_attn_scratch_floats(cap, s));
+    const float scale = 1.0f / sqrtf((float) HD);
+    const dim3 grid((unsigned) s.n_head_kv, (unsigned) n, (unsigned) splits);
+    cudaStream_t st = (cudaStream_t) stream;
+    if (kv == Kv::I8)
+        launch_mma_seg<true, false, false>(grid, st, seg, row_slot, q, ids, steps, s, scale, cap, part);
+    else if (kv == Kv::I8Q4)
+        launch_mma_seg<true, false, true>(grid, st, seg, row_slot, q, ids, steps, s, scale, cap, part);
+    else if (kv == Kv::Q4)
+        launch_mma_seg<true, true, true>(grid, st, seg, row_slot, q, ids, steps, s, scale, cap, part);
+    else
+        attn_f16_seg_kernel<true><<<grid, THREADS, 0, st>>>(seg, row_slot, q, ids, steps, (int) s.n_head_kv,
+                                                            (int) s.page_size, scale, nullptr, (int) cap, part);
+    const dim3 mgrid((unsigned) s.n_head, (unsigned) n);
+    if (kv == Kv::I8Q4 || kv == Kv::Q4) attn_merge_kernel<true><<<mgrid, THREADS, 0, st>>>(part, steps, gate, attn);
+    else attn_merge_kernel<false><<<mgrid, THREADS, 0, st>>>(part, steps, gate, attn);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_decode_attn_seg: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
 }
 
 void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* step,
