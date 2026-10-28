@@ -337,25 +337,18 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             if (ids[j] == ids[i]) { first_of[i] = first_of[j]; break; }
         if (first_of[i] == i) distinct[nd++] = i;
     }
-    // The second GPU takes this layer's share only when the layer's misses are big enough that the CPU would need
-    // longer for all of them than its round trip (~100 us: ~4 MB of experts at the pool's ~45 GB/s); otherwise it
-    // would only add its latency.  Its rows reach the main GPU through the sink.
+    // The second GPU takes every entry its VRAM tier holds.  The split must be a function of the entry alone, never
+    // of the window's shape: with --expert-math fast the GPU's experts differ from the CPU's at ULP level, so a
+    // gate on the window's total miss bytes (as earlier rounds had) makes a token's tokens depend on which other
+    // rows share its window, and a batch window would decode differently from the same conversation solo.
+    // Its rows reach the main GPU through the sink.
     GpuPlanSink* const S2 = d.gpu2 != nullptr && d.plan != nullptr && d.plan->gpu2_flag != nullptr ? d.plan : nullptr;
     d.gpu2_used = false;
     if (S2 != nullptr) {
-        uint64_t miss_bytes = 0, gpu2_bytes = 0;
-        bool only_there = false;   // an expert only in its VRAM (--vram-pin-gib): no other device can compute it
-        for (int q = 0; q < nd; ++q) {
+        for (int q = 0; q < nd && !d.gpu2_used; ++q) {
             const int32_t e = ids[distinct[q]];
-            if (e < 0 || e >= d.n_expert || in_vram(e)) continue;
-            miss_bytes += lay.blob_bytes(d.layers);
-            if (on_gpu2(e)) {
-                gpu2_bytes += lay.blob_bytes(d.layers);
-                only_there = only_there || !d.src->in_ram(d.layers, e);
-            }
+            d.gpu2_used = e >= 0 && e < d.n_expert && !in_vram(e) && on_gpu2(e);
         }
-        d.gpu2_used = gpu2_bytes > 0 && (only_there || miss_bytes >= d.gpu2_min_bytes);
-        if (gpu2_bytes > 0 && !d.gpu2_used) ++d.gpu2_skipped;
     }
     auto on_gpu2_now = [&](int32_t e) { return d.gpu2_used && on_gpu2(e); };
     GpuPlanSink* P = d.plan != nullptr && d.plan->pcie && n <= d.plan->cap ? d.plan : nullptr;

@@ -305,7 +305,6 @@ struct Options {
     int second_gpu = -1;
     double second_gpu_gib = 0.0;
     int second_gpu_reserve_mib = 2048;
-    double second_gpu_min_mb = 4.0;   ///< a layer's misses from which it takes its share (smaller: the CPU is quicker)
     double second_gpu_prefetch_mb = 12.0;   ///< per layer, the likeliest experts no GPU holds copied to it ahead (0 = off)
     /// Keep GPU 1 resident and executing, but do not adapt its residency while the main tier adapts.
     /// The default remains coupled dual-tier adaptation.
@@ -486,8 +485,6 @@ void usage() {
                  "                       expert tier: it holds the profile's next experts, then the conversation's,\n"
                  "                       and computes them beside the CPU pool (native packs, verify windows)\n"
                  "  --second-gpu-gib G   its VRAM for experts (default: all but --second-gpu-reserve-mib, 2048)\n"
-                 "  --second-gpu-min-mb M  a layer's missed experts from which it takes its share (default 4; below\n"
-                 "                       it the CPU is quicker than its ~100 us round trip)\n"
                  "  --second-gpu-prefetch-mb M  per layer, copy its likeliest experts that no GPU holds (the next\n"
                  "                       layer's router on this layer's input), up to M MiB, to it while the RAM is idle\n"
                  "                       (default 12: ~0.28 ms at its ~48 GB/s; 0 = off)\n"
@@ -1317,7 +1314,6 @@ int main(int argc, char** argv) {
         else if (a == "--second-gpu") o.second_gpu = std::atoi(next("--second-gpu"));
         else if (a == "--second-gpu-gib") o.second_gpu_gib = std::atof(next("--second-gpu-gib"));
         else if (a == "--second-gpu-reserve-mib") o.second_gpu_reserve_mib = std::atoi(next("--second-gpu-reserve-mib"));
-        else if (a == "--second-gpu-min-mb") o.second_gpu_min_mb = std::atof(next("--second-gpu-min-mb"));
         else if (a == "--second-gpu-prefetch-mb") o.second_gpu_prefetch_mb = std::atof(next("--second-gpu-prefetch-mb"));
         else if (a == "--no-second-gpu-adapt") o.no_second_gpu_adapt = true;
         else if (a == "--deterministic-adapt") o.deterministic_adapt = true;
@@ -3166,7 +3162,6 @@ int main(int argc, char** argv) {
         if (ok) {
             drive.d.gpu2 = &gpu2;
             drive.d.host_res2 = host_res2.data();
-            drive.d.gpu2_min_bytes = (uint64_t) (o.second_gpu_min_mb * 1048576.0);
             std::fprintf(stderr, "strata generate: second GPU %d (%s): %zu experts from the profile and %zu empty slots, "
                                  "%.2f GiB\n", o.second_gpu, prop.name, pre.size(), empty2.size(), gpu2.cache().gib());
         } else {
