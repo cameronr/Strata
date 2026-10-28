@@ -4386,6 +4386,9 @@ int main(int argc, char** argv) {
             admit_slot = -1;   // an admission that ends before its DONE (an ERR path) leaves no residue
             stop_req.store(false);   // a STOP that arrived between requests is stale
             err.clear();             // and so is a stopped request's "cancelled"
+            if (line.rfind("BYIELD ", 0) == 0)
+                continue;   // 5b: a read does not give way yet; dropped silently, as upstream drops it for a
+                            // pipelined batch (the harness's --yield skip path expects no answer, not an ERR)
             if (line.rfind("BSTOP ", 0) == 0) {
                 const int b = (int) std::strtol(line.c_str() + 6, nullptr, 10);
                 if (b >= 0 && b < (int) bs.size()) bs[(size_t) b].stop = true;   // the next window ends it
