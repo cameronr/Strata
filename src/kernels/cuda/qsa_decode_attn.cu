@@ -1135,7 +1135,12 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         std::fprintf(stderr, "qsa_decode_attn: unsupported geometry or missing buffers\n");
         std::exit(1);
     }
-    const int splits = decode_splits(cap, n_q, s.n_head_kv);
+    // LOAD-BEARING, as in qsa_decode_attn_seg: the splits are the per-row call's (n_q = 1), never the window's.
+    // The split count fixes the partials' layout and the merge's sum order, so deriving it from n_q would make a
+    // row's bits depend on how many rows share the window - a drafted solo window (T >= 2) would decode a long
+    // context differently from the same conversation's one-token windows, and a batch window differently from
+    // either.  Long contexts are where it shows: only there does the selection fill every split's cells.
+    const int splits = decode_splits(cap, 1, s.n_head_kv);
     const Partials part = partials(scratch, splits, s.n_head, (long long) qsa_decode_attn_scratch_floats(cap, s));
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) s.n_head_kv, (unsigned) n_q, (unsigned) splits);
