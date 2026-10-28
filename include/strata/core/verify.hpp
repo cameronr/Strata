@@ -100,6 +100,13 @@ public:
     /// The penalty histories for `penalty_last_n`: one row per window row, T rows of `history_len` int32 slots
     /// (`strata::kernels::penalty_rows`), device memory staged before every window; null: no penalties.
     void set_history(const int32_t* history, int history_len) { hist_d_ = history; hist_len_ = history_len; }
+    /// Back to the built-in greedy, unpenalized default (phase 5: every request ends by resetting it, so the
+    /// batch windows - which refuse sampled or penalized state - never wait on a finished sampled request).
+    void reset_sampling() {
+        sampling_ = default_sampling();
+        hist_d_ = nullptr;
+        hist_len_ = 0;
+    }
     /// Off: `run` skips the head sampling and `out` is the greedy pick (windows whose picks are discarded: a prompt
     /// read through windows commits every token).
     void set_head_sampling(bool on) { head_sampling_ = on; }
@@ -145,6 +152,10 @@ public:
     /// not to be used, and the sequence state behind them is poisoned.  Read from flags the head's argmax wrote.
     /// STRATA_NAN_GUARD=0: always -1.  STRATA_NAN_INJECT=n[,n...]: the n-th call reports token 0 (a test of the path).
     int nonfinite(int T);
+
+    /// Every token of the last window whose logits were non-finite (the rows `nonfinite` reports one of).  Does
+    /// not consume the STRATA_NAN_INJECT count; call it only after `nonfinite` reported one.
+    std::vector<int> nonfinite_rows(int T);
 
     /// The residency the window decides the main GPU's hits by: `VerifyHits::res` as `init` and the last `run` found
     /// it.  The pool reads this one (`ExpertDispatch::host_res`), so it leaves exactly the GPU's rows to the GPU.
@@ -237,12 +248,15 @@ private:
     bool drive_window(int T, int64_t sample_pos, PoolMultiFn pool, void* user, int32_t* out, std::string& err,
                       bool batched = false);
 
-    strata::kernels::SamplerParams sampling_ = [] {
+    /// The engine's default sampling: greedy, unpenalized (the batch windows refuse anything else).
+    static strata::kernels::SamplerParams default_sampling() {
         strata::kernels::SamplerParams s;
         s.greedy = true;
         s.temperature = 0.0f;
         return s;
-    }();
+    }
+    strata::kernels::SamplerParams sampling_ = default_sampling();
+
     const int32_t* hist_d_ = nullptr;
     int hist_len_ = 0;
     bool head_sampling_ = true;

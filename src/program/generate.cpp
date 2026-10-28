@@ -3935,6 +3935,15 @@ int main(int argc, char** argv) {
             in_lines.pop_front();
             return true;
         };
+        // the scheduler's non-blocking take (phase 5): with slots active an empty queue means run a batch
+        // window, not wait - FCFS serves lines in arrival order and the windows fill the gaps between them
+        auto try_next_line = [&](std::string& out) -> bool {
+            std::lock_guard<std::mutex> lk(in_mu);
+            if (in_lines.empty()) return false;
+            out = std::move(in_lines.front());
+            in_lines.pop_front();
+            return true;
+        };
         // PP <done> <total> <ms> <tok/s>: the prompt's progress, one line per chunk (the server's progress and
         // keep-alives); `pp_at` is where the running segment starts, `pp_total` 0 outside a prompt
         int64_t pp_from = 0, pp_at = 0, pp_total = 0;
@@ -4257,10 +4266,155 @@ int main(int argc, char** argv) {
                                 tier2.fills,         tier2.dropped,      gpu2.prefetch_copied, gpu2.prefetch_used};
         };
         TierCounters req_tiers{};
-        while (next_line(line)) {
+        // ---- phase 5: the batch protocol (docs/BATCHING.md). A BGEN request reads on the ordinary request
+        // path as `GEN 1`; when its DONE is out, `BADM <slot> <1|0>` says whether the conversation continues
+        // in the batch windows (state copied in), and `BT`/`BDONE` carry its tokens from there. A retired slot
+        // keeps its conversation (the slot_cache INFO announced it) and a later request that continues it is
+        // served from the slot ("gave back"). Windows run one token per slot, greedy, unpenalized, no drafts.
+        struct BSlot {
+            bool active = false;   // feeds the batch windows
+            bool stop = false;     // BSTOP arrived: the next window ends the slot (cancel)
+            bool cached = false;   // idle, and its session still holds the conversation `ids`
+            bool tainted = false;  // ended on non-finite logits: nothing may be cached
+            int32_t x = 0;         // the token the next window feeds
+            int64_t p = 0;         // its position (== ids.size(), the cells the session holds)
+            long long produced = 0, max_new = 0;
+            Clock::time_point t0;
+            std::vector<int64_t> ids;   // the tokens the session holds: fed tokens, not the last pick
+        };
+        std::vector<BSlot> bs(batch_on ? (size_t) o.parallel : 0);
+        int admit_slot = -1;              // the BGEN request being read (-1: an ordinary GEN)
+        long long admit_max_new = 0;
+        Clock::time_point admit_t0;
+        const auto bs_active = [&]() {
+            for (const BSlot& sl : bs)
+                if (sl.active) return true;
+            return false;
+        };
+        // one batch window over the active slots (row t is slot rows[t]); emits BT per token and BDONE when a
+        // slot ends. False only on a window failure, which ends the engine like a solo request's ERR.
+        const auto batch_step = [&]() -> bool {
+            int rows[strata::kernels::kVerifyMaxT];
+            int32_t tok[strata::kernels::kVerifyMaxT], picks[strata::kernels::kVerifyMaxT];
+            int64_t pos[strata::kernels::kVerifyMaxT];
+            int S = 0;
+            for (int b = 0; b < (int) bs.size(); ++b)
+                if (bs[(size_t) b].active) {
+                    rows[S] = b;
+                    tok[S] = bs[(size_t) b].x;
+                    pos[S] = bs[(size_t) b].p;
+                    ++S;
+                }
+            if (S == 0) return true;
+            // the elastic K/V: the slots' next cells must be mapped (growth is global; solo decode has
+            // the same check between its windows)
+            if (kvg.on) {
+                int64_t hi = 0;
+                for (int r = 0; r < S; ++r) hi = std::max(hi, pos[r] + 64);
+                if (hi > kvg.cells && !kvg_ensure(hi)) {
+                    std::printf("ERR the K/V cannot grow: no VRAM is left\n");
+                    std::fflush(stdout);
+                    return false;
+                }
+            }
+            drive.d.layers = 0;
+            drive.d.experts = 0;
+            drive.d.failed = false;
+            drive.adapt_next = drive.flush_next = false;   // the tiers keep their rhythm only beside solo windows
+            std::string berr;
+            if (!ver.run_slot_rows(rows, S, tok, pos, &drive_pool_multi, &drive, picks, berr) || drive.d.failed) {
+                std::printf("ERR %s\n", !berr.empty() ? berr.c_str() : "a batch window's expert drive failed");
+                std::fflush(stdout);
+                return false;
+            }
+            const int bad = ver.nonfinite(S);
+            // every bad row (an injected call names a row the flags may not show, so keep `bad` too)
+            std::vector<int> bads;
+            if (bad >= 0) {
+                bads = ver.nonfinite_rows(S);
+                if (bads.empty()) bads.push_back(bad);
+            }
+            if (!ver.commit_slots(berr)) {
+                std::printf("ERR %s\n", berr.c_str());
+                std::fflush(stdout);
+                return false;
+            }
+            for (int r = 0; r < S; ++r) {
+                BSlot& sl = bs[(size_t) rows[r]];
+                if (std::find(bads.begin(), bads.end(), r) != bads.end()) {   // #879: nothing is emitted, the
+                    // slot ends, its state is dropped
+                    std::fprintf(stderr, "strata batch: non-finite logits in slot %d at position %lld: it ends "
+                                         "(BDONE nonfinite) and the next request reads its prompt from token 0\n",
+                                 rows[r], (long long) pos[r]);
+                    std::printf("BDONE %d %lld nonfinite %.1f\n", rows[r], (long long) sl.produced,
+                                std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
+                    sl.active = sl.cached = false;
+                    sl.tainted = true;
+                    sl.ids.clear();
+                    strata::core::session_zero(registry.at((size_t) rows[r] + 1).ss, g, nullptr, main_cs);
+                    continue;
+                }
+                const int32_t y = picks[r];
+                sl.ids.push_back(tok[r]);   // the fed token is now held; the pick joins when the next window feeds it
+                std::printf("BT %d %d\n", rows[r], (int) y);
+                ++sl.produced;
+                const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
+                const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
+                                           : sl.p + 1 >= o.max_context ? "length" : nullptr;
+                if (fin != nullptr) {
+                    std::printf("BDONE %d %lld %s %.1f\n", rows[r], (long long) sl.produced, fin,
+                                std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
+                    sl.active = false;
+                    sl.cached = o.prompt_cache > 0 && !sl.tainted;
+                } else {
+                    sl.x = y;
+                    ++sl.p;
+                }
+            }
+            std::fflush(stdout);
+            return true;
+        };
+        while (true) {
+            if (bs_active()) {
+                // FCFS: lines are served as they arrive; with none waiting, the slots get their window
+                if (!try_next_line(line)) {
+                    {
+                        std::lock_guard<std::mutex> lk(in_mu);
+                        if (in_eof) break;   // stdin closed with slots live: end as QUIT does
+                    }
+                    if (!batch_step()) break;
+                    continue;
+                }
+            } else if (!next_line(line))
+                break;
             if (line == "QUIT") break;
+            admit_slot = -1;   // an admission that ends before its DONE (an ERR path) leaves no residue
             stop_req.store(false);   // a STOP that arrived between requests is stale
             err.clear();             // and so is a stopped request's "cancelled"
+            if (line.rfind("BSTOP ", 0) == 0) {
+                const int b = (int) std::strtol(line.c_str() + 6, nullptr, 10);
+                if (b >= 0 && b < (int) bs.size()) bs[(size_t) b].stop = true;   // the next window ends it
+                continue;                                                        // unknown slot: dropped
+            }
+            if (line.rfind("BGEN ", 0) == 0 || line.rfind("BGENI ", 0) == 0) {
+                // admission is the ordinary request path for one token; BADM after DONE decides whether the
+                // conversation moves into the slot's batch windows (the wire format, docs/BATCHING.md)
+                const bool bimg = line[4] == 'I';
+                char* bend = nullptr;
+                const long long b = std::strtoll(line.c_str() + (bimg ? 6 : 5), &bend, 10);
+                const long long mn = bend != nullptr ? std::strtoll(bend, &bend, 10) : -1;
+                if (!batch_on || b < 0 || b >= (long long) bs.size() || bs[(size_t) b].active || mn < 1 ||
+                    bend == nullptr || *bend == '\0') {
+                    // the server's #1994 recovery matches this exact text after ERR
+                    std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", o.parallel);
+                    std::fflush(stdout);
+                    continue;
+                }
+                admit_slot = (int) b;
+                admit_max_new = mn;
+                admit_t0 = Clock::now();
+                line = std::string(bimg ? "GENI 1" : "GEN 1") + bend;
+            }
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
                 std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
@@ -4494,6 +4648,36 @@ int main(int argc, char** argv) {
             if (poisoned) {
                 pcache.clear();
                 poisoned = false;
+            }
+            // the slot cache as a source (docs/BATCHING.md, "gave back"): an idle cached slot whose tokens
+            // prefix this prompt supplies its state to the solo session, and the prompt cache's live model is
+            // told - begin() then reuses the prefix instead of zeroing. Pictures and poisoned sessions skip
+            // it; without a prompt cache begin() would zero the session and undo the copy.
+            if (batch_on && track && req_imgs.empty()) {
+                int best = -1;
+                int64_t best_n = 0;
+                for (int b = 0; b < (int) bs.size(); ++b) {
+                    const BSlot& sl = bs[(size_t) b];
+                    const int64_t n = (int64_t) sl.ids.size();
+                    if (sl.active || !sl.cached || n == 0 || n >= (int64_t) ids.size() || n <= best_n) continue;
+                    if (std::equal(sl.ids.begin(), sl.ids.end(), ids.begin())) {
+                        best = b;
+                        best_n = n;
+                    }
+                }
+                if (best >= 0) {
+                    const auto cp0 = Clock::now();
+                    if (!strata::core::session_prefix_copy(g, registry.at((size_t) best + 1).ss, ss, best_n,
+                                                           main_cs)) {
+                        std::printf("ERR the slot's state could not be copied out of slot %d\n", best);
+                        std::fflush(stdout);
+                        continue;
+                    }
+                    pcache.set(0, bs[(size_t) best].ids.data(), best_n);
+                    std::fprintf(stderr, "strata serve: slot %d gave back %lld tokens of this conversation "
+                                         "(all it holds) in %.1f ms\n", best, (long long) best_n,
+                                 std::chrono::duration<double, std::milli>(Clock::now() - cp0).count());
+                }
             }
             // the slot's session state is now bound to this conversation
             advance_solo(strata::program::SlotState::running);
@@ -4913,6 +5097,39 @@ int main(int argc, char** argv) {
                          prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0, (long long) produced_n, decode_ms,
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0);
             if (pcache.enabled()) std::fprintf(stderr, "strata serve: prompt cache: %s\n", pcache.summary().c_str());
+            // a BGEN admission's verdict: BADM after DONE (never before), and the state copy-in when the
+            // conversation continues in the batch windows
+            if (admit_slot >= 0) {
+                const int b = admit_slot;
+                bool cont = false;
+                if (batch_on && finish != nullptr && std::string(finish) == "length" && produced_n == 1 &&
+                    admit_max_new > 1) {
+                    // the session holds cells [0, p) (the one produced token is not fed yet); the slot takes
+                    // that token as its first window's input
+                    if (strata::core::session_prefix_copy(g, ss, registry.at((size_t) b + 1).ss, p, main_cs)) {
+                        BSlot fresh;
+                        fresh.active = true;
+                        fresh.x = x;
+                        fresh.p = p;
+                        fresh.produced = 1;
+                        fresh.max_new = admit_max_new;
+                        fresh.t0 = admit_t0;
+                        fresh.ids.assign(ids.begin(), ids.begin() + (ptrdiff_t) p);
+                        bs[(size_t) b] = fresh;
+                        cont = true;
+                        std::fprintf(stderr, "strata batch: slot %d takes %lld tokens (copied in)\n", b,
+                                     (long long) p);
+                    } else
+                        std::fprintf(stderr, "strata serve: the admission copy into slot %d failed\n", b);
+                }
+                std::printf("BADM %d %d\n", b, cont ? 1 : 0);
+                std::fflush(stdout);
+                admit_slot = -1;
+            }
+            // batch windows are greedy and unpenalized: the verifier's sampling state returns to the default
+            // after every request, so a sampled request never bricks the next batch window (each GEN sets
+            // its own again at its start)
+            ver.reset_sampling();
             // DONE was answered: the slot finished, is free again (it keeps its conversation), and waits empty.
             advance_solo(strata::program::SlotState::finishing);
             advance_solo(strata::program::SlotState::freed);

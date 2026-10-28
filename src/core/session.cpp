@@ -210,8 +210,7 @@ bool session_ckpt_save_layers(const SessionState& s, const ModelGeometry& g, int
     return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
 }
 
-bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, const void* host, void* stream) {
-    cudaStream_t cs = (cudaStream_t) stream;
+bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, const void* host, void* stream) {    cudaStream_t cs = (cudaStream_t) stream;
     const uint8_t* h = (const uint8_t*) host;
     for (const CkptPart& p : ckpt_parts(s, g, pos))
         if (cudaMemcpyAsync(p.dev, h + p.host, (size_t) p.bytes, cudaMemcpyHostToDevice, cs) != cudaSuccess)
@@ -222,6 +221,46 @@ bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, con
     s.ple_prev[0] = ints[0];
     s.ple_prev[1] = ints[1];
     s.ple_token = ints[2];
+    return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
+}
+
+bool session_prefix_copy(const ModelGeometry& g, const SessionState& from, SessionState& to, int64_t cells,
+                         void* stream) {
+    // The whole running state of the prefix [0, cells): the checkpoint's parts (every GDN layer's state, the PLE
+    // history, each indexer's tail, dead, open block's pooled row and block position) at the same position on
+    // both sides, the K/V cells and pooled rows like the prompt cache's stash copies, and the PLE token window.
+    // The draft layer is NOT copied: batch slots decode without MTP drafts, and a returning solo request drafts
+    // from a stale draft cache until its cells roll over - wrong drafts cost acceptance, never correctness.
+    cudaStream_t cs = (cudaStream_t) stream;
+    const std::vector<CkptPart> pf = ckpt_parts(from, g, cells), pt = ckpt_parts(to, g, cells);
+    if (pf.size() != pt.size()) return session_copy_failed(stream);
+    for (size_t i = 0; i < pf.size(); ++i)
+        if (pf[i].bytes != pt[i].bytes ||
+            cudaMemcpyAsync(pt[i].dev, pf[i].dev, (size_t) pf[i].bytes, cudaMemcpyDeviceToDevice, cs) != cudaSuccess)
+            return session_copy_failed(stream);
+    strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    sh.idx_dim = g.idx_key_dim;
+    const uint64_t row = (uint64_t) sh.idx_dim * sizeof(float);
+    for (int64_t i = 0; i < g.n_qsa_layers(); ++i) {
+        const QsaState& fs = from.qsa_states[i];
+        QsaState& ts = to.qsa_states[i];
+        const uint64_t pages = (uint64_t) std::min<int64_t>(fs.n_pages, (cells + sh.page_size - 1) / sh.page_size);
+        const uint64_t c = pages * (uint64_t) g.n_head_kv * (uint64_t) sh.page_size;
+        const std::vector<KvArray> fa = qsa_kv_arrays(fs, g), ta = qsa_kv_arrays(ts, g);
+        if (fa.size() != ta.size()) return session_copy_failed(stream);
+        for (size_t j = 0; j < fa.size(); ++j)
+            if (fa[j].row_bytes != ta[j].row_bytes ||
+                cudaMemcpyAsync(ta[j].data, fa[j].data, (size_t) (c * fa[j].row_bytes), cudaMemcpyDeviceToDevice,
+                                cs) != cudaSuccess)
+                return session_copy_failed(stream);
+        const int64_t rows = std::min<int64_t>(cells / sh.idx_block + 2, fs.max_cells / sh.idx_block + 2);
+        if (cudaMemcpyAsync(ts.idx_pooled, fs.idx_pooled, (uint64_t) rows * row, cudaMemcpyDeviceToDevice, cs) !=
+            cudaSuccess)
+            return session_copy_failed(stream);
+    }
+    to.ple_prev[0] = from.ple_prev[0];
+    to.ple_prev[1] = from.ple_prev[1];
+    to.ple_token = from.ple_token;
     return cudaStreamSynchronize(cs) == cudaSuccess || session_copy_failed(stream);
 }
 

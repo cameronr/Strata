@@ -105,6 +105,12 @@ bool session_ckpt_save_layers(const SessionState& s, const ModelGeometry& g, int
                               int64_t lo, int64_t hi, int64_t first);
 /// The inverse: the session continues at `pos`.  The K/V cells [0, pos) must still hold the same prefix.
 bool session_ckpt_load(SessionState& s, const ModelGeometry& g, int64_t pos, const void* host, void* stream);
+/// Moves the whole running state of the prefix [0, `cells`) from one session to another, both carved with the
+/// same geometry and context (phase 5's batch-slot copies: a BGEN admission copies the solo session in, a
+/// request continuing a cached slot copies it back out).  Device-to-device; synchronous.  The MTP draft layer
+/// is NOT copied (slots decode without drafts; stale draft caches cost acceptance, never correctness).
+bool session_prefix_copy(const ModelGeometry& g, const SessionState& from, SessionState& to, int64_t cells,
+                         void* stream);
 /// After a failed copy of a checkpoint or of K/V cells: waits for the copies queued before it and clears the
 /// runtime's error, which the next launch check would otherwise take for its own and end the engine (the caller
 /// falls back: no checkpoint, no stash, or the prompt read again).  Returns false.

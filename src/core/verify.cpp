@@ -154,6 +154,16 @@ int Verifier::nonfinite(int T) {
     return -1;
 }
 
+std::vector<int> Verifier::nonfinite_rows(int T) {
+    std::vector<int> rows;
+    if (!nan_guard_) return rows;
+    for (int t = 0; t < T; ++t)
+        if (((volatile const uint32_t*) h_bad_)[t] != 0 ||
+            (shead_ != nullptr && ((volatile const uint32_t*) shead_->nonfinite())[t] != 0))
+            rows.push_back(t);
+    return rows;
+}
+
 bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
                     const NativeHead* head, int max_t, std::string& err) {
     if (const char* v = std::getenv("STRATA_NAN_GUARD")) nan_guard_ = !(v[0] == '0' && v[1] == '\0');
