@@ -409,6 +409,13 @@ settings make the comparison exact:
   slots: their windows then see the expert cache without the slots the prompt borrowed (those experts run on the
   CPU).
 
+Two more choices are now per-entry by construction, with no setting to get wrong. The second GPU takes the experts
+its own tier holds and nothing else: the old `--second-gpu-min-mb` gate weighed the whole window's miss bytes, so
+which device computed an expert depended on how many rows shared the window (removed). And decode attention always
+reduces at the one-row call's split-K count (`qsa_decode_attn`): deriving it from the row count reassociated a
+long context's softmax per window shape, which is what made a drafted solo window and a batch window decode the
+same conversation differently past the point where the top-k selection kicks in.
+
 With the default settings the outputs stay coherent but drift apart after some tokens, as two solo runs whose
 windows differ can. Measured on the RTX 5070 (Q2_0, 4 conversations of 200 tokens, `tools/batch_test.py` without
 the settings above): one equal to its solo run, the others apart from token 0, 99 and 174 - the first token already
