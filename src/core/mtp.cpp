@@ -91,6 +91,10 @@ MtpDrafter::~MtpDrafter() {
     if (dense_) cudaFree(dense_);
     if (experts_) cudaFree(experts_);
     if (state_arena_) cudaFree(state_arena_);
+    for (void* a : store_arenas_) if (a) cudaFree(a);
+    if (seg_d_) cudaFree(seg_d_);
+    if (h_store_) cudaFreeHost(h_store_);
+    if (shift_) cudaFree(shift_);
     if (arena_) cudaFree(arena_);
     if (head_logits_) cudaFree(head_logits_);
     if (dhead_) cudaFree(dhead_);
@@ -382,6 +386,14 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         native_mmvq(GGML_Q8_0, q8("self_attn.v_proj.weight"), xq_, vcur_, (int) N, (int) (NKV * HD), T, cs);
         for (int t = 0; t < T; ++t) {
             norm_rope(kcur_ + t * NKV * HD, f32("self_attn.k_norm.weight"), (int) NKV, (int) HD, pos + t * NH, cs);
+        }
+        if (seg_d_ != nullptr) {
+            // phase 7 stores: one launch, every row's store resolved through the resident table by m_store_
+            // (bitwise the per-row appends below, seg_rows.hpp's contract).  `kcur_`/`vcur_` hold THIS call's rows
+            // at row 0 (the projections above wrote them there); only `step` carries the row0 offset, exactly as
+            // in the per-row loop.
+            qsa_kv_append_steps_seg(st_.kv, seg_d_, m_store_, step, 4, kcur_, vcur_, T, g, cs);
+        } else for (int t = 0; t < T; ++t) {
             if (st_.kv_int8)
                 kv_append_q8_step(st_.k_q, st_.v_q, st_.k_scale, st_.v_scale, st_.page_table, step + t * 4,
                                   kcur_ + t * NKV * HD, vcur_ + t * NKV * HD, s, cs);
@@ -431,7 +443,13 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         if (st_.kv_int8) { pools.k_q = st_.k_q; pools.v_q = st_.v_q; pools.k_scale = st_.k_scale; pools.v_scale = st_.v_scale; }
         else { pools.k_pool = st_.k_pool; pools.v_pool = st_.v_pool; }
         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
-        qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn32_, T, cs, qfull_);
+        if (seg_d_ != nullptr) {
+            // phase 7 stores: the row's store resolves through the table (the probe only names the format); the
+            // split-K count is the per-row call's inside the kernel, exactly as the pinned batch call below
+            qsa_decode_attn_seg(seg_d_, m_store_, qcur_, ident_, step, cap_, s, pools, attn_scratch_, attn32_, T, cs,
+                                qfull_);
+        } else
+            qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn32_, T, cs, qfull_);
         native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
         native_mmvq(GGML_Q8_0, q8("self_attn.o_proj.weight"), xq_, bo_, (int) (NH * HD), (int) N, T, cs);
         // ---- the MLP hyper-connection (the attention write folded in)
@@ -621,14 +639,32 @@ uint64_t MtpDrafter::tensor_bytes(const void* p) const {
 }
 
 bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
-                       float* probs, float min_p, int* n_drafts) {
+                       float* probs, float min_p, int* n_drafts, int store, int rrow) {
     if (T < 1 || T > max_t_ || a < 0 || a >= T) { err = "mtp: draft arguments out of range"; return false; }
+    if (store != 0 && seg_d_ == nullptr) { err = "mtp: draft on a batch store before init_batch_stores"; return false; }
     // the accepted rows' K/V and row a's layer: no read reaches a cell past the one being drafted, and the chain or the
     // next round writes the rejected rows' cells first
     T = a + 1;
     if (!capture_round(T, err)) return false;
     const Clock::time_point t0 = Clock::now();
     const int64_t NH = g_->n_head;
+    if (seg_d_ != nullptr) {
+        for (int r = 0; r < 2 * max_t_; ++r) h_store_[r] = store;   // every row of this round: one store
+        if (rrow > 0) {
+            // the round graph reads the window residuals at rows [0, T); a batch conversation's rows start at rrow.
+            // The shift goes through `shift_` (the ranges may overlap) and rewrites rows [0, T) of the verifier's
+            // residual buffer: safe because a batch step drafts its groups in row order (earlier groups have
+            // consumed theirs) and the next window re-stages every row it runs.
+            const uint64_t hcn = (uint64_t) g_->hc * g_->n_embd;
+            if (cudaMemcpyAsync(shift_, window_R_ + (size_t) rrow * hcn, (size_t) T * hcn * sizeof(float),
+                                cudaMemcpyDeviceToDevice, cs_) != cudaSuccess ||
+                cudaMemcpyAsync((void*) window_R_, shift_, (size_t) T * hcn * sizeof(float), cudaMemcpyDeviceToDevice,
+                                cs_) != cudaSuccess) {
+                err = "mtp: staging a batch window's residuals failed";
+                return false;
+            }
+        }
+    }
     auto put = [&](int row, int64_t cell) {
         h_step_[row * 4 + 0] = (int32_t) cell;
         h_step_[row * 4 + 1] = (int32_t) (cell + 1);
@@ -686,6 +722,83 @@ bool MtpDrafter::draft_first(const float* R_row, int32_t token, int64_t cell, in
         return false;
     }
     return draft(1, &token, cell, 0, drafts, err, probs, min_p, n_drafts);
+}
+
+namespace {
+// one store's writable pools and read-only attention view, as a segment table entry (seg_rows.hpp).  The draft
+// layer has no indexer and no GDN, so only the K/V fields are set; sizes are uniform across stores by construction.
+void fill_store_seg(strata::kernels::SegRow& e, const QsaState& q) {
+    e.kv = strata::core::qsa_attn_pools(q);
+    e.wr.k_q = q.k_q;
+    e.wr.k_scale = q.k_scale;
+    e.wr.v_q = q.v_q;
+    e.wr.v_scale = q.v_scale;
+    e.wr.k_q4 = q.k_q4;
+    e.wr.k_q4s = q.k_q4s;
+    e.wr.v_q4 = q.v_q4;
+    e.wr.v_q4s = q.v_q4s;
+    e.wr.page_table = q.page_table;
+}
+}  // namespace
+
+bool MtpDrafter::init_batch_stores(int n_slots, std::string& err) {
+    using namespace strata::kernels;
+    if (stores_ready()) return true;   // already carved (re-`init_slots` keeps the count; stores survive it)
+    if (n_slots < 1 || n_slots > 8) { err = "mtp: batch stores want 1..8 slots"; return false; }
+    const ModelGeometry& g = *g_;
+    const int64_t max_cells = ss_->qsa_states[0].max_cells;
+    const KvFormat fmt = qsa_draft_kv_format();
+    store_bytes_ = qsa_state_bytes(g, max_cells, false, fmt);
+    const int n = n_slots + 1;   // store 0 is the solo one (`st_`); slot b drafts into store b + 1
+    stores_.clear();
+    store_arenas_.assign((size_t) n, nullptr);
+    std::vector<SegRow> tab((size_t) n);
+    fill_store_seg(tab[0], st_);   // store 0 == the solo store: entry 0 points at st_'s cells
+    for (int s = 1; s < n; ++s) {
+        if (cudaMalloc(&store_arenas_[(size_t) s], store_bytes_) != cudaSuccess) {
+            err = "mtp: a draft K/V store does not fit";
+            break;
+        }
+        vram_ += store_bytes_;
+        if (qsa_state_init(g, max_cells, store_arenas_[(size_t) s], stores_.emplace_back(), &st_, fmt) == 0) {
+            err = "mtp: a draft store init failed";
+            break;
+        }
+        qsa_state_zero(stores_.back(), g, nullptr);   // fresh: matches the reference's zeros (kv_gather reads
+        fill_store_seg(tab[(size_t) s], stores_.back());   // whatever the ids list names, even past the frontier)
+    }
+    if (!err.empty()) {
+        for (void* a : store_arenas_) if (a) cudaFree(a);
+        store_arenas_.clear();
+        stores_.clear();
+        return false;
+    }
+    if (cudaMalloc((void**) &seg_d_, (size_t) n * sizeof(SegRow)) != cudaSuccess ||
+        cudaMemcpy(seg_d_, tab.data(), (size_t) n * sizeof(SegRow), cudaMemcpyHostToDevice) != cudaSuccess ||
+        !mapped((size_t) (2 * max_t_) * sizeof(int32_t) + 64, (void**) &h_store_, (void**) &m_store_) ||
+        cudaMalloc((void**) &shift_, (uint64_t) max_t_ * g.hc * g.n_embd * sizeof(float)) != cudaSuccess) {
+        err = "mtp: the draft store table does not fit";
+        return false;
+    }
+    return true;
+}
+
+bool MtpDrafter::copy_store(int from, int to, std::string& err) {
+    if (!stores_ready() || from < 0 || to < 0 || from >= (int) stores_.size() + 1 || to > 1 + (int) stores_.size()) {
+        err = "mtp: copy_store before init_batch_stores or out of range";
+        return false;
+    }
+    if (from == to) return true;
+    // store 0 is `st_` (arena `state_arena_`); store s > 0 is store_arenas_[s].  The whole arena is one contiguous
+    // K/V block of store_bytes_, and every store shares the geometry, so a byte copy is the whole conversation.
+    void* src = from == 0 ? state_arena_ : store_arenas_[(size_t) from];
+    void* dst = to == 0 ? state_arena_ : store_arenas_[(size_t) to];
+    if (cudaMemcpyAsync(dst, src, store_bytes_, cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+        err = "mtp: copy_store failed";
+        return false;
+    }
+    cudaStreamSynchronize(cs_);   // the caller continues the conversation right after (admission, give-back)
+    return true;
 }
 
 }  // namespace strata::core

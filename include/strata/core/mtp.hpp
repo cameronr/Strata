@@ -25,6 +25,7 @@
 #include "strata/core/layer.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/iq_kernels.hpp"
+#include "strata/kernels/seg_rows.hpp"
 
 #include <cuda_runtime.h>
 
@@ -80,8 +81,23 @@ public:
     /// argmaxes: row t pairs R_{p+t} with the token at p+t+1): the catch-up over the cells up to the last accepted
     /// row `a` (the rejected rows' cells are written by the draft chain or the next round before anything reads
     /// them), then the draft chain from row a at cells p+a+1 ...
+    /// `store` (phase 7, after `init_batch_stores`): whose draft K/V this round runs on (0 = the solo store,
+    /// 1 + b = batch slot b's).  `rrow`: the window's rows start at residual row `rrow` of `bind`'s buffer
+    /// (a batch window holds several conversations; a solo window passes 0).
     bool draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
-               float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr);
+               float* probs = nullptr, float min_p = 0.0f, int* n_drafts = nullptr, int store = 0, int rrow = 0);
+
+    /// Phase 7 (opt-in `--batch-mtp`, after the verifier registered its slots): a draft K/V store per batch slot,
+    /// carved like the solo one (same geometry, sharing its rope table).  With stores alive the draft graphs
+    /// resolve the layer's K/V through a resident segment table (seg_rows.hpp's contract): the graphs bake no
+    /// store identity, `draft()` names the store per round, and a window's rows all share one store.  Store 0 IS
+    /// the solo store (the table's entry 0 points at `kv_state()`), so solo drafting keeps its own cells.
+    bool init_batch_stores(int n_slots, std::string& err);
+    bool stores_ready() const { return seg_d_ != nullptr; }
+    /// The whole store `from` copied onto store `to` (admission warms a slot's drafts with the conversation the
+    /// solo path just read; give-back returns a continued slot's).  Cells beyond the conversation are stale and
+    /// overwritten before any read reaches them, so the copy needs no position bound.
+    bool copy_store(int from, int to, std::string& err);
 
     /// The draft head's rows gathered from the main head now (before the main GPU keeps only part of it); `bind`
     /// then takes them as they are.
@@ -137,6 +153,15 @@ private:
     strata::kernels::NativeExpertLayout nat_;         // gu_type >= 0: GGUF blocks (experts.txt); else the Q2_0 blobs
     void* state_arena_ = nullptr;
     QsaState st_;
+    // phase 7 stores: entry s of `seg_d_` is store s's writable pools (s=0 is st_ itself).  `h_store_` is the
+    // mapped row -> store index the draft graphs read; `draft()` fills every row with this round's store before
+    // launch, so one captured graph serves any store.  `shift_` re-lands a batch slot's residual rows at row 0.
+    std::vector<QsaState> stores_;
+    std::vector<void*> store_arenas_;
+    strata::kernels::SegRow* seg_d_ = nullptr;
+    int32_t *h_store_ = nullptr, *m_store_ = nullptr;
+    float* shift_ = nullptr;
+    uint64_t store_bytes_ = 0;
     void* arena_ = nullptr;
 
     // mapped staging: tokens, step records (2*max_t rows), positions per head (2*max_t rows), the selected row,

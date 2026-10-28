@@ -361,6 +361,7 @@ struct Options {
     /// flag. Phase 2 (plans/01-engine-batching): parsed, sized, and fitted at startup; the engine still runs
     /// one request at a time until the scheduler lands.
     int parallel = 1;
+    bool batch_mtp = false;   ///< --batch-mtp (phase 7): MTP drafts per batch slot; needs --mtp and --parallel
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
     /// --serve prompt cache: checkpoints of the sequence state kept in host memory (0 = every request starts
@@ -1310,6 +1311,7 @@ int main(int argc, char** argv) {
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--parallel" || a == "--batch" || a == "--slots") o.parallel = std::atoi(next("--parallel"));
+        else if (a == "--batch-mtp") o.batch_mtp = true;
         else if (a == "--main-gpu") o.main_gpu = std::atoi(next("--main-gpu"));
         else if (a == "--second-gpu") o.second_gpu = std::atoi(next("--second-gpu"));
         else if (a == "--second-gpu-gib") o.second_gpu_gib = std::atof(next("--second-gpu-gib"));
@@ -4005,12 +4007,15 @@ int main(int argc, char** argv) {
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             std::fprintf(stderr, "strata serve: --parallel %d: each added slot takes %.2f GiB at a context of %lld "
-                         "(%.2f K/V, %.2f GDN state, %.2f PLE history, %.2f scratch), no draft state (slots decode "
-                         "without MTP drafts), plus ~%.2f GiB of host memory; %.2f GiB of VRAM free with everything "
-                         "loaded\n", o.parallel, (double) sess / (1 << 30), (long long) o.max_context,
+                         "(%.2f K/V, %.2f GDN state, %.2f PLE history, %.2f scratch), %s, plus ~%.2f GiB of host "
+                         "memory; %.2f GiB of VRAM free with everything loaded\n", o.parallel,
+                         (double) sess / (1 << 30), (long long) o.max_context,
                          (double) kv_at_ctx / (1 << 30), (double) gdn_state / (1 << 30), (double) ple_hist / (1 << 30),
-                         (double) (sess - kv_at_ctx - gdn_state - ple_hist) / (1 << 30), host_ram / (1 << 30),
-                         (double) free_b / (1 << 30));
+                         (double) (sess - kv_at_ctx - gdn_state - ple_hist) / (1 << 30),
+                         o.batch_mtp && !o.mtp.empty()
+                             ? "plus a draft K/V store each with --batch-mtp"
+                             : "no draft state (slots decode without MTP drafts)",
+                         host_ram / (1 << 30), (double) free_b / (1 << 30));
             // slack for the copy staging an admission needs beyond the session itself; the reserve the cache
             // sizing already left is in `free_b`, so this is not q36's full 1 GiB headroom again
             if (sess * (uint64_t) o.parallel + ((size_t) 256 << 20) > free_b) {
@@ -4044,9 +4049,18 @@ int main(int argc, char** argv) {
                 }
                 cudaStreamSynchronize(main_stream);
                 std::string serr;
-                if (carved && ver.init_slots(bslots, serr))
+                if (carved && ver.init_slots(bslots, serr)) {
                     batch_on = true;
-                else {
+                    // --batch-mtp (phase 7): the drafter carves a draft K/V store per slot and its graphs start
+                    // resolving the layer's K/V through the resident store table.  On failure the slots stay alive
+                    // and decode without drafts, as before.
+                    if (o.batch_mtp && o.mtp.empty())
+                        std::fprintf(stderr, "strata serve: --batch-mtp wants --mtp (no draft layer): the slots "
+                                             "decode without drafts\n");
+                    else if (o.batch_mtp && !mtp.init_batch_stores(o.parallel, serr))
+                        std::fprintf(stderr, "strata serve: --batch-mtp could not carve the draft stores (%s): the "
+                                             "slots decode without drafts\n", serr.c_str());
+                } else {
                     std::fprintf(stderr, "strata serve: the batch slots could not be registered (%s): running "
                                  "without batch slots\n", carved ? serr.c_str() : "a slot's session arena");
                     for (int i = 1; i <= o.parallel; ++i)
@@ -4065,7 +4079,8 @@ int main(int argc, char** argv) {
             cudaMemGetInfo(&free_b, &total_b);
             const std::string batch_info =
                 batch_on ? " batch_slots=" + std::to_string(o.parallel) +
-                               " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0)
+                               " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
+                               (mtp.stores_ready() ? " batch_mtp=1" : "")
                          : "";
             std::printf("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=0 arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
@@ -4672,6 +4687,14 @@ int main(int argc, char** argv) {
                         continue;
                     }
                     pcache.set(0, bs[(size_t) best].ids.data(), best_n);
+                    // the drafts follow the conversation back: the slot's store is the fresh one (--batch-mtp),
+                    // and the solo path's own is stale for these cells either way
+                    if (mtp.stores_ready()) {
+                        std::string merr;
+                        if (!mtp.copy_store(best + 1, 0, merr))
+                            std::fprintf(stderr, "strata serve: the draft store copy out of slot %d failed (%s)\n",
+                                         best, merr.c_str());
+                    }
                     std::fprintf(stderr, "strata serve: slot %d gave back %lld tokens of this conversation "
                                          "(all it holds) in %.1f ms\n", best, (long long) best_n,
                                  std::chrono::duration<double, std::milli>(Clock::now() - cp0).count());
@@ -5105,6 +5128,16 @@ int main(int argc, char** argv) {
                     // the session holds cells [0, p) (the one produced token is not fed yet); the slot takes
                     // that token as its first window's input
                     if (strata::core::session_prefix_copy(g, ss, registry.at((size_t) b + 1).ss, p, main_cs)) {
+                        // warm drafts (--batch-mtp): the slot's draft K/V starts as the solo store's, so its first
+                        // window's drafts know the conversation.  A cold store is not a correctness problem (the
+                        // draft layer's cells are rewritten before any read reaches them; stale drafts only cost
+                        // acceptance), so a failure here only says so.
+                        if (mtp.stores_ready()) {
+                            std::string merr;
+                            if (!mtp.copy_store(0, b + 1, merr))
+                                std::fprintf(stderr, "strata batch: slot %d drafts stay cold (%s)\n", b,
+                                             merr.c_str());
+                        }
                         BSlot fresh;
                         fresh.active = true;
                         fresh.x = x;
