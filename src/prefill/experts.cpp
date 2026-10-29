@@ -482,7 +482,8 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         size_t j1 = j0 + 1;
         int64_t rows = off[j0 + 1] - off[j0];
         if (rows <= ROWS)
-            while (j1 < n_exp && j1 - j0 < (size_t) G && rows + (off[j1 + 1] - off[j1]) <= ROWS) rows += off[j1 + 1] - off[j1++];
+            for (; j1 < n_exp && j1 - j0 < (size_t) G && rows + (off[j1 + 1] - off[j1]) <= ROWS; ++j1)
+                rows += off[j1 + 1] - off[j1];
         batches.emplace_back(j0, j1);
         j0 = j1;
     }
