@@ -3996,6 +3996,7 @@ int main(int argc, char** argv) {
         // The engine never refuses a count it cannot run: it says so in the log and runs without batch slots
         // (the INFO line then omits batch_slots, and tools/batch_test.py skips on exactly that).
         bool batch_on = false;
+        bool batch_mtp_on = false;   // --batch-mtp fully live: draft stores, slot replay, per-slot drafts
         if (o.parallel > 1) {
             const uint64_t kv_at_ctx = strata::core::qsa_state_bytes(g, o.max_context, true) +
                                        (uint64_t)(g.n_qsa_layers() - 1) * strata::core::qsa_state_bytes(g, o.max_context, false);
@@ -4052,14 +4053,20 @@ int main(int argc, char** argv) {
                 if (carved && ver.init_slots(bslots, serr)) {
                     batch_on = true;
                     // --batch-mtp (phase 7): the drafter carves a draft K/V store per slot and its graphs start
-                    // resolving the layer's K/V through the resident store table.  On failure the slots stay alive
-                    // and decode without drafts, as before.
+                    // resolving the layer's K/V through the resident store table, and the verifier takes on the
+                    // per-slot snapshots and replay a drafted window commits with.  On failure the slots stay
+                    // alive and decode without drafts, as before.
                     if (o.batch_mtp && o.mtp.empty())
                         std::fprintf(stderr, "strata serve: --batch-mtp wants --mtp (no draft layer): the slots "
                                              "decode without drafts\n");
                     else if (o.batch_mtp && !mtp.init_batch_stores(o.parallel, serr))
                         std::fprintf(stderr, "strata serve: --batch-mtp could not carve the draft stores (%s): the "
                                              "slots decode without drafts\n", serr.c_str());
+                    else if (o.batch_mtp && !ver.enable_slot_drafts(serr))
+                        std::fprintf(stderr, "strata serve: --batch-mtp could not enable the batch commit (%s): "
+                                             "the slots decode without drafts\n", serr.c_str());
+                    else
+                        batch_mtp_on = o.batch_mtp;
                 } else {
                     std::fprintf(stderr, "strata serve: the batch slots could not be registered (%s): running "
                                  "without batch slots\n", carved ? serr.c_str() : "a slot's session arena");
@@ -4172,7 +4179,7 @@ int main(int argc, char** argv) {
                     err = "a batch window's logits were non-finite";
                     return false;
                 }
-                return ver.commit_slots(err);
+                return ver.commit_slots(nullptr, err);
             };
             const auto step_fail = [&](const char* where) {
                 std::fprintf(stderr, "strata parity: FAIL: %s: %s\n", where, err.c_str());
@@ -4288,6 +4295,10 @@ int main(int argc, char** argv) {
             bool tainted = false;  // ended on non-finite logits: nothing may be cached
             int32_t x = 0;         // the token the next window feeds
             int64_t p = 0;         // its position (== ids.size(), the cells the session holds)
+            int32_t drafts[strata::kernels::kVerifyMaxT] = {};   // --batch-mtp: the next window's drafts (up to
+            float dprob[strata::kernels::kVerifyMaxT] = {};      // --spec-1) and their odds (the drafter's
+            int ndrafts = 0;       // windows are max_window() wide, so the arrays are too)
+            bool drafted = false;  // the slot has a draft round's output to verify
             long long produced = 0, max_new = 0;
             Clock::time_point t0;
             std::vector<int64_t> ids;   // the tokens the session holds: fed tokens, not the last pick
@@ -4301,18 +4312,63 @@ int main(int argc, char** argv) {
                 if (sl.active) return true;
             return false;
         };
-        // one batch window over the active slots (row t is slot rows[t]); emits BT per token and BDONE when a
-        // slot ends. False only on a window failure, which ends the engine like a solo request's ERR.
+        // one batch window over the active slots (--batch-mtp: each slot brings its next token plus its
+        // drafts, one consecutive group per slot); emits BT per token and BDONE when a slot ends. False only
+        // on a window failure, which ends the engine like a solo request's ERR.
         const auto batch_step = [&]() -> bool {
             int rows[strata::kernels::kVerifyMaxT];
             int32_t tok[strata::kernels::kVerifyMaxT], picks[strata::kernels::kVerifyMaxT];
             int64_t pos[strata::kernels::kVerifyMaxT];
-            int S = 0;
+            int keep[strata::kernels::kVerifyMaxT + 1], ts[strata::kernels::kVerifyMaxT + 1];
+            // the window's shape: slot b gets ts[b] rows - its token plus the drafts its last draft round
+            // made, gated as the solo loop gates T (the min_p chain, the drafted eos, the length caps) -
+            // trimmed to the 8-row window by dropping the least likely last draft, one at a time.
+            int S = 0, tot = 0;
+            for (int b = 0; b < (int) bs.size(); ++b) {
+                keep[b] = 1;
+                ts[b] = 0;
+                if (!bs[(size_t) b].active) continue;
+                const BSlot& sl = bs[(size_t) b];
+                int Tb = 1;
+                if (batch_mtp_on && sl.drafted) {
+                    Tb = (int) o.spec;
+                    if (o.spec_min_p > 0.0) {
+                        Tb = 1;
+                        while (Tb < (int) o.spec && Tb - 1 < sl.ndrafts &&
+                               sl.dprob[(size_t) Tb - 1] >= (float) o.spec_min_p)
+                            ++Tb;
+                    }
+                    Tb = std::min(Tb, 1 + sl.ndrafts);
+                    for (int i = 1; i < Tb; ++i)   // stop the window at a drafted end-of-turn token
+                        if (std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) sl.drafts[i - 1]) !=
+                            o.eos_ids.end()) {
+                            Tb = i + 1;
+                            break;
+                        }
+                    Tb = (int) std::min<int64_t>(Tb, sl.max_new - sl.produced);
+                    Tb = (int) std::min<int64_t>(Tb, o.max_context - sl.p);
+                }
+                ts[b] = Tb;
+                tot += Tb;
+            }
+            while (tot > (int) strata::kernels::kVerifyMaxT) {
+                int drop = -1;
+                float worst = 0.0f;
+                for (int b = 0; b < (int) bs.size(); ++b)
+                    if (ts[b] > 1 && (drop < 0 || bs[(size_t) b].dprob[(size_t) ts[b] - 2] < worst)) {
+                        worst = bs[(size_t) b].dprob[(size_t) ts[b] - 2];
+                        drop = b;
+                    }
+                if (drop < 0) break;   // one row per slot is the floor (the slots never exceed the window)
+                --ts[drop];
+                --tot;
+            }
             for (int b = 0; b < (int) bs.size(); ++b)
-                if (bs[(size_t) b].active) {
+                for (int j = 0; j < ts[b]; ++j) {
+                    const BSlot& sl = bs[(size_t) b];
                     rows[S] = b;
-                    tok[S] = bs[(size_t) b].x;
-                    pos[S] = bs[(size_t) b].p;
+                    tok[S] = j == 0 ? sl.x : sl.drafts[(size_t) j - 1];
+                    pos[S] = sl.p + j;
                     ++S;
                 }
             if (S == 0) return true;
@@ -4344,42 +4400,99 @@ int main(int argc, char** argv) {
                 bads = ver.nonfinite_rows(S);
                 if (bads.empty()) bads.push_back(bad);
             }
-            if (!ver.commit_slots(berr)) {
+            // each group's accepted prefix (the solo loop's while): keep[b] = the rows of its group that stay,
+            // capped at the slot's end (the eos pick, a stop, the length and context caps): the commit must not
+            // keep rows past the last emitted token, or the slot's state and ids would sit past the conversation
+            for (int t0 = 0; t0 < S;) {
+                int t1 = t0 + 1;
+                while (t1 < S && rows[t1] == rows[t0]) ++t1;
+                const int b = rows[t0];
+                const BSlot& sl = bs[(size_t) b];
+                int a = 0;
+                while (a < t1 - t0 - 1 && tok[(size_t) t0 + a + 1] == picks[(size_t) t0 + a]) ++a;
+                int n = a + 1;
+                for (int i = 0; i < n; ++i) {
+                    const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(),
+                                               (int64_t) picks[(size_t) t0 + i]) != o.eos_ids.end();
+                    if (eos || sl.stop || sl.produced + i + 1 >= sl.max_new ||
+                        sl.p + i + 1 >= o.max_context) {
+                        n = i + 1;
+                        break;
+                    }
+                }
+                keep[(size_t) b] = n;
+                t0 = t1;
+            }
+            if (!ver.commit_slots(keep, berr)) {
                 std::printf("ERR %s\n", berr.c_str());
                 std::fflush(stdout);
                 return false;
             }
-            for (int r = 0; r < S; ++r) {
-                BSlot& sl = bs[(size_t) rows[r]];
-                if (std::find(bads.begin(), bads.end(), r) != bads.end()) {   // #879: nothing is emitted, the
-                    // slot ends, its state is dropped
+            if (batch_mtp_on) mtp.set_max_drafts((int) o.spec - 1);   // a solo request may have left it at 1
+            for (int t0 = 0; t0 < S;) {
+                int t1 = t0 + 1;
+                while (t1 < S && rows[t1] == rows[t0]) ++t1;
+                const int b = rows[t0];
+                BSlot& sl = bs[(size_t) b];
+                bool group_bad = false;
+                for (int t = t0; t < t1; ++t)
+                    if (std::find(bads.begin(), bads.end(), t) != bads.end()) group_bad = true;
+                if (group_bad) {   // #879: nothing is emitted, the slot ends, its state is dropped
                     std::fprintf(stderr, "strata batch: non-finite logits in slot %d at position %lld: it ends "
                                          "(BDONE nonfinite) and the next request reads its prompt from token 0\n",
-                                 rows[r], (long long) pos[r]);
-                    std::printf("BDONE %d %lld nonfinite %.1f\n", rows[r], (long long) sl.produced,
+                                 b, (long long) pos[t0]);
+                    std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced,
                                 std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
                     sl.active = sl.cached = false;
                     sl.tainted = true;
+                    sl.drafted = false;
                     sl.ids.clear();
-                    strata::core::session_zero(registry.at((size_t) rows[r] + 1).ss, g, nullptr, main_cs);
+                    strata::core::session_zero(registry.at((size_t) b + 1).ss, g, nullptr, main_cs);
+                    t0 = t1;
                     continue;
                 }
-                const int32_t y = picks[r];
-                sl.ids.push_back(tok[r]);   // the fed token is now held; the pick joins when the next window feeds it
-                std::printf("BT %d %d\n", rows[r], (int) y);
-                ++sl.produced;
-                const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
-                const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
-                                           : sl.p + 1 >= o.max_context ? "length" : nullptr;
-                if (fin != nullptr) {
-                    std::printf("BDONE %d %lld %s %.1f\n", rows[r], (long long) sl.produced, fin,
-                                std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
-                    sl.active = false;
-                    sl.cached = o.prompt_cache > 0 && !sl.tainted;
-                } else {
-                    sl.x = y;
-                    ++sl.p;
+                const int n = keep[(size_t) b];
+                for (int t = t0; t < t0 + n; ++t)
+                    sl.ids.push_back(tok[t]);   // the fed tokens of the kept rows are held; the picks join
+                                                // when the next window feeds them
+                bool ended = false;
+                for (int i = 0; i < n; ++i) {   // the model's token after each kept row
+                    const int32_t y = picks[(size_t) t0 + i];
+                    std::printf("BT %d %d\n", b, (int) y);
+                    ++sl.produced;
+                    const bool eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) y) != o.eos_ids.end();
+                    const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
+                                               : sl.p + i + 1 >= o.max_context ? "length" : nullptr;
+                    if (fin != nullptr) {
+                        std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin,
+                                    std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
+                        sl.active = false;
+                        sl.cached = o.prompt_cache > 0 && !sl.tainted;
+                        sl.drafted = false;
+                        ended = true;
+                        break;
+                    }
                 }
+                if (!ended) {
+                    sl.x = picks[(size_t) t0 + n - 1];
+                    sl.p += n;
+                    if (batch_mtp_on) {
+                        // the next window's drafts for this slot, from its own store: the window's rows start
+                        // at row t0 of the shared residual buffer (the solo on_draft hook stays off: the PLE
+                        // rows of batch windows are staged by run_slot_rows)
+                        mtp.on_draft = nullptr;
+                        int nd = 0;
+                        if (!mtp.draft(t1 - t0, picks + t0, pos[t0], n - 1, sl.drafts, berr, sl.dprob,
+                                       (float) o.spec_min_p, &nd, b + 1, t0)) {
+                            std::printf("ERR %s\n", berr.c_str());
+                            std::fflush(stdout);
+                            return false;
+                        }
+                        sl.ndrafts = nd;
+                        sl.drafted = true;
+                    }
+                }
+                t0 = t1;
             }
             std::fflush(stdout);
             return true;

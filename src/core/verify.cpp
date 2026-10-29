@@ -661,6 +661,17 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                     ple_gated_ + (size_t) tb * NG_HC_DIM, norm, Rt(tb)};
                     native_ple_postops_tokens(key, Rt(tb), ple_val_ + tb * N, ss.ple.hist, pw, pb, n, cs,
                                               hist_snap_ + (size_t) tb * HS);
+                } else if (kBatchFuse && slot_drafts_) {   // slot drafts: a group's rows chain one slot's PLE
+                    // history, so they advance it one at a time (bitwise the grouped launch: independent rows,
+                    // the same __device__ body, the same grid per row)
+                    for (int t = tb; t < te; ++t) {
+                        float* norm_t = ple_norm_ + (size_t) t * NG_HC_DIM;
+                        const NativePleTokensBuffers pb{ple_nkey_ + (size_t) t * NG_HC_DIM, norm_t, ple_gate_ + t * HC,
+                                                        ple_gated_ + (size_t) t * NG_HC_DIM, norm_t, Rt(t)};
+                        native_ple_postops_tokens_seg(ple_key_ + (size_t) t * NG_HC_DIM, Rt(t), ple_val_ + (size_t) t * N,
+                                                      seg_ple_d_, seg_idx_ + t, pw, pb, 1, cs,
+                                                      hist_snap_ + (size_t) t * HS);
+                    }
                 } else if (kBatchFuse) {   // batch: rows advance their slot's PLE history through the table
                     const NativePleTokensBuffers pb{ple_nkey_ + (size_t) tb * NG_HC_DIM, norm,
                                                     ple_gate_ + tb * HC, ple_gated_ + (size_t) tb * NG_HC_DIM, norm,
@@ -744,6 +755,21 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     // the recurrence from the untouched state over tokens [0, te); outputs only for this group's
                     gdn_step_norm_multi(state, hb, (int) C, gate, beta, z_, (const float*) wnm->data, EPS, y_,
                                         (int) HK, (int) HV, te, T == 1 ? one_ : nullptr, cs, tb);
+                } else if (kBatchFuse && slot_drafts_) {
+                    // slot drafts: a group's rows chain one slot's conv history and recurrent state, so each row
+                    // advances them in turn (bitwise the grouped launches; the waits join the side streams before
+                    // the first step needs them)
+                    const uint64_t conv_off = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+                    for (int t = tb; t < te; ++t) {
+                        gdn_conv_l2_seg(seg_gdn_d_ + (size_t) gi * slots_.size(), seg_idx_ + t, qkv + (size_t) t * C,
+                                        (const float*) wc->data, hb + (size_t) t * C, (int) C, (int) (2 * HK), EPS,
+                                        1, conv_off, cs);
+                        if (t == tb && (!wait(bjoin_) || !wait(pjoin_))) return false;
+                        gdn_step_norm_seg(seg_gdn_d_ + (size_t) gi * slots_.size(), seg_idx_ + t, hb + (size_t) t * C,
+                                          (int) C, gate + (size_t) t * HV, beta + (size_t) t * HV, z_ + (size_t) t * ZV,
+                                          (const float*) wnm->data, EPS, y_ + (size_t) t * ZV, (int) HK, (int) HV,
+                                          1, one_, cs);
+                    }
                 } else if (kBatchFuse) {
                     // batch: one launch per stage over the rows, each row's state resolved through the resident
                     // segment tables (seg_rows.hpp), never from the slot sessions - so no batch graph bakes slot
@@ -810,6 +836,14 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                                                     (int) kStepCount, n, 0, (const float*) wikn->data, EPS, ib, s,
                                                     st.max_cells, rope_scaling(), side_,
                                                     grp == 0 ? tail_snap_ + (size_t) qi * TS : nullptr);
+                } else if (kBatchFuse && slot_drafts_) {   // slot drafts: a group's rows append to one indexer
+                    // tail in order (bitwise the grouped launch, one row per call)
+                    for (int t = tb; t < te; ++t)
+                        native_qsa_indexer_append_multi_seg(seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_ + t,
+                                                            idx_raw + (size_t) t * ID,
+                                                            step_ + (size_t) t * kStepCount + kStepPos,
+                                                            (int) kStepCount, 1, 0, (const float*) wikn->data, EPS,
+                                                            s, st.max_cells, rope_scaling(), side_);
                 } else if (kBatchFuse) {   // batch: rows append through the indexer table; no tail snapshot
                     native_qsa_indexer_append_multi_seg(seg_qsa_d_ + (size_t) qi * slots_.size(), seg_idx_,
                                                         idx_raw + (size_t) tb * ID,
@@ -1481,15 +1515,35 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
             err = "verify: a batch row's slot is out of range";
             return false;
         }
-        for (int u = 0; u < t; ++u)
-            if (rows[u] == rows[t]) {
-                err = "verify: a batch window holds each slot at most once (no drafts in batch windows yet)";
-                return false;
-            }
         if (pos[t] < 0 || pos[t] >= slots_[(size_t) rows[t]]->qsa_states[0].max_cells) {
             err = "verify: a batch row runs past the context";
             return false;
         }
+    }
+    // phase 7: with slot drafts a slot may hold several rows - one consecutive group, positions stepping by one
+    // (a token and its drafts).  Without them the window stays one row per slot.
+    bool replay = false;
+    for (int t0 = 0; t0 < S;) {
+        int t1 = t0 + 1;
+        while (t1 < S && rows[t1] == rows[t0]) ++t1;
+        if (t1 - t0 > 1) {
+            if (!slot_drafts_) {
+                err = "verify: a batch window holds each slot at most once (no drafts in batch windows yet)";
+                return false;
+            }
+            replay = true;
+            for (int t = t0 + 1; t < t1; ++t)
+                if (pos[t] != pos[t - 1] + 1) {
+                    err = "verify: a slot's group in a batch window must cover consecutive positions";
+                    return false;
+                }
+        }
+        for (int u = 0; u < t0; ++u)
+            if (rows[u] == rows[t0]) {
+                err = "verify: a slot's rows in a batch window form one consecutive group";
+                return false;
+            }
+        t0 = t1;
     }
     cudaGraphExec_t ex = nullptr;
     if (!capture_batch(rows, S, &ex, err)) return false;
@@ -1502,10 +1556,18 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
         for (int64_t h = 0; h < g.n_head; ++h) h_pos_[t * g.n_head + h] = (int32_t) pos[t];
         h_seg_idx_[t] = rows[t];   // the window's only segment input: row -> slot (the tables hold the pointers)
     }
-    if (ss_->ple.ready()) {   // each row's PLE rows read from its own slot's token window, into the row's slot
+    if (ss_->ple.ready()) {   // each row's PLE rows read from its own slot's token window, into the row's slot;
+                             // a group's rows chain the window across them, as the solo window's rows do
+        int32_t prev[2] = {0, 0};
         for (int t = 0; t < S; ++t) {
             const SessionState& srow = *slots_[(size_t) rows[t]];
-            int32_t prev[2] = {srow.ple_prev[0], srow.ple_prev[1]};
+            if (t == 0 || rows[t] != rows[t - 1]) {
+                prev[0] = srow.ple_prev[0];
+                prev[1] = srow.ple_prev[1];
+            } else {
+                prev[0] = prev[1];
+                prev[1] = tokens[t - 1];
+            }
             uint32_t prows[PLE_N_HEADS];
             ngram_rows(&tokens[t], prev, 1, srow.ple.consts, prows);
             if (!srow.ple.table->ahead_holds(t, prows)) srow.ple.table->ahead(t, prows);
@@ -1523,9 +1585,36 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     std::atomic_thread_fence(std::memory_order_seq_cst);
     last_t_ = 0;   // no solo commit may follow a batch window
     last_batch_S_ = S;
+    batch_replay_ = replay;
     for (int t = 0; t < S; ++t) {
         last_batch_rows_[t] = (int8_t) rows[t];
         last_batch_tok_[t] = tokens[t];
+        last_batch_pos_[t] = pos[t];
+    }
+    if (replay) {
+        // the pre-window state of every slot the window touches: the commit restores from these and replays the
+        // accepted prefix.  (The PLE history needs no snapshot: the window's PLE block leaves one per row.)
+        const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
+                                    (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+        const uint64_t gdn_total = (uint64_t) g.n_gdn_layers() * gdn_floats;
+        const int64_t TS = (s.idx_block - 1) * g.idx_key_dim;
+        const int n_qsa = (int) g.n_qsa_layers();
+        for (int t = 0; t < S; ++t) {
+            if (t > 0 && rows[t] == rows[t - 1]) continue;
+            const int b = rows[t];
+            SessionState& srow = *slots_[(size_t) b];
+            if (cudaMemcpyAsync(snap_gdn_d_ + (size_t) b * gdn_total, srow.gdn_state, gdn_total * 4,
+                                cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                err = "verify: the batch commit's GDN snapshot failed";
+                return false;
+            }
+            for (int qi = 0; qi < n_qsa; ++qi)
+                if (cudaMemcpyAsync(snap_tail_d_ + ((size_t) b * n_qsa + qi) * TS, srow.qsa_states[qi].idx_tail,
+                                    (size_t) TS * 4, cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                    err = "verify: the batch commit's tail snapshot failed";
+                    return false;
+                }
+        }
     }
     ms_host += ms_since(t0);
     const cudaError_t be = cudaGraphLaunch(ex, cs_);
@@ -1537,19 +1626,152 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     return drive_window(S, pos[0], pool, user, out, err, /*batched=*/true);
 }
 
-bool Verifier::commit_slots(std::string& err) {
+bool Verifier::enable_slot_drafts(std::string& err) {
+    using namespace strata::kernels;
+    if (slot_drafts_) return true;
+    if (slots_.empty()) { err = "verify: enable_slot_drafts before init_slots"; return false; }
+    const ModelGeometry& g = *g_;
+    const QsaShapes s = shapes_of(g);
+    const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
+                                (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+    const size_t n = slots_.size(), nq = (size_t) g.n_qsa_layers(), ng = (size_t) g.n_gdn_layers();
+    if (ng != 0 &&
+        cudaMalloc((void**) &snap_gdn_d_, (size_t) n * ng * gdn_floats * sizeof(float)) != cudaSuccess) {
+        err = "verify: the batch commit's GDN snapshots do not fit";
+        return false;
+    }
+    if (nq != 0 && cudaMalloc((void**) &snap_tail_d_,
+                              (size_t) n * nq * (size_t) (s.idx_block - 1) * g.idx_key_dim * sizeof(float)) !=
+                      cudaSuccess) {
+        if (snap_gdn_d_) cudaFree(snap_gdn_d_);
+        snap_gdn_d_ = nullptr;
+        err = "verify: the batch commit's tail snapshots do not fit";
+        return false;
+    }
+    void* h = nullptr;
+    void* d = nullptr;
+    if (!mapped(n * (size_t) (2 + max_t_) * sizeof(int32_t) + 64, &h, &d)) {
+        err = "verify: the batch commit's staging does not fit";
+        return false;
+    }
+    h_commitb_ = (int32_t*) h;
+    m_commitb_ = (int32_t*) d;
+    slot_drafts_ = true;
+    return true;
+}
+
+bool Verifier::commit_slots(const int* keep, std::string& err) {
+    using namespace strata::kernels;
     if (last_batch_S_ < 1 || slots_.empty()) {   // the empty check: a window before a failed re-registration
         err = "verify: commit_slots without a batch window";
         return false;
     }
-    // the window advanced every row's state itself (the one-token window's path); only the PLE token windows,
-    // which the driver owns, move here.
-    for (int t = 0; t < last_batch_S_; ++t) {
-        SessionState& srow = *slots_[(size_t) last_batch_rows_[t]];
-        srow.ple_prev[0] = srow.ple_prev[1];
-        srow.ple_prev[1] = last_batch_tok_[t];
+    const bool replay = batch_replay_;
+    if (replay && keep == nullptr) {
+        err = "verify: commit_slots needs the per-slot keep counts after a drafted window";
+        last_batch_S_ = 0;
+        return false;
+    }
+    const ModelGeometry& g = *g_;
+    const QsaShapes s = shapes_of(g);
+    const int64_t C = g.ssm_conv_channels, HV = g.ssm_v_heads, ID = g.idx_key_dim, MT = max_t_;
+    const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
+                                (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
+    const uint64_t gdn_total = (uint64_t) g.n_gdn_layers() * gdn_floats;
+    const int64_t TS = (s.idx_block - 1) * ID;
+    const int64_t HS = (int64_t) NG_HIST * NG_HC_DIM;
+    const int CB = 2 + (int) max_t_;
+
+    // pass 1: validate the prefixes and stage the per-slot commit arrays (the solo commit's shape: [n, n-1,
+    // positions or -1] - the conv/step replays read [0] over the group's row-buffer slice, the indexer re-append
+    // masks the absolute rows by [2..], and [1] names the group's last accepted history row)
+    if (replay) {
+        for (int t0 = 0; t0 < last_batch_S_;) {
+            int t1 = t0 + 1;
+            while (t1 < last_batch_S_ && last_batch_rows_[t1] == last_batch_rows_[t0]) ++t1;
+            const int b = last_batch_rows_[t0], n = keep[b];
+            if (n < 1 || n > t1 - t0) {
+                err = "verify: a batch slot's accepted prefix is outside its group";
+                last_batch_S_ = 0;
+                return false;
+            }
+            int32_t* c = h_commitb_ + (size_t) b * CB;
+            c[0] = n;
+            c[1] = t0 + n - 1;
+            for (int t = 0; t < (int) MT; ++t) c[2 + t] = (t >= t0 && t < t0 + n) ? (int32_t) last_batch_pos_[t] : -1;
+            t0 = t1;
+        }
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        strata::kernels::copy_i32_from_mapped(m_commitb_, h_commitb_, (int64_t) slots_.size() * CB, cs_);
+    }
+
+    // pass 2: per group, restore and replay, then advance the PLE token windows over the accepted tokens
+    for (int t0 = 0; t0 < last_batch_S_;) {
+        int t1 = t0 + 1;
+        while (t1 < last_batch_S_ && last_batch_rows_[t1] == last_batch_rows_[t0]) ++t1;
+        const int b = last_batch_rows_[t0], n = replay ? keep[b] : 1;
+        SessionState& srow = *slots_[(size_t) b];
+        if (replay) {
+            // the group's rejected rows advanced the slot's recurrent state and indexer tail: restore both and
+            // replay the accepted rows - the solo commit's kernels and row buffers, per group.  Plain launches
+            // (the window graph is done; the next one queues behind these on cs_).
+            const int32_t* cb = m_commitb_ + (size_t) b * CB;
+            if (cudaMemcpyAsync(srow.gdn_state, snap_gdn_d_ + (size_t) b * gdn_total, gdn_total * sizeof(float),
+                                cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                err = "verify: the batch commit could not restore the GDN state";
+                last_batch_S_ = 0;
+                return false;
+            }
+            int64_t qsa_index = 0, gdn_index = 0;
+            for (int64_t l = 0; l < g.n_layers; ++l) {
+                const LayerView v(*wt_, l);
+                if (!is_qsa_layer(g, l)) {
+                    float* state = srow.gdn_state + (size_t) gdn_index * gdn_floats;
+                    float* conv = state + (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size;
+                    gdn_conv_commit(conv, qkv_L_ + ((size_t) gdn_index * MT + (size_t) t0) * C, (int) C, cb, cs_);
+                    gdn_step_commit(state, h_L_ + ((size_t) gdn_index * MT + (size_t) t0) * C, (int) C,
+                                    gate_L_ + ((size_t) gdn_index * MT + (size_t) t0) * HV,
+                                    beta_L_ + ((size_t) gdn_index * MT + (size_t) t0) * HV, (int) g.ssm_k_heads,
+                                    (int) HV, (int) MT, cb, cs_);
+                    ++gdn_index;
+                } else {
+                    const WeightRef* wikn = need(v, "indexer.k_norm.weight", err);
+                    if (!wikn) { last_batch_S_ = 0; return false; }
+                    const QsaState& st = srow.qsa_states[qsa_index];
+                    if (cudaMemcpyAsync(st.idx_tail, snap_tail_d_ + ((size_t) b * g.n_qsa_layers() + qsa_index) * TS,
+                                        (size_t) TS * sizeof(float), cudaMemcpyDeviceToDevice, cs_) != cudaSuccess) {
+                        err = "verify: the batch commit could not restore the indexer tail";
+                        last_batch_S_ = 0;
+                        return false;
+                    }
+                    const QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
+                    native_qsa_indexer_append_multi(idx_raw_L_ + (size_t) qsa_index * MT * ID, cb + 2, 1, (int) MT, 0,
+                                                    (const float*) wikn->data, EPS, ib, s, st.max_cells,
+                                                    rope_scaling(), cs_);
+                    ++qsa_index;
+                }
+            }
+            if (srow.ple.ready())
+                copy_indexed(srow.ple.hist, hist_snap_, HS, cb + 1, HS, cs_);   // the history after the last
+        }
+        for (int t = t0; t < t0 + n; ++t) {   // the PLE token window advances over the accepted tokens (both paths)
+            srow.ple_prev[0] = srow.ple_prev[1];
+            srow.ple_prev[1] = last_batch_tok_[t];
+        }
+        t0 = t1;
+    }
+    // The replay kernels above run on cs_ AFTER the window (unlike phase 5's, which lived inside its graph and
+    // settled before the picks). Anything reading a slot's state next - a give-back's session_prefix_copy on the
+    // main stream, the prompt cache's checkpoint - must see them done, and it has no ordering with cs_; the next
+    // window would wait for them on the stream anyway, so this costs no overlap.
+    if (cudaStreamSynchronize(cs_) != cudaSuccess) {
+        err = "verify: the batch commit could not settle";
+        last_batch_S_ = 0;
+        batch_replay_ = false;
+        return false;
     }
     last_batch_S_ = 0;
+    batch_replay_ = false;
     return true;
 }
 

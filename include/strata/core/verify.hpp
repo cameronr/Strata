@@ -129,10 +129,12 @@ public:
     // (modulo the multi-token CPU kernel choice: STRATA_IQ_MT_MIN=1).  Phase 4 fuses those per-row launches.
     //
     // Like the one-token window, a batch window keeps every row: it advances each listed slot's state itself,
-    // and `commit_slots` is the host-side PLE token-window bookkeeping only - there is no batch commit graph and
-    // no rollback (a window that does not finish loses its tokens, as a one-token window's would).
+    // and `commit_slots` is the host-side PLE token-window bookkeeping only - until `enable_slot_drafts` (phase 7)
+    // lets a group hold a token and its drafts, which makes it a real commit: snapshots, and a per-group replay
+    // of the accepted prefix (a window that does not finish still loses its tokens, as a one-token window's would).
     //
-    // Greedy only, no drafts in a batch window, and not with the split window (`--spec-split`).  Fused graphs
+    // Greedy only, no drafts in a batch window until `enable_slot_drafts` (per-slot MTP drafts, `--batch-mtp`),
+    // and not with the split window (`--spec-split`).  Fused graphs
     // read the row -> slot map from the device tables at replay and key on the window size alone; only the
     // STRATA_BATCH_FUSE=0 fallback captures per row layout (the cap below is what a churning scheduler would
     // hit there).  Slots are DEDICATED sessions, never the verifier's own `ss_` (phase 5 carves N at startup
@@ -141,12 +143,25 @@ public:
     // then fixed for the Verifier's life.
     bool init_slots(const std::vector<SessionState*>& slots, std::string& err);
     int n_slots() const { return (int) slots_.size(); }
-    /// One batch window over S distinct slots: row t is slot `rows[t]`, token `tokens[t]`, position `pos[t]`;
-    /// `out[t]` = the greedy pick after token t.  The slots not listed keep their state untouched.
+    /// Phase 7 (`--batch-mtp`, after `init_slots` and the drafter's `init_batch_stores`): batch windows may hold
+    /// a slot more than once (a token plus its drafts).  This allocates the per-slot pre-window snapshots (the
+    /// GDN state and the indexer tails; the PLE history is already snapshotted per row) and switches the fused
+    /// batch graphs to the sequential per-row form of the state-touching kernels, so a group's rows advance
+    /// their slot one after another.  `commit_slots` then replays each group's accepted prefix; a window whose
+    /// groups all hold one row still needs neither snapshot nor replay.
+    bool enable_slot_drafts(std::string& err);
+    /// One batch window of S rows over the slots: row t is slot `rows[t]`, token `tokens[t]`, position
+    /// `pos[t]`; `out[t]` = the greedy pick after token t.  With slot drafts the rows may repeat a slot, in
+    /// consecutive groups whose positions step by one; without, each slot appears at most once.
+    /// The slots not listed keep their state untouched.
     bool run_slot_rows(const int* rows, int S, const int32_t* tokens, const int64_t* pos, PoolMultiFn pool,
                        void* user, int32_t* out, std::string& err);
-    /// The PLE token windows of every row of the last batch window (the state itself advanced with the window).
-    bool commit_slots(std::string& err);
+    /// The commit of the last batch window: the PLE token windows always, and - when a group held more than one
+    /// row - the rollback of every slot's rejected draft rows: restore the pre-window GDN state and indexer
+    /// tail, replay the accepted rows (the same kernels and row buffers the solo commit uses, per group), and
+    /// re-land the PLE history.  `keep[b]` = the rows of slot b's group that stay (1..its group's size);
+    /// null says every group kept one row (the window advanced everything it should have).
+    bool commit_slots(const int* keep, std::string& err);
 
     /// The first token of the last window whose logits held a NaN or an infinity, or -1 (upstream #879): its picks are
     /// not to be used, and the sequence state behind them is poisoned.  Read from flags the head's argmax wrote.
@@ -283,6 +298,14 @@ private:
     int last_batch_S_ = 0;
     int8_t last_batch_rows_[strata::kernels::kVerifyMaxT] = {};
     int32_t last_batch_tok_[strata::kernels::kVerifyMaxT] = {};
+    // phase 7 slot drafts: the last window's row positions (the commit's indexer replay) and whether it held a
+    // slot more than once (the replay path); the per-slot pre-window snapshots and the per-group commit arrays.
+    bool slot_drafts_ = false;
+    bool batch_replay_ = false;
+    int64_t last_batch_pos_[strata::kernels::kVerifyMaxT] = {};
+    float* snap_gdn_d_ = nullptr;    // n_slots x (n_gdn layers x gdn_floats)
+    float* snap_tail_d_ = nullptr;   // n_slots x (n_qsa layers x (idx_block-1) x idx_key_dim)
+    int32_t *h_commitb_ = nullptr, *m_commitb_ = nullptr;   // [n_slots][2 + max_t_], as h_commit_
     int batch_topk_nch_ = 0;   // the nq = 1 top-k chunk count, pinned at `init_slots` (program identity, F3)
     // resident segment tables (seg_rows.hpp), built by `init_slots` from the slot sessions: device copies at fixed
     // addresses and the host mirrors the capture reads. QSA and GDN tables are [layer * n_slots + slot]; the PLE
