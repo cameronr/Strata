@@ -85,11 +85,14 @@ quantized tensors, the experts and most projections, from the GGUF files at star
 
    A picture of ~1,000 tokens (`max_tokens`: up to 1,024) takes ~9 s to encode on the 9700X (`threads`: its 16 logical
    cores), once per picture, and the encoder ~1 GB of RAM. Without images, remove the section and `--vision`.
-5. Set the GPU numbers, as `nvidia-smi` numbers the cards (here the 5070 Ti is 0, an RTX 5060 Ti 1 and the 3090 2;
-   the engine sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` unless the environment names an order). `--main-gpu` runs the model,
-   and nothing else may use that card: a display or another program on it slows generation to a few tokens per
-   second. `--second-gpu` holds more experts and may drive the display; a list (`0,1`) adds more cards as further
-   tiers, each with its own `--second-gpu-reserve-mib` (`2048,512`: a card without a display needs less).
+5. Name the GPUs. `--main-gpu` runs the model (`RTX 3090` here), and nothing else may use that card: a display or
+   another program on it slows generation to a few tokens per second. Name a card by its name or a part only its name
+   has (`RTX 3090`), its UUID (`nvidia-smi -L` lists them), its PCI bus id, or its number as `nvidia-smi` numbers the
+   cards; a number moves when a card is added. `--second-gpu auto` makes every other card a further expert tier, up
+   to three, the fastest link first (a copy test at startup; the log shows each card's rate): each holds more experts
+   and may drive the display. A card the desktop uses keeps 2048 MiB free, a headless one 512
+   (`--second-gpu-reserve-mib` sets them). To fix the tiers and their order, name them:
+   `--second-gpu "RTX 5070 Ti,RTX 5060 Ti"`.
 6. Start a config with its launcher, `run-iq3_s.bat` or `run-ud-q4_k_xl.bat`, or from the Strata folder:
 
        .venv\Scripts\python.exe serve\server.py --engine strata --config examples\iq3_s.json

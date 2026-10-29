@@ -2820,10 +2820,51 @@ def gpu_list(cfg: dict) -> list[int]:
     return [int(str(x).strip()) for x in items if str(x).strip() != ""]
 
 
-def engine_gpus(cfg: dict) -> list[int]:
+def nvidia_gpus() -> list[dict]:
+    """The NVIDIA cards as nvidia-smi lists them: index, name, PCI bus id and UUID each ([] without nvidia-smi)."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=index,name,pci.bus_id,uuid", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        f = [x.strip() for x in line.split(",")]
+        if len(f) == 4 and f[0].isdigit():
+            out.append({"index": int(f[0]), "name": f[1], "bus_id": f[2], "uuid": f[3]})
+    return out
+
+
+_BUS_ID = re.compile(r"^(?:([0-9a-fA-F]+):)?([0-9a-fA-F]+):([0-9a-fA-F]+)(?:\.[0-9a-fA-F]+)?$")
+
+
+def find_gpu(spec: str, gpus: list[dict]) -> int | None:
+    """The card `spec` names, read as the engine reads --main-gpu and --second-gpu (src/core/gpu_select.cpp): a number
+    (or, when no card has that number, a word of a name: "3090", not "7"), a UUID or its start, a PCI bus id, or a name
+    or a part of one (a whole name first); None when no card or several match."""
+    s = spec.strip().strip("\"'")
+    low = s.lower()
+    if s.isdigit() and any(g["index"] == int(s) for g in gpus):
+        return int(s)
+    part = re.compile(rf"(?<![0-9a-z]){re.escape(low)}(?![0-9a-z])" if s.isdigit() else re.escape(low))
+
+    def bus(text):
+        m = _BUS_ID.match(text)
+        return m and tuple(int(x, 16) if x else 0 for x in m.groups())
+    if low.startswith("gpu-"):
+        hits = [g for g in gpus if g["uuid"].lower().startswith(low)]
+    elif bus(s):
+        hits = [g for g in gpus if bus(g["bus_id"]) == bus(s)]
+    else:
+        hits = [g for g in gpus if g["name"].lower() == low] or [g for g in gpus if part.search(g["name"].lower())]
+    return hits[0]["index"] if len(hits) == 1 else None
+
+
+def engine_gpus(cfg: dict, gpus: list[dict] | None = None) -> list[int]:
     """The cards the engine works on, numbered as nvidia-smi numbers them: the config's "gpu", else its arguments'
-    --main-gpu (default 0) and --second-gpu (one card or a list, "0,1": the GPU tiers; the last of either flag counts);
-    [] when neither names one."""
+    --main-gpu (default 0) and --second-gpu (one card or a list, "0,1": the GPU tiers; "auto": every other card; the
+    last of either flag counts), each named as the engine reads it (find_gpu; `gpus`: nvidia_gpus(), listed only when a
+    name needs it; a name no card answers to is left out, as the engine leaves it out); [] when neither names one."""
     if gpu_list(cfg):
         return gpu_list(cfg)
     args = [str(x) for x in cfg.get("args") or []]
@@ -2832,14 +2873,28 @@ def engine_gpus(cfg: dict) -> list[int]:
         at = [i for i, a in enumerate(args) if a in flags and i + 1 < len(args)]
         if not at:
             return None
-        items = [x.strip() for x in args[at[-1] + 1].split(",")]
-        return [int(x) for x in items if x.lstrip("-").isdigit()]
+        return [x.strip() for x in args[at[-1] + 1].split(",") if x.strip() and not x.strip().startswith("-")]
     main, tiers = values("--main-gpu"), values("--second-gpu", "--tier-gpus") or []
-    tiers = [t for t in tiers if t >= 0]
     if not main and not tiers:
         return []
-    main = main[0] if main else 0
-    return [main] + [t for i, t in enumerate(tiers) if t != main and t not in tiers[:i]]
+    known = gpus
+
+    def index(spec):
+        nonlocal known
+        if spec.isdigit() and known is None:
+            return int(spec)
+        known = nvidia_gpus() if known is None else known
+        return find_gpu(spec, known)
+    main = index(main[0]) if main else 0
+    main = 0 if main is None else main
+    if tiers == ["auto"]:
+        known = nvidia_gpus() if known is None else known
+        return [main] + [g["index"] for g in known if g["index"] != main]
+    out = [main]
+    for t in map(index, tiers):
+        if t is not None and t not in out and len(out) <= 3:   # the tiers are at most three (kMaxGpuTiers)
+            out.append(t)
+    return out
 
 
 def engine_binary(exe: str, cfg: dict | None = None) -> str:
@@ -8135,8 +8190,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", "
                          f"not {recovery!r}")
     svc.reasoning_loop_recovery = recovery
-    svc.gpu_index = (engine_gpus(cfg) or [0])[0]        # the Monitor reads the card the engine runs on (issue #51)
-    svc.gpu_indices = engine_gpus(cfg)                  # ... or every card it uses (issue #112; --second-gpu)
+    svc.gpu_indices = engine_gpus(cfg)                  # the Monitor reads every card the engine uses (issue #112;
+    svc.gpu_index = (svc.gpu_indices or [0])[0]         # --second-gpu), the first the one it runs on (issue #51)
     if a.engine == "strata" and groups:                 # replicas: every card of every group
         svc.gpu_indices = [c for g in groups for c in g]
         svc.gpu_index = svc.gpu_indices[0]

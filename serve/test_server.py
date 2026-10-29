@@ -1769,6 +1769,21 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(engine_gpus({"args": ["--main-gpu", "2", "--second-gpu", "0,1", "--second-gpu", "-1"]}), [2])
         self.assertEqual(engine_gpus({"args": ["--second-gpu", "1"]}), [0, 1])           # --main-gpu's default
         self.assertEqual(engine_gpus({"gpu": [3], "args": ["--second-gpu", "0,1"]}), [3])  # the config's "gpu" wins
+        # cards named as the engine reads them (nvidia-smi's list given): a name or a part only one card's has, a UUID's
+        # start, a PCI bus id; "auto" every other card; one no card answers to (RTX 4090, RTX: several) left out
+        gpus = [{"index": 0, "name": "NVIDIA GeForce RTX 5070 Ti", "bus_id": "00000000:01:00.0",
+                 "uuid": "GPU-1d4d7ab6-2729-ea00-b1c2-e20cb289c8b7"},
+                {"index": 1, "name": "NVIDIA GeForce RTX 5060 Ti", "bus_id": "00000000:02:00.0",
+                 "uuid": "GPU-fb1b29d6-9938-76c1-4d4f-bcb08ed50733"},
+                {"index": 2, "name": "NVIDIA GeForce RTX 3090", "bus_id": "00000000:10:00.0",
+                 "uuid": "GPU-f26e9ba6-34e6-e46a-a700-b8349f7e5456"}]
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "RTX 3090", "--second-gpu", "RTX 5070 Ti,rtx 5060 ti"]},
+                                     gpus), [2, 0, 1])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "GPU-f26e9ba6", "--second-gpu", "auto"]}, gpus), [2, 0, 1])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "10:00.0", "--second-gpu", "0000:02:00.0,RTX 4090,0"]},
+                                     gpus), [2, 1, 0])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "3090", "--second-gpu", "RTX,3090,7"]}, gpus), [2])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "1", "--second-gpu", "auto"]}, gpus), [1, 0, 2])
 
     def test_kfd_scores(self):
         """AMD on Linux: the GPU nodes of the KFD topology, SIMDs x clock, node order = the config's index."""

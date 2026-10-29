@@ -531,22 +531,35 @@ UD-Q4_K_XL's speeds on an RTX 3090 with 160 GB of RAM, with and without a second
 
 ### A second GPU
 
-With `--second-gpu N`, CUDA device N (the engine runs on `--main-gpu`, default 0) holds more experts and computes its share of
-each layer while the CPU computes the rest, copies each next layer's likeliest missing experts to itself while the RAM
-is idle, computes the prompt's experts the first GPU lacks, and holds the last rows of the output head (`--head-split`,
-0.45 of them); it may be the card that drives the display. Build for both GPUs' architectures
+With `--second-gpu GPU`, another GPU (the engine runs on `--main-gpu`, default 0) holds more experts and computes its
+share of each layer while the CPU computes the rest, copies each next layer's likeliest missing experts to itself while
+the RAM is idle, computes the prompt's experts the first GPU lacks, and holds the last rows of the output head
+(`--head-split`, 0.45 of them); it may be the card that drives the display. Build for both GPUs' architectures
 (`-DCMAKE_CUDA_ARCHITECTURES="86;120"`). When the card has no free VRAM, the engine runs on the main GPU alone. An RTX
 3090 with and without an RTX 5070 Ti as the second GPU, against upstream Strata and llama.cpp:
 [COMPARISON.md](COMPARISON.md).
 
-`--second-gpu N,M[,P]` (`--tier-gpus` the same) adds GPUs as further tiers, up to three: each holds the profile's next
+Both options name a GPU by its number among the visible ones (in `nvidia-smi`'s order: the engine sets
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` unless the environment names an order), its UUID or the start of one (`GPU-f26e9ba6`),
+its PCI bus id (`10:00.0`), or its name or a part of one only that card's has (`RTX 3090`, `3090`); `nvidia-smi -L`
+lists them. A number moves when a card is added (here an RTX 5060 Ti on an M.2 adapter took bus 02 and made the 3090
+device 2 instead of 1), a UUID stays with its card. The engine logs each GPU it takes with its name, bus id and UUID.
+
+`--second-gpu A,B[,C]` (`--tier-gpus` the same) adds GPUs as further tiers, up to three: each holds the profile's next
 experts after the GPUs before it, then the conversation's (its own adaptive tier, ranked after theirs), and computes
 the ones a verify window routes there beside the CPU, each with its own flag and row fetch on the main GPU. The first
 keeps the prompt path's share, the head's rows and `--prompt-split`'s stage; the later ones' experts stream to it in
-prompts. `--second-gpu-gib`, `--second-gpu-reserve-mib` and `--second-gpu-prefetch-mb` take a value per tier, the last
-for the tiers past it (the prefetch's default 12,0: copies into a card on a slower link than the 5070 Ti's x16 slowed
-the CPU pool's reads more than they saved). An RTX 5060 Ti on PCIe 4.0 x4 as a third tier beside the 3090 and the
-5070 Ti: UD-Q4_K_XL generates code 12% faster and edits 17% (fixed text, time a round), IQ3_S code and edits 7-8%.
+prompts. A named GPU that is not there (a card taken out, a driver that failed it) is left out with a line in the log,
+and the engine starts with the others. `--second-gpu auto` takes every other visible GPU, up to three, the fastest
+first: a copy test at startup (~0.5 s; it first wakes the links, which run at PCIe 1.0 or 2.0 rates while idle)
+measures each link's host-to-device rate, and the order is that rate times the card's multiprocessors.
+`--second-gpu-gib`, `--second-gpu-reserve-mib` and `--second-gpu-prefetch-mb` take a value per tier, the last for the
+tiers past it. Their defaults come from the startup test: a reserve of 2048 MiB on a card the desktop or another
+graphics program uses (NVML: a display active or a process's graphics context), 512 on a headless one, and a prefetch
+of 12 MiB into a card whose link carries 20 GB/s or more, none into a slower one (copies into the RTX 5060 Ti's x4,
+~7 GB/s, slowed the CPU pool's reads more than they saved). An RTX 5060 Ti on PCIe 4.0 x4 as a third tier beside the
+3090 and the 5070 Ti: UD-Q4_K_XL generates code 12% faster and edits 17% (fixed text, time a round), IQ3_S code and
+edits 7-8%.
 
 ## Before you start
 

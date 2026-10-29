@@ -254,9 +254,9 @@ if(STRATA_ENABLE_CUDA)
   add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/prompt_cache.cpp src/core/adaptive_tier.cpp src/core/second_gpu.cpp src/core/arena_place.cpp
-    src/core/split_head.cpp src/core/vmm.cpp)
+    src/core/split_head.cpp src/core/vmm.cpp src/core/gpu_select.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu CUDA::cudart)
+  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu CUDA::cudart ${CMAKE_DL_LIBS})
 
   # `strata generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
   # what composes them into a token.  No tokenizer - the prompt arrives as ids - because Gate C1 compares logits

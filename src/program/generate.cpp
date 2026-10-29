@@ -17,6 +17,7 @@
 #include "strata/artifact/gguf_split.hpp"
 #include "strata/core/adaptive_tier.hpp"
 #include "strata/core/expert_cache.hpp"
+#include "strata/core/gpu_select.hpp"
 #include "strata/core/second_gpu.hpp"
 #include "strata/core/split_head.hpp"
 #include "strata/core/expert_source.hpp"
@@ -290,19 +291,27 @@ struct Options {
     /// Plan v0.3 P6: the MTP draft layer's runtime directory (tools/mtp_rt.py); drafts come from it.
     std::string mtp;
     int64_t mtp_window = 32768;   ///< the draft layer attends to the last N cells (0 = every cell)
-    int main_gpu = 0;   ///< the CUDA device (of the visible ones) the engine runs on
-    /// GPUs (device ordinals) as further expert tiers, in order (--second-gpu A[,B,C]): `second_gpu` is the first, which
-    /// also takes the prompt path's share, the head's rows and --prompt-split's second stage (-1: none).  Per tier, its
-    /// VRAM for experts (0 = all but its reserve), its reserve and its prefetch budget: a list's last value stands for
-    /// the tiers past it (tier_value).
+    /// the CUDA device (of the visible ones) the engine runs on: --main-gpu names it as find_gpu (gpu_select.hpp) reads
+    /// it, an ordinal, a UUID, a PCI bus id or a name
+    std::string main_gpu_name = "0";
+    int main_gpu = 0;
+    /// GPUs as further expert tiers, in order (--second-gpu A[,B,C], each named as --main-gpu is, or "auto": every
+    /// other visible GPU, the fastest link first): `second_gpu` is the first, which also takes the prompt path's
+    /// share, the head's rows and --prompt-split's second stage (-1: none).  Per tier, its VRAM for experts (0 = all
+    /// but its reserve), its reserve and its prefetch budget: a list's last value stands for the tiers past it
+    /// (tier_value).
+    std::vector<std::string> tier_names;
     std::vector<int> tier_gpus;
     int second_gpu = -1;
     std::vector<double> second_gpu_gib{0.0};
-    std::vector<double> second_gpu_reserve_mib{2048.0};
+    /// default (empty): 2048 MiB on a GPU the desktop or another graphics program uses, 512 on a headless one
+    /// (gpu_select.hpp's probe)
+    std::vector<double> second_gpu_reserve_mib;
     double second_gpu_min_mb = 4.0;   ///< a layer's misses from which the tiers take their shares (smaller: the CPU is quicker)
-    /// per layer, the likeliest experts no GPU holds copied ahead (0 = off): the first tier's link (the 5070 Ti's x16)
-    /// carries them in the RAM's idle time; 4 MiB into an x4 tier made UD-Q4_K_XL's code and after-16K text 6% slower
-    std::vector<double> second_gpu_prefetch_mb{12.0, 0.0};
+    /// per layer, the likeliest experts no GPU holds copied ahead in the RAM's idle time (0 = off).  Default (empty):
+    /// 12 MiB to a GPU whose link the probe measured at 20 GB/s or more (the 5070 Ti's x16, 46-55 GB/s), none to a
+    /// slower one: 4 MiB into the 5060 Ti's x4 (~7 GB/s) made UD-Q4_K_XL's code and after-16K text 6% slower
+    std::vector<double> second_gpu_prefetch_mb;
     /// Keep the GPU tiers resident and executing, but do not adapt their residency while the main tier adapts.
     /// The default remains coupled adaptation of every tier.
     bool no_second_gpu_adapt = false;
@@ -489,22 +498,28 @@ void usage() {
                  "                       --spec allows the draft layer (windows of up to 8 tokens; 0 = off)\n"
                  "  --mtp DIR            the MTP draft layer's runtime files (tools/mtp_rt.py)\n"
                  "  --mtp-window N       the draft layer attends to the last N cells (default 32768; 0 = every cell)\n"
-                 "  --main-gpu N         run on CUDA device N of the visible ones, in nvidia-smi's order unless\n"
-                 "                       CUDA_DEVICE_ORDER says otherwise (default 0)\n"
-                 "  --second-gpu N[,M,P] CUDA devices (of the visible ones, not --main-gpu) as further expert\n"
-                 "                       tiers, up to three, in order: each holds the profile's next experts, then the\n"
-                 "                       conversation's, and computes them beside the CPU pool (native packs, verify\n"
-                 "                       windows); the first also takes the prompt path's share, the head's rows and\n"
-                 "                       --prompt-split's stage (--tier-gpus: the same; -1: none)\n"
+                 "  --main-gpu GPU       the GPU to run on (default 0): a CUDA device number of the visible ones (in\n"
+                 "                       nvidia-smi's order unless CUDA_DEVICE_ORDER says otherwise), a UUID or its\n"
+                 "                       start (GPU-f26e9ba6), a PCI bus id (10:00.0) or a name or a part of one\n"
+                 "                       (\"RTX 3090\") that only one GPU has: a number moves when a card is added\n"
+                 "  --second-gpu G[,G,G] GPUs, named as --main-gpu, as further expert tiers, up to three, in order:\n"
+                 "                       each holds the profile's next experts, then the conversation's, and\n"
+                 "                       computes them beside the CPU pool (native packs, verify windows); the first\n"
+                 "                       also takes the prompt path's share, the head's rows and --prompt-split's\n"
+                 "                       stage. One no visible GPU answers to is left out. auto: every other GPU,\n"
+                 "                       the fastest link first (a short probe at startup: host-to-device rate x\n"
+                 "                       multiprocessors) (--tier-gpus: the same; -1: none)\n"
                  "  --second-gpu-gib G[,..]  each tier's VRAM for experts (default: all but its reserve; a list's\n"
                  "                       last value stands for the tiers past it, as in the two below)\n"
-                 "  --second-gpu-reserve-mib R[,..]  the VRAM each tier leaves free (default 2048)\n"
+                 "  --second-gpu-reserve-mib R[,..]  the VRAM each tier leaves free (default 2048 on a GPU the\n"
+                 "                       desktop or another graphics program uses, 512 on a headless one)\n"
                  "  --second-gpu-min-mb M  a layer's missed experts from which the tiers take their shares (default 4;\n"
                  "                       below it the CPU is quicker than their ~100 us round trip)\n"
                  "  --second-gpu-prefetch-mb M[,..]  per layer, copy its likeliest experts that no GPU holds (the next\n"
                  "                       layer's router on this layer's input), up to M MiB, to a tier while the RAM is\n"
-                 "                       idle, the first tier's budget filled first (default 12,0: ~0.28 ms at the\n"
-                 "                       5070 Ti's ~48 GB/s, none to the later tiers; 0 = off)\n"
+                 "                       idle, the first tier's budget filled first (default 12 to a GPU whose link\n"
+                 "                       the probe measured at 20 GB/s or more, ~0.28 ms at the 5070 Ti's ~48 GB/s;\n"
+                 "                       none to a slower one; 0 = off)\n"
                  "  --no-second-gpu-adapt  with --second-gpu: keep the tiers\' resident expert assignment static while\n"
                  "                       the main GPU\'s adaptive tier continues to replace experts\n"
                  "  --deterministic-adapt  fixed-epoch adaptive copies and stable equal-gain ordering; default async\n"
@@ -1201,7 +1216,6 @@ int main(int argc, char** argv) {
     Options o;
     bool have_tokens = false;
     bool have_logits_stride = false;
-    std::vector<double> gpu_list;   // --second-gpu's
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&](const char* what) -> const char* {
@@ -1235,8 +1249,17 @@ int main(int argc, char** argv) {
                 *knob = std::atof(next(a.c_str()));
                 continue;
             }
-            std::vector<double>* list = a == "--second-gpu" || a == "--tier-gpus" ? &gpu_list
-                                      : a == "--second-gpu-gib" ? &o.second_gpu_gib
+            if (a == "--second-gpu" || a == "--tier-gpus") {   // names, as --main-gpu's (a negative number: none)
+                o.tier_names.clear();
+                std::stringstream names(next(a.c_str()));
+                for (std::string s; std::getline(names, s, ',');) {
+                    s.erase(0, s.find_first_not_of(" \t"));
+                    s.erase(s.find_last_not_of(" \t") + 1);
+                    if (!s.empty() && s[0] != '-') o.tier_names.push_back(s);
+                }
+                continue;
+            }
+            std::vector<double>* list = a == "--second-gpu-gib" ? &o.second_gpu_gib
                                       : a == "--second-gpu-reserve-mib" ? &o.second_gpu_reserve_mib
                                       : a == "--second-gpu-prefetch-mb" ? &o.second_gpu_prefetch_mb : nullptr;
             if (list != nullptr) {
@@ -1346,7 +1369,7 @@ int main(int argc, char** argv) {
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
-        else if (a == "--main-gpu") o.main_gpu = std::atoi(next("--main-gpu"));
+        else if (a == "--main-gpu") o.main_gpu_name = next("--main-gpu");
         else if (a == "--second-gpu-min-mb") o.second_gpu_min_mb = std::atof(next("--second-gpu-min-mb"));
         else if (a == "--no-second-gpu-adapt") o.no_second_gpu_adapt = true;
         else if (a == "--deterministic-adapt") o.deterministic_adapt = true;
@@ -1411,9 +1434,6 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    for (const double v : gpu_list)   // the GPU tiers (a negative value: none)
-        if (v >= 0) o.tier_gpus.push_back((int) v);
-    o.second_gpu = o.tier_gpus.empty() ? -1 : o.tier_gpus[0];
     if (!have_tokens && o.serve) {   // plan v0.3 P8: requests bring their own tokens
         o.tokens = {248045};
         o.max_new = 1;
@@ -1444,10 +1464,9 @@ int main(int argc, char** argv) {
     // the second GPU, so a residency would show in the output)
     if (o.expert_math == "exact") o.no_prompt_offload = true;
     // every routed expert on the CPU: no tier may bring one back to a GPU
-    if (o.disable_hit && (o.second_gpu >= 0 || o.adapt_every > 0)) {
+    if (o.disable_hit && (!o.tier_names.empty() || o.adapt_every > 0)) {
         std::fprintf(stderr, "strata generate: --disable-hit: no second GPU, no adaptive tier\n");
-        o.second_gpu = -1;
-        o.tier_gpus.clear();
+        o.tier_names.clear();
         o.adapt_every = 0;
     }
     // before anything builds an expert layout or runs an expert: the GPU's kernels and the CPU pool's SwiGLU
@@ -1457,26 +1476,41 @@ int main(int argc, char** argv) {
     const int q5k_mins = strata::kernels::cpu::ggml_q5_K_mins_rounding();
     strata::kernels::set_exact_q5_K_fma(q5k_mins == 1);
     // every CUDA call from here on uses this device; the adaptive tier sets it on its own thread too
-    int n_dev = 0;
-    if (cudaGetDeviceCount(&n_dev) != cudaSuccess || o.main_gpu < 0 || o.main_gpu >= n_dev ||
-        cudaSetDevice(o.main_gpu) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: --main-gpu %d is not a visible CUDA device (%d visible)\n", o.main_gpu,
-                     n_dev);
+    const std::vector<strata::core::GpuInfo> gpus = strata::core::list_gpus();
+    std::string gpu_why;
+    o.main_gpu = strata::core::find_gpu(gpus, o.main_gpu_name, gpu_why);
+    if (o.main_gpu < 0 || cudaSetDevice(o.main_gpu) != cudaSuccess) {
+        std::fprintf(stderr, "strata generate: --main-gpu %s: %s\n", o.main_gpu_name.c_str(),
+                     o.main_gpu < 0 ? gpu_why.c_str() : "cannot use it");
         return 2;
     }
-    if ((int) o.tier_gpus.size() > strata::core::kMaxGpuTiers) {
-        std::fprintf(stderr, "strata generate: --second-gpu takes up to %d GPUs\n", strata::core::kMaxGpuTiers);
-        return 2;
+    {
+        const strata::core::GpuInfo& gi = gpus[(size_t) o.main_gpu];
+        std::fprintf(stderr, "strata generate: main GPU %d, %s (%s, %s)\n", o.main_gpu, gi.name.c_str(),
+                     gi.bus_id.c_str(), gi.uuid.c_str());
     }
-    for (size_t i = 0; i < o.tier_gpus.size(); ++i) {
-        const int d = o.tier_gpus[i];
-        bool taken = d == o.main_gpu || d >= n_dev;
-        for (size_t j = 0; j < i; ++j) taken = taken || o.tier_gpus[j] == d;
-        if (taken) {
-            std::fprintf(stderr, "strata generate: --second-gpu %d is not another visible CUDA device\n", d);
-            return 2;
+    // the GPU tiers: the ones named, a name no visible GPU answers to (a card taken out, a failed driver) left out, or
+    // with "auto" every other GPU, ordered by the probe below
+    const bool tier_auto = o.tier_names.size() == 1 && o.tier_names[0] == "auto";
+    for (const strata::core::GpuInfo& gi : gpus)
+        if (tier_auto && gi.ordinal != o.main_gpu) o.tier_gpus.push_back(gi.ordinal);
+    if (tier_auto && o.tier_gpus.empty()) std::fprintf(stderr, "strata generate: --second-gpu auto: no other GPU\n");
+    for (size_t i = 0; i < o.tier_names.size() && !tier_auto; ++i) {
+        const int d = strata::core::find_gpu(gpus, o.tier_names[i], gpu_why);
+        const bool twice = std::find(o.tier_gpus.begin(), o.tier_gpus.end(), d) != o.tier_gpus.end();
+        const bool full = (int) o.tier_gpus.size() == strata::core::kMaxGpuTiers;
+        if (d < 0 || d == o.main_gpu || twice || full) {
+            const std::string why = d < 0 ? gpu_why
+                                    : d == o.main_gpu ? "it is the main GPU"
+                                    : twice ? "it is named twice"
+                                    : "the tiers are at most " + std::to_string(strata::core::kMaxGpuTiers);
+            std::fprintf(stderr, "strata generate: --second-gpu %s left out: %s\n", o.tier_names[i].c_str(),
+                         why.c_str());
+            continue;
         }
+        o.tier_gpus.push_back(d);
     }
+    o.second_gpu = o.tier_gpus.empty() ? -1 : o.tier_gpus[0];
     if (!set_stack_limit(o.main_gpu, o.main_gpu)) {   // the second GPU's before its tier sizes itself
         std::fprintf(stderr, "strata generate: cannot set the CUDA stack limit\n");
         return 2;
@@ -2159,6 +2193,50 @@ int main(int argc, char** argv) {
             return 1;
         }
         mtp.set_max_drafts(o.spec - 1);
+    }
+    // The GPU tiers' links measured, and whether the desktop uses each, while no load reads the RAM: "auto" puts the
+    // fastest first (host-to-device rate x multiprocessors) and keeps the first kMaxGpuTiers; a reserve or a prefetch
+    // budget not given comes from them.
+    if (!o.tier_gpus.empty()) {
+        second_ctx.join();
+        const auto p0 = std::chrono::steady_clock::now();
+        const std::vector<strata::core::GpuProbe> probe = strata::core::probe_gpus(o.tier_gpus, o.main_gpu);
+        std::fprintf(stderr, "strata generate: the GPU tiers' links probed in %.2f s\n",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - p0).count());
+        std::vector<size_t> order;
+        for (size_t i = 0; i < probe.size(); ++i) order.push_back(i);
+        auto score = [&](size_t i) { return probe[i].h2d_gbps * gpus[(size_t) o.tier_gpus[i]].sms; };
+        if (tier_auto)
+            std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return score(a) > score(b); });
+        std::vector<int> devs;
+        std::vector<double> reserve, prefetch;
+        for (const size_t i : order) {
+            const int d = o.tier_gpus[i];
+            if ((int) devs.size() == strata::core::kMaxGpuTiers) {   // "auto" past the third: its context goes
+                std::fprintf(stderr, "strata generate: GPU %d, %s, left out: the tiers are at most %d\n", d,
+                             gpus[(size_t) d].name.c_str(), strata::core::kMaxGpuTiers);
+                cudaSetDevice(d);
+                cudaDeviceReset();
+                continue;
+            }
+            devs.push_back(d);
+            reserve.push_back(probe[i].display ? 2048.0 : 512.0);
+            prefetch.push_back(probe[i].h2d_gbps >= 20.0 ? 12.0 : 0.0);
+        }
+        cudaSetDevice(o.main_gpu);
+        o.tier_gpus = devs;
+        o.second_gpu = devs[0];
+        if (o.second_gpu_reserve_mib.empty()) o.second_gpu_reserve_mib = reserve;
+        if (o.second_gpu_prefetch_mb.empty()) o.second_gpu_prefetch_mb = prefetch;
+        for (size_t t = 0; t < devs.size(); ++t) {
+            const strata::core::GpuInfo& gi = gpus[(size_t) devs[t]];
+            const strata::core::GpuProbe& pr = probe[order[t]];
+            std::fprintf(stderr, "strata generate: GPU tier %zu: GPU %d, %s (%s, %s): %.1f GB/s from the host, %d "
+                                 "multiprocessors, %s; reserve %.0f MiB, prefetch %.0f MiB\n", t + 1, gi.ordinal,
+                         gi.name.c_str(), gi.bus_id.c_str(), gi.uuid.c_str(), pr.h2d_gbps, gi.sms,
+                         !pr.display_known ? "its use unknown" : pr.display ? "a desktop" : "headless",
+                         tier_value(o.second_gpu_reserve_mib, t), tier_value(o.second_gpu_prefetch_mb, t));
+        }
     }
     // --ple-io ram: the table goes into RAM once the SSD has delivered the experts and the draft layer (with pinned
     // experts the arena loads later, before the cache's fill: the table follows it there)

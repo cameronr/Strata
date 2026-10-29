@@ -35,11 +35,9 @@
     "--pcie-frac",
     "0",
     "--second-gpu",
-    "0,1",
-    "--second-gpu-reserve-mib",
-    "2048,512",
+    "auto",
     "--main-gpu",
-    "2",
+    "RTX 3090",
     "--head-split",
     "0"
   ],
