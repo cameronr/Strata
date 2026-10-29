@@ -4952,8 +4952,10 @@ int main(int argc, char** argv) {
                     }
                     if (ys >= 0) {
                         // only where more than a chunk is left after the rest, text only, and into a slot that is
-                        // not decoding (this admission's own, or a free one the server reserved for it)
-                        const bool can = ys >= 0 && ys < (int) bs.size() && !bs[(size_t) ys].active &&
+                        // not decoding (this admission's own, or a free one the server reserved for it).  Not for
+                        // a --prompt-split read: its second stage may still be writing the session the park would
+                        // copy (upstream drops the BYIELD of a pipelined read too).
+                        const bool can = ys >= 0 && !split_on && ys < (int) bs.size() && !bs[(size_t) ys].active &&
                                          (admit_slot < 0 || ys == admit_slot) && req_imgs.empty() && track &&
                                          rest > chunk;
                         const auto ty = Clock::now();
@@ -5052,8 +5054,9 @@ int main(int argc, char** argv) {
                     }
                     if (split_on) psplit.ran(b0);
                     // where --cache-every keeps the segments single-chunk there is no piece boundary inside one:
-                    // the slots decode beside the read here then
-                    if (batch_on && !split_on && req_imgs.empty() && b0 < batched_end &&
+                    // the slots decode beside the read here then (a --prompt-split read gets these too: the windows
+                    // touch only the slots' sessions, never the split's; only its BYIELD park is refused)
+                    if (batch_on && req_imgs.empty() && b0 < batched_end &&
                         !read_boundary(b0, batched_end - b0,
                                        std::chrono::duration<double, std::milli>(Clock::now() - seg_t0).count(),
                                        err)) {
