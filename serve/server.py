@@ -1532,10 +1532,12 @@ class StrataEngine:
         return None
 
     def _apply_bdone(self, f: list[str]) -> None:
-        """`BDONE <slot> <produced> <finish> <ms>` into this request's figures."""
+        """`BDONE <slot> <produced> <finish> <ms> [<drafts ok> <drafts total>]` into this request's figures."""
         if len(f) >= 5 and isinstance(self.last, dict):
             self.last = {**self.last, "finish": f[3], "decode_ms": float(f[4]),
                          "generated": int(f[2]) if f[2].isdigit() else self.last.get("generated")}
+            if len(f) >= 7 and f[5].isdigit() and f[6].isdigit():   # the slot's MTP drafts (the BDONE tail)
+                self.last = {**self.last, "drafts_accepted": int(f[5]), "drafts_offered": int(f[6])}
 
     def _bdone_after_eos(self, slot: int, wait_s: float = 2.0):
         """#1869: a request in a slot whose consumer left at the stop token has its BDONE right behind it (the engine prints it
