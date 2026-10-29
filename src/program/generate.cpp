@@ -4010,9 +4010,11 @@ int main(int argc, char** argv) {
         };
         // STRATA_TRACE=1: one stderr line per step of a request (the log shows where a request stops)
         const bool trace = std::getenv("STRATA_TRACE") != nullptr;
+        const Clock::time_point trace_t0 = Clock::now();
         auto tr = [&](const char* what, long long a = -1, long long b = -1) {
             if (!trace) return;
-            std::fprintf(stderr, "strata trace: %s %lld %lld\n", what, a, b);
+            std::fprintf(stderr, "strata trace: %s %lld %lld (%.1f ms)\n", what, a, b,
+                         std::chrono::duration<double, std::milli>(Clock::now() - trace_t0).count());
             std::fflush(stderr);
         };
         {
@@ -4397,14 +4399,17 @@ int main(int argc, char** argv) {
                     if (c > reuse && c < batched_end && batched_end - c <= o.feed_max) { batched_end = c; break; }
             }
             if (batched_end > reuse) {
+                tr("prompt tiers", batched_end - reuse);
                 tier.apply_pending(true);   // no copy may still land in a lent slot
                 for (TierSlot& ts : tiers) ts.adapt.apply_pending(true);
+                tr("prompt tiers landed");
                 // --prompt-split: a prompt of more than one chunk, when the second GPU can lend the split's bytes.
                 // The checkpoints every --cache-every cells fall at the chunks' ends.
                 const int64_t chunk = prompt_chunk(batched_end - reuse, o.prefill_chunk, pbuf.offload != nullptr);
                 const int64_t step = std::max<int64_t>(1, o.cache_every / o.prefill_chunk) * chunk;
                 const bool split_try = pbuf.split != nullptr && batched_end - reuse > o.prefill_chunk;
                 if (!pbuf.take(chunk, err, split_try ? psplit.bytes_for(chunk, batched_end) : 0)) { report(err); return 1; }
+                tr("prompt slots lent", chunk);
                 const bool split_on = pbuf.split_region != nullptr;
                 if (split_on) {
                     if (!psplit.begin(pbuf.split_region, pbuf.split_bytes, chunk, reuse, batched_end, track, err)) {
