@@ -107,6 +107,9 @@ public:
         hist_d_ = nullptr;
         hist_len_ = 0;
     }
+    /// True while the batch windows accept the state (they refuse sampled or penalized state: `run_slot_rows`).
+    /// A prompt read asks before running a window between two of its pieces (phase 8: reads beside decoding slots).
+    bool windows_allowed() const { return sampling_.greedy && hist_d_ == nullptr; }
     /// Off: `run` skips the head sampling and `out` is the greedy pick (windows whose picks are discarded: a prompt
     /// read through windows commits every token).
     void set_head_sampling(bool on) { head_sampling_ = on; }

@@ -54,6 +54,7 @@
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/core/native_dense.hpp"
+#include "strata/program/batch_read.hpp"
 #include "strata/program/logits_selection.hpp"
 #include "strata/program/slots.hpp"
 #include "strata/platform/console_quit.hpp"
@@ -4521,8 +4522,8 @@ int main(int argc, char** argv) {
             stop_req.store(false);   // a STOP that arrived between requests is stale
             err.clear();             // and so is a stopped request's "cancelled"
             if (line.rfind("BYIELD ", 0) == 0)
-                continue;   // 5b: a read does not give way yet; dropped silently, as upstream drops it for a
-                            // pipelined batch (the harness's --yield skip path expects no answer, not an ERR)
+                continue;   // a BYIELD for a read that has ended meanwhile: dropped silently, as upstream does.
+                            // A read in flight takes it at its next piece boundary (phase 8: reads give way there).
             if (line.rfind("BSTOP ", 0) == 0) {
                 const int b = (int) std::strtol(line.c_str() + 6, nullptr, 10);
                 if (b >= 0 && b < (int) bs.size()) bs[(size_t) b].stop = true;   // the next window ends it
@@ -4886,6 +4887,24 @@ int main(int argc, char** argv) {
                 for (int64_t c : cuts)   // a short piece after a cut goes through verify windows, as a short last chunk
                     if (c > reuse && c < batched_end && batched_end - c <= o.feed_max) { batched_end = c; break; }
             }
+            // ---- phase 8: a prompt read beside decoding slots (upstream #465's single-GPU shape).  The read goes
+            // one prompt chunk at a time (the same chunks as one run: each run starts where the last ended, at a
+            // multiple of the chunk), and between two chunks the slots decode for a share of the time the chunk
+            // took (STRATA_BATCH_DECODE_SHARE, default 0.5; 0: no windows between the pieces, the FIFO shape), so
+            // a long prompt does not stop the others.  A `BYIELD <slot>` parks the part read into that slot and
+            // ends the request with YIELDED + DONE cancel; sending it again continues from the slot with the same
+            // chunks.  The slots' windows see the cache without the slots this prompt borrowed (marked missing:
+            // those experts run on the CPU), never a prompt buffer: the tiers move only experts the host table
+            // still shows resident, and a profile-filled cache admits nothing new mid-request.
+            static const double decode_share = [] {
+                const char* v = std::getenv("STRATA_BATCH_DECODE_SHARE");
+                return v != nullptr ? std::max(0.0, std::atof(v)) : 0.5;
+            }();
+            bool batch_fatal = false;
+            int64_t il_parts = 0;   // the boundaries between this read's pieces where the slots decoded
+            double il_ms = 0;
+            int64_t yielded_at = -1;   // BYIELD: the read stopped here and its slot holds it
+            int yielded_slot = -1;
             if (batched_end > reuse) {
                 tier.apply_pending(true);   // no copy may still land in a lent slot
                 tier2.apply_pending(true);
@@ -4909,6 +4928,104 @@ int main(int argc, char** argv) {
                     report("the prompt path's loan reached the slots the elastic K/V took (a bug: --no-kv-grow)");
                     return 1;
                 }
+                // The boundary between two read pieces: consume the BSTOP/BYIELD lines that came meanwhile, park
+                // the part read into a slot when this read gives way, and let the slots decode for a share of the
+                // piece's time.  False when the read must stop (BYIELD parked, or a window failed; both say so on
+                // stderr, `e` names the reason).  `rest` is the tokens this read has left after the boundary.
+                const auto read_boundary = [&](int64_t done_to, int64_t rest, double piece_ms,
+                                               std::string& e) -> bool {
+                    int ys = -1;
+                    {   // a BSTOP that came meanwhile ends its slot at its next window; a BYIELD is for this read
+                        std::lock_guard<std::mutex> lk(in_mu);
+                        for (auto it = in_lines.begin(); it != in_lines.end();) {
+                            if (it->rfind("BSTOP ", 0) == 0) {
+                                const int b = std::atoi(it->c_str() + 6);
+                                if (b >= 0 && b < (int) bs.size()) bs[(size_t) b].stop = true;
+                                it = in_lines.erase(it);
+                            } else if (it->rfind("BYIELD ", 0) == 0) {
+                                ys = std::atoi(it->c_str() + 7);
+                                it = in_lines.erase(it);
+                            } else {
+                                ++it;
+                            }
+                        }
+                    }
+                    if (ys >= 0) {
+                        // only where more than a chunk is left after the rest, text only, and into a slot that is
+                        // not decoding (this admission's own, or a free one the server reserved for it)
+                        const bool can = ys >= 0 && ys < (int) bs.size() && !bs[(size_t) ys].active &&
+                                         (admit_slot < 0 || ys == admit_slot) && req_imgs.empty() && track &&
+                                         rest > chunk;
+                        const auto ty = Clock::now();
+                        if (can && strata::core::session_prefix_copy(g, ss, registry.at((size_t) ys + 1).ss,
+                                                                      done_to, main_cs)) {
+                            // warm drafts: the parked read continues with the draft K/V it read the prompt with
+                            if (mtp.stores_ready()) {
+                                std::string merr;
+                                if (!mtp.copy_store(0, ys + 1, merr))
+                                    std::fprintf(stderr, "strata batch: slot %d drafts stay cold (%s)\n", ys,
+                                                 merr.c_str());
+                            }
+                            BSlot& sl = bs[(size_t) ys];
+                            sl = BSlot{};
+                            sl.ids.assign(ids.begin(), ids.begin() + done_to);
+                            sl.p = done_to;
+                            sl.cached = true;
+                            yielded_at = done_to;
+                            yielded_slot = ys;
+                            std::fprintf(stderr, "strata batch: the prompt read gives way at %lld of %lld tokens; "
+                                                 "slot %d holds it (copied in %.1f ms)\n",
+                                         (long long) done_to, (long long) n, ys,
+                                         std::chrono::duration<double, std::milli>(Clock::now() - ty).count());
+                            e = "yield";
+                            return false;
+                        }
+                        if (can) bs[(size_t) ys].cached = false;   // half written
+                        std::fprintf(stderr, "strata batch: BYIELD %d not taken at %lld of %lld\n", ys,
+                                     (long long) done_to, (long long) n);
+                    }
+                    if (decode_share <= 0.0 || !bs_active() || !ver.windows_allowed()) return true;
+                    const double budget = strata::program::piped_decode_budget_ms(piece_ms, decode_share, 0.0, 0.0);
+                    const auto td = Clock::now();
+                    do {
+                        if (!batch_step()) { batch_fatal = true; e = "a batch window failed"; return false; }
+                    } while (bs_active() &&
+                             std::chrono::duration<double, std::milli>(Clock::now() - td).count() < budget);
+                    ++il_parts;
+                    il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
+                    return true;
+                };
+                // One segment's read: with slots, one chunk at a time with the boundaries between (upstream's
+                // read_part).  A layer split reads its stages as a pipeline over one run's chunks, and a picture
+                // read leaves the global position tables rewritten for its own rows: both read in one run.
+                bool part_owned = false;   // the piece path did this segment's pcache bookkeeping
+                const auto read_part = [&](int64_t a0, int64_t b0, std::string& e) -> bool {
+                    if (!batch_on || split_on || !req_imgs.empty())
+                        return prefill.run(ids.data() + a0, b0 - a0, a0, e);
+                    const int64_t C = strata::program::batch_read_piece(true, false, false, bs_active(), chunk, 0);
+                    part_owned = true;
+                    for (int64_t q = a0; q < b0;) {
+                        const int64_t r = std::min(b0, q + C);
+                        const auto tq = Clock::now();
+                        pp_at = q;
+                        if (!prefill.run(ids.data() + q, r - q, q, e)) {
+                            // STOP: the session holds the pieces before this one and this run's chunks
+                            if (track) {
+                                const int64_t got = (q - a0) + std::max<int64_t>(0, prefill.processed());
+                                if (got > 0) pcache.set(a0, ids.data() + a0, got);
+                            }
+                            return false;
+                        }
+                        q = r;
+                        if (track) pcache.set(a0, ids.data() + a0, q - a0);
+                        // the boundary after a segment's last piece runs after its checkpoint: the segment loop's
+                        if (q >= b0) return true;
+                        if (!read_boundary(q, b0 - q,
+                                           std::chrono::duration<double, std::milli>(Clock::now() - tq).count(), e))
+                            return false;
+                    }
+                    return true;
+                };
                 tr("prompt start", reuse, batched_end);
                 pp_from = reuse;
                 pp_total = n - 1 - reuse;
@@ -4918,10 +5035,15 @@ int main(int argc, char** argv) {
                     for (int64_t c : cuts)
                         if (c > a0 && c < b0) { b0 = c; break; }
                     pp_at = a0;
-                    if (!prefill.run(ids.data() + a0, b0 - a0, a0, err)) {
+                    part_owned = false;
+                    const auto seg_t0 = Clock::now();
+                    if (!read_part(a0, b0, err)) {
+                        if (yielded_at >= 0) break;   // the read gave way: its slot holds the part read
+                        if (batch_fatal) return 1;    // the failed window printed its ERR; the engine ends
                         if (!stop_req.load()) { report(err); return 1; }
                         // STOP: the session holds the chunks read before it
-                        if (track && prefill.processed() > 0) pcache.set(a0, ids.data() + a0, prefill.processed());
+                        if (track && !part_owned && prefill.processed() > 0)
+                            pcache.set(a0, ids.data() + a0, prefill.processed());
                         break;
                     }
                     if (track) {
@@ -4929,6 +5051,15 @@ int main(int argc, char** argv) {
                         pcache.checkpoint(b0);
                     }
                     if (split_on) psplit.ran(b0);
+                    // where --cache-every keeps the segments single-chunk there is no piece boundary inside one:
+                    // the slots decode beside the read here then
+                    if (batch_on && !split_on && req_imgs.empty() && b0 < batched_end &&
+                        !read_boundary(b0, batched_end - b0,
+                                       std::chrono::duration<double, std::milli>(Clock::now() - seg_t0).count(),
+                                       err)) {
+                        if (batch_fatal) return 1;
+                        break;   // the read gave way
+                    }
                     a0 = b0;
                 }
                 if (split_on) {   // the second stage's last chunk, and its layers' state back in the session
@@ -4947,6 +5078,10 @@ int main(int argc, char** argv) {
                 add_prompt_usage(drive.d.usage, prefill.routed(), g.n_expert);
                 add_prompt_usage(prompt_heat, prefill.routed(), g.n_expert);   // (empty: no learned profile)
                 tr("prompt done (slots refilled)");
+                if (il_parts > 0)
+                    std::fprintf(stderr, "strata batch: the prompt was read in %lld parts, the slots decoding "
+                                         "%.0f ms between them\n",
+                                 (long long) (il_parts + 1), il_ms);
             }
             // A window whose logits held a NaN or an infinity (upstream #879): nothing of it is used, the request
             // ends with the finish "nonfinite", and the next one starts from an empty sequence.
@@ -4982,7 +5117,7 @@ int main(int argc, char** argv) {
                 return true;
             };
             int64_t merge_from = n - 1;   // the first decode window's first position: [merge_from, n) are prompt tokens
-            if (!stop_req.load()) {
+            if (!stop_req.load() && yielded_at < 0) {   // a read that gave way (BYIELD) feeds nothing
                 struct NoHeadSampling {   // every token is committed and the picks are discarded
                     strata::core::Verifier& v;
                     explicit NoHeadSampling(strata::core::Verifier& x) : v(x) { v.set_head_sampling(false); }
@@ -5050,7 +5185,7 @@ int main(int argc, char** argv) {
             ver.set_logits_wanted(!req_score.empty() || ddump.on());   // score=: a split head's first row whole
             std::vector<float> dd_logits(ddump.on() ? (size_t) W * (size_t) n_vocab : 0);
             while (poison_at < 0 && produced_n < max_new) {
-                if (stop_req.load()) { finish = "cancel"; break; }   // the client went away
+                if (stop_req.load() || yielded_at >= 0) { finish = "cancel"; break; }   // the client went away
                 int T = S;
                 if (req_spec_min_p > 0.0) {
                     T = 1;
@@ -5227,6 +5362,8 @@ int main(int argc, char** argv) {
                         (long long) (t1.second_prefetch_used - t0.second_prefetch_used), o.deterministic_adapt ? 1 : 0);
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused>
             // <expert-cache hits> <lookups>
+            if (yielded_at >= 0)   // the read gave way (BYIELD): <slot> <tokens read>, right before its DONE cancel
+                std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld\n", (long long) produced_n, (long long) n,
                         prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) reuse, (long long) (hits1 - hits0), (long long) (look1 - look0));
