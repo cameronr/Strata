@@ -56,6 +56,7 @@
 #include "strata/core/native_dense.hpp"
 #include "strata/program/batch_read.hpp"
 #include "strata/program/logits_selection.hpp"
+#include "strata/program/slot_fit.hpp"
 #include "strata/program/slots.hpp"
 #include "strata/platform/console_quit.hpp"
 
@@ -3998,33 +3999,47 @@ int main(int argc, char** argv) {
         // (the INFO line then omits batch_slots, and tools/batch_test.py skips on exactly that).
         bool batch_on = false;
         bool batch_mtp_on = false;   // --batch-mtp fully live: draft stores, slot replay, per-slot drafts
+        int n_slots = 0;   // the slots actually carved: fewer than --parallel on a partial start (phase 9)
         if (o.parallel > 1) {
             const uint64_t kv_at_ctx = strata::core::qsa_state_bytes(g, o.max_context, true) +
                                        (uint64_t)(g.n_qsa_layers() - 1) * strata::core::qsa_state_bytes(g, o.max_context, false);
             const uint64_t gdn_state = (uint64_t) g.n_gdn_layers() * strata::core::gdn_state_floats(g) * 4;
             const uint64_t ple_hist = (uint64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM * sizeof(float);
             const uint64_t sess = strata::core::session_bytes(g, o.max_context, K);
+            // --batch-mtp adds a draft K/V store (init_batch_stores) and the batch commit's per-slot snapshots
+            // (enable_slot_drafts: a full GDN-state copy and an indexer tail) on top of the session
+            const bool want_mtp = o.batch_mtp && !o.mtp.empty();
+            const uint64_t draft_store = want_mtp ? strata::core::qsa_state_bytes(g, o.max_context, false,
+                                                                                  strata::core::qsa_draft_kv_format()) : 0;
+            const uint64_t snap_tail = want_mtp
+                ? (uint64_t) g.n_qsa_layers() *
+                      (uint64_t) (strata::kernels::qsa_real_shapes().idx_block - 1) * (uint64_t) g.idx_key_dim * 4
+                : 0;
+            const uint64_t each = sess + draft_store + (want_mtp ? gdn_state : 0) + snap_tail;
             const double host_ram = ((double) (size_t) o.max_context + 16.0) * 40.0 +
                                     (double)(kHistSlots * sizeof(int32_t));   // drafter (hist, prev, index) + staging
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             std::fprintf(stderr, "strata serve: --parallel %d: each added slot takes %.2f GiB at a context of %lld "
-                         "(%.2f K/V, %.2f GDN state, %.2f PLE history, %.2f scratch), %s, plus ~%.2f GiB of host "
+                         "(%.2f K/V, %.2f GDN state, %.2f PLE history, %.2f scratch%s), %s, plus ~%.2f GiB of host "
                          "memory; %.2f GiB of VRAM free with everything loaded\n", o.parallel,
-                         (double) sess / (1 << 30), (long long) o.max_context,
+                         (double) each / (1 << 30), (long long) o.max_context,
                          (double) kv_at_ctx / (1 << 30), (double) gdn_state / (1 << 30), (double) ple_hist / (1 << 30),
                          (double) (sess - kv_at_ctx - gdn_state - ple_hist) / (1 << 30),
+                         want_mtp ? ", draft state and commit snapshots included" : "",
                          o.batch_mtp && !o.mtp.empty()
                              ? "plus a draft K/V store each with --batch-mtp"
                              : "no draft state (slots decode without MTP drafts)",
                          host_ram / (1 << 30), (double) free_b / (1 << 30));
             // slack for the copy staging an admission needs beyond the session itself; the reserve the cache
             // sizing already left is in `free_b`, so this is not q36's full 1 GiB headroom again
-            if (sess * (uint64_t) o.parallel + ((size_t) 256 << 20) > free_b) {
+            const int fit = strata::program::slots_that_fit(o.parallel, (int64_t) each, (int64_t) ((size_t) 256 << 20),
+                                                            (int64_t) free_b, 0);
+            if (fit == 0) {
                 std::fprintf(stderr, "strata serve: not enough VRAM for %d slots at a context of %lld (%.2f GiB "
                                      "each, %.2f GiB free): running without batch slots; use fewer slots "
                                      "(--parallel) or a shorter --max-context\n",
-                             o.parallel, (long long) o.max_context, (double) sess / (1 << 30),
+                             o.parallel, (long long) o.max_context, (double) each / (1 << 30),
                              (double) free_b / (1 << 30));
             } else if (o.kv == "fp16") {
                 std::fprintf(stderr, "strata serve: batch slots want quantized KV pools (--kv int8|k8v4|q4_0): "
@@ -4033,9 +4048,17 @@ int main(int argc, char** argv) {
                 // the N dedicated sessions: carved like the verifier's own (init_slots enforces it), zeroed,
                 // each with its own PLE history over the shared weights and read table. Registered once at the
                 // maximum: the resident segment tables live at baked addresses for the Verifier's life.
-                std::vector<strata::core::SessionState*> bslots((size_t) o.parallel);
+                // A partial start (phase 9, Basalt's shape): the slots that fit are taken and said so - running
+                // with two of four beats running with none.
+                if (fit < o.parallel)
+                    std::fprintf(stderr, "strata serve: --parallel %d does not fit at a context of %lld (%.2f GiB "
+                                         "each, %.2f GiB free): starting with %d slot%s\n",
+                                 o.parallel, (long long) o.max_context, (double) each / (1 << 30),
+                                 (double) free_b / (1 << 30), fit, fit == 1 ? "" : "s");
+                n_slots = 0;   // set below only when the sessions are carved and registered
+                std::vector<strata::core::SessionState*> bslots((size_t) fit);
                 bool carved = true;
-                for (int i = 1; i <= o.parallel && carved; ++i) {
+                for (int i = 1; i <= fit && carved; ++i) {
                     strata::program::Slot& sl = registry.at(i);
                     if (cudaMalloc(&sl.arena, sess) != cudaSuccess) {
                         carved = false;
@@ -4053,6 +4076,7 @@ int main(int argc, char** argv) {
                 std::string serr;
                 if (carved && ver.init_slots(bslots, serr)) {
                     batch_on = true;
+                    n_slots = fit;
                     // --batch-mtp (phase 7): the drafter carves a draft K/V store per slot and its graphs start
                     // resolving the layer's K/V through the resident store table, and the verifier takes on the
                     // per-slot snapshots and replay a drafted window commits with.  On failure the slots stay
@@ -4060,7 +4084,7 @@ int main(int argc, char** argv) {
                     if (o.batch_mtp && o.mtp.empty())
                         std::fprintf(stderr, "strata serve: --batch-mtp wants --mtp (no draft layer): the slots "
                                              "decode without drafts\n");
-                    else if (o.batch_mtp && !mtp.init_batch_stores(o.parallel, serr))
+                    else if (o.batch_mtp && !mtp.init_batch_stores(n_slots, serr))
                         std::fprintf(stderr, "strata serve: --batch-mtp could not carve the draft stores (%s): the "
                                              "slots decode without drafts\n", serr.c_str());
                     else if (o.batch_mtp && !ver.enable_slot_drafts(serr))
@@ -4071,7 +4095,7 @@ int main(int argc, char** argv) {
                 } else {
                     std::fprintf(stderr, "strata serve: the batch slots could not be registered (%s): running "
                                  "without batch slots\n", carved ? serr.c_str() : "a slot's session arena");
-                    for (int i = 1; i <= o.parallel; ++i)
+                    for (int i = 1; i <= fit; ++i)
                         if (registry.at(i).arena != nullptr) {
                             cudaFree(registry.at(i).arena);
                             registry.at(i).arena = nullptr;
@@ -4086,7 +4110,7 @@ int main(int argc, char** argv) {
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             const std::string batch_info =
-                batch_on ? " batch_slots=" + std::to_string(o.parallel) +
+                batch_on ? " batch_slots=" + std::to_string(n_slots) +
                                " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
                                (mtp.stores_ready() ? " batch_mtp=1" : "")
                          : "";
@@ -4159,8 +4183,8 @@ int main(int argc, char** argv) {
             };
             if (bp_slots < 1 || (int) bp_prompts.size() != bp_slots || bp_out.empty() || bp_n < 1)
                 return bp_fail("script wants SLOTS, that many PROMPT lines, N and OUT");
-            if (bp_slots > o.parallel)
-                return bp_fail("the script wants more slots than --parallel");
+            if (bp_slots > n_slots)
+                return bp_fail("the script wants more slots than the engine carved (see the serve log above)");
             if (!batch_on)
                 return bp_fail("batch slots are not live (see the serve log above)");
             // the dedicated sessions the serve startup carved and registered (phase 5): the parity legs never
@@ -4247,6 +4271,9 @@ int main(int argc, char** argv) {
         }
         std::string line;
         int64_t rounds = 0;
+        // true while a prompt read runs slot windows between its pieces (phase 8's read_boundary): that read may
+        // hold a loan of cache slots, so the tiers stand still inside it (docs/BATCHING.md, "keeps adapting")
+        bool tiers_still = false;
         // STRATA_WINDOW_DIGEST: a debug-only line per verify window (the solo token-exactness baseline, see the
         // window loop's emit).  Read once; when unset the hot loop does no extra work and nothing is printed.
         static const bool window_digest = std::getenv("STRATA_WINDOW_DIGEST") != nullptr;
@@ -4306,7 +4333,7 @@ int main(int argc, char** argv) {
             Clock::time_point t0;
             std::vector<int64_t> ids;   // the tokens the session holds: fed tokens, not the last pick
         };
-        std::vector<BSlot> bs(batch_on ? (size_t) o.parallel : 0);
+        std::vector<BSlot> bs(batch_on ? (size_t) n_slots : 0);
         int admit_slot = -1;              // the BGEN request being read (-1: an ordinary GEN)
         long long admit_max_new = 0;
         Clock::time_point admit_t0;
@@ -4389,13 +4416,36 @@ int main(int argc, char** argv) {
             drive.d.layers = 0;
             drive.d.experts = 0;
             drive.d.failed = false;
-            drive.adapt_next = drive.flush_next = false;   // the tiers keep their rhythm only beside solo windows
+            // the tiers keep their rhythm here too (phase 9): a batch window advances the round counter as a
+            // solo one does, admits the landed moves, and stages the next ones at its own shape.  The previous
+            // window's ranking thread lands first (as the solo loop joins after every window); while a prompt
+            // reads beside the slots the tiers stand still (that read may loan cache slots).  Off with
+            // STRATA_BATCH_ADAPT=0: the pre-phase-9 shape, where batch windows never touch the tiers.
+            static const bool batch_adapt = [] {
+                const char* v = std::getenv("STRATA_BATCH_ADAPT");
+                return v == nullptr || std::atoi(v) != 0;
+            }();
+            const bool tiers_move = batch_adapt && !tiers_still;
+            if (!drive.join_adapt()) {
+                std::printf("ERR an adaptive refill failed\n");
+                std::fflush(stdout);
+                return false;
+            }
+            if (tiers_move) {
+                drive_window(&drive, S);
+                drive.adapt_next = !drive.d.usage.empty() && ((rounds + 1) % o.adapt_every) == 0;
+                drive.flush_next = !drive.d.usage.empty() && ((rounds + 2) % o.adapt_every) == 0;
+            } else {
+                drive.win_t = S;   // ring timings keep indexing the window's real shape even here
+                drive.adapt_next = drive.flush_next = false;
+            }
             std::string berr;
             if (!ver.run_slot_rows(rows, S, tok, pos, &drive_pool_multi, &drive, picks, berr) || drive.d.failed) {
                 std::printf("ERR %s\n", !berr.empty() ? berr.c_str() : "a batch window's expert drive failed");
                 std::fflush(stdout);
                 return false;
             }
+            ++rounds;
             const int bad = ver.nonfinite(S);
             // every bad row (an injected call names a row the flags may not show, so keep `bad` too)
             std::vector<int> bads;
@@ -4539,7 +4589,7 @@ int main(int argc, char** argv) {
                 if (!batch_on || b < 0 || b >= (long long) bs.size() || bs[(size_t) b].active || mn < 1 ||
                     bend == nullptr || *bend == '\0') {
                     // the server's #1994 recovery matches this exact text after ERR
-                    std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", o.parallel);
+                    std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", n_slots);
                     std::fflush(stdout);
                     continue;
                 }
@@ -4729,6 +4779,13 @@ int main(int argc, char** argv) {
                                  strata::program::slot_state_name(solo.state), strata::program::slot_state_name(to));
             };
             advance_solo(strata::program::SlotState::admitted);
+            // the batch rhythm's ranking thread (phase 9): it lands before this request's read touches the cache
+            // its prompt path may loan slots from (the solo loop's own rounds joined after every window).
+            if (!drive.join_adapt()) {
+                std::printf("ERR an adaptive refill failed\n");
+                std::fflush(stdout);
+                return 1;
+            }
             // the elastic K/V: room for this prompt before the prompt cache restores or the prompt path writes a cell
             // (the decode grows it further).  A K/V far longer than the request is given back only after two such
             // requests in a row: an agent's short side requests (a title, a summary) between the turns of a long
@@ -4989,10 +5046,12 @@ int main(int argc, char** argv) {
                     if (decode_share <= 0.0 || !bs_active() || !ver.windows_allowed()) return true;
                     const double budget = strata::program::piped_decode_budget_ms(piece_ms, decode_share, 0.0, 0.0);
                     const auto td = Clock::now();
+                    tiers_still = true;   // the read may loan cache slots: the tiers stand still through its windows
                     do {
                         if (!batch_step()) { batch_fatal = true; e = "a batch window failed"; return false; }
                     } while (bs_active() &&
                              std::chrono::duration<double, std::milli>(Clock::now() - td).count() < budget);
+                    tiers_still = false;
                     ++il_parts;
                     il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
                     return true;
