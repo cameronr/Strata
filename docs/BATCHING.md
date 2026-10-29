@@ -347,6 +347,41 @@ one cold 64K prompt joining four streams: `STRATA_BATCH_DECODE_SHARE=2.0` 2.4 s 
 s and 13.8 s. Pieces of one chunk (`PIECE=8192`) cost the long prompt the most. Not measured: other GPU pairs, three or
 more stages, HIP and SYCL (built for CUDA only), sampled decoding, prompts with pictures.
 
+## A prompt read beside running slots (this branch)
+
+With `--parallel` above 0 a prompt is read chunk by chunk and the slots decode between the chunks: after each one the
+slots run windows for `STRATA_BATCH_DECODE_SHARE` x the chunk's time (default 0.5; 0 restores the FIFO shape, where
+the slots stall for the whole read). This is upstream's one-GPU shape; this branch read FIFO before it (streams
+stalled for the whole read, however long). The pieces end on whole chunks, so they read exactly the chunks a single
+run would (`batch_read_piece`).
+
+- Between the pieces the reader consumes `BSTOP` lines (a slot ends at its next window) and looks for a `BYIELD`.
+  Windows run only for a read whose sampling is what a batch window gives (greedy, no penalty history): a sampled
+  read is not cut for windows it would never serve.
+- A `BYIELD <slot>` parks the part read: the session and the slot's drafts are copied in, the request ends with
+  `YIELDED <slot> <tokens>` + `DONE cancel`, and sending it again goes on from there (the slot gives it back, as a
+  finished conversation does). Taken only where more than a chunk is left after the rest, for text reads.
+- A `--prompt-split` read goes whole (its stages pipeline over one run's chunks; a piece would drain the pipeline):
+  its slots decode between the segments instead, production's `--cache-every` making that a 16K granularity, and its
+  `BYIELD` is dropped - the second stage may still be writing the session a park would copy, as upstream drops the
+  BYIELD of a pipelined read. Picture reads go whole too (their position tables are rewritten for their own rows).
+- One log line per read that ran windows (`strata batch: the prompt was read in N parts, the slots decoding X ms
+  between them`) and per park (`the prompt read gives way at Q of T tokens; slot S holds it`).
+
+Measured on this rig (RTX 4090 + 5070 Ti, the deterministic config: frozen profile, `--adapt-every 0`,
+`STRATA_IQ_MT_MIN=1`, `--pcie-frac 0`, `--prefill 1024`, no split; two slots streaming greedy answers while a
+6.4K-token prompt reads beside them):
+
+| `STRATA_BATCH_DECODE_SHARE` | the slots' stream during the read | the read itself |
+| --- | ---: | ---: |
+| 0 (FIFO) | 0.26 tok/s | 10.7 s |
+| 0.5 | 23.98 tok/s | 15.5 s |
+
+The read pays about the decode share x its own time (the windows take GPU time between its chunks); the streams get
+the GPU back at chunk granularity instead of waiting for the read. Exactness: every step of `batch_interleave_test.py`
+equals its solo tokens (10/10) with the pieces live, including the parked read that went on (parked at 1024 tokens,
+resumed with exactly `1024 cached`).
+
 ## The VRAM expert tier keeps adapting in batch windows
 
 Batch windows count which experts they route to, and every `--adapt-every` windows (default 4) the engine swaps the
@@ -428,7 +463,7 @@ counter-based draw (Philox(seed, position)).
   trimmed first). It needs `--mtp`; otherwise the engine says so and the slots decode without drafts.
 - Repetition / frequency / presence penalties are not applied in batch windows.
 - A prompt shorter than one chunk is read in one piece (the slots wait for it); a read gives way only at a chunk
-  boundary, and not for pictures.
+  boundary, and not for pictures. A `--prompt-split` read gives way nowhere: its segments are its decode points.
 - Admissions are one at a time: two new long prompts are read one after the other.
 - `--batch-groups` needs every stage on its own GPU. A pipelined slot is a conversation cache again (0.1.41): a request left alone in its slot goes back to the solo path with its drafts, as on one GPU.
 - The slot sessions take VRAM (above) and, with KV streaming, pinned RAM.
@@ -521,7 +556,7 @@ tests the server's side with a scripted engine (no GPU).
 | Script | What it checks |
 | --- | --- |
 | `tools/batch_test.py` | the same prompts alone (`GEN`) and together in the batch slots (`BGEN`): every slot's greedy tokens equal its solo tokens; prints the aggregate rate. `--batch-groups` in `--extra` tests the pipeline, `--keys "temperature=0.7"` the sampled rows, `--mtp --batch-mtp` with the slots' drafts (prints each slot's draft acceptance). |
-| `tools/batch_interleave_test.py` | a long prompt read while two slots decode, a prompt that gives way (`BYIELD`) and goes on, and a next turn continued from its slot: each equal to its solo tokens. On a two-stage layer split with pipelined groups add `--batch 4 --batch-groups 2` to `--extra` (its 3 slots do not divide into two groups) and set `STRATA_PIPED_READ_PIECE`; run it without a conversation cache, or step 4 restores the prompt instead of reading it. |
+| `tools/batch_interleave_test.py` | a long prompt read while two slots decode, a prompt that gives way (`BYIELD`) and goes on, and a next turn continued from its slot: each equal to its solo tokens. On a two-stage layer split with pipelined groups add `--batch 4 --batch-groups 2` to `--extra` (its 3 slots do not divide into two groups) and set `STRATA_PIPED_READ_PIECE`. This branch's copy solos the long prompts only after their slot reads: a solo reference sent first would leave the prompt checkpointed, and the slot phase would restore it instead of reading it beside the windows. |
 | `tools/parking_test.py` | a follow-up to a conversation decodes the same tokens whether its state stayed live or came back from the parking cache (with a layer split: every stage's image). |
 | `tools/early_close_test.py` | a client that stops reading a streamed answer early (alone, and with a second request running) does not leave its tokens to the next request (server). |
 
