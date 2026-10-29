@@ -166,11 +166,6 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         err = "verify: needs the profile-filled VRAM expert tier (--expert-profile and --expert-cache)";
         return false;
     }
-    std::string why;
-    if (!layer_verify_compatible(why)) {
-        err = "verify: " + why + " (the verify window reproduces the default native decode path)";
-        return false;
-    }
     if (!strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr) || ss.k != 10 || g.ssm_state_size != 128 ||
         g.ssm_d_conv != 4) {
         err = "verify: geometry differs from the artifact's";
