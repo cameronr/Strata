@@ -102,6 +102,10 @@ def main():
                     help="the LAST prompt is read from about this many tokens of filler text first: its chunks run "
                          "beside the earlier slots' windows (the prompt path lends experts then)")
     ap.add_argument("--mt-min", default="1", help="STRATA_IQ_MT_MIN for the engine (1: exact; empty: the default)")
+    ap.add_argument("--mtp", action="store_true", help="require the engine's MTP drafts (its INFO says spec > 1)")
+    ap.add_argument("--batch-mtp", action="store_true",
+                    help="the slots draft too (engine --batch-mtp; INFO must confirm batch_mtp=1, else skip): "
+                         "BDONE's draft acceptance fields are then printed per slot")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text())
     tok = tokenizer(cfg["tokenizer"])
@@ -118,7 +122,7 @@ def main():
     env = {"STRATA_DECODE_TIMING": "1", **({"STRATA_VERIFY_PROFILE": "1"} if os.environ.get("PROF") else {})}
     if a.mt_min:
         env["STRATA_IQ_MT_MIN"] = a.mt_min
-    eng = Engine(a.exe, cfg, a.batch, env, a.extra.split())
+    eng = Engine(a.exe, cfg, a.batch, env, a.extra.split() + (["--batch-mtp"] if a.batch_mtp else []))
     if a.batch and not (eng.ready and "batch_slots" in eng.info):
         print(f"skip: engine has no batch slots (INFO: {eng.info})")
         try:
@@ -126,9 +130,18 @@ def main():
         except OSError:
             pass
         return 0
+    if a.mtp and int(eng.info.get("spec", "0") or 0) < 2:
+        print(f"skip: engine has no MTP drafts (INFO: {eng.info})")
+        eng.p.terminate()
+        return 0
+    if a.batch_mtp and eng.info.get("batch_mtp") != "1":
+        print(f"skip: engine has no batch drafts (INFO: {eng.info})")
+        eng.p.terminate()
+        return 0
     out = eng.lines()
 
     solo = []
+    solo_drafts = []
     if not a.skip_solo:
         for i, ids in enumerate(prompts):
             eng.send(" ".join(x for x in ("GEN", str(a.max_new), a.keys, ",".join(map(str, ids))) if x))
@@ -137,6 +150,9 @@ def main():
                 if line.startswith("T "):
                     got.append(int(line.split()[1]))
                 elif line.startswith("DONE") or line.startswith("ERR"):
+                    f = line.split()
+                    if f[0] == "DONE" and len(f) >= 8:
+                        solo_drafts.append((int(f[6]), int(f[7])))
                     print(f"solo {i}: {len(got)} tokens in {time.time() - t0:.1f}s  {line[:60]}", flush=True)
                     break
             solo.append(got)
@@ -144,6 +160,7 @@ def main():
     # batch: admit every prompt, then the slots decode together
     got = {i: [] for i in range(len(prompts))}
     done = {}
+    drafts = {}   # slot -> (accepted, offered) from BDONE's trailing fields (--batch-mtp engines)
     t_admit = time.time()
     first_bt = None
     for i, ids in enumerate(prompts):
@@ -156,7 +173,10 @@ def main():
                 got[int(s)].append(int(y))
                 first_bt = first_bt or time.time()
             elif line.startswith("BDONE "):
-                done[int(line.split()[1])] = line
+                p = line.split()
+                done[int(p[1])] = line
+                if len(p) >= 7:
+                    drafts[int(p[1])] = (int(p[5]), int(p[6]))
             elif line.startswith("ERR"):
                 print("batch:", line)
                 return 1
@@ -171,7 +191,10 @@ def main():
             got[int(s)].append(int(y))
             first_bt = first_bt or time.time()
         elif line.startswith("BDONE "):
-            done[int(line.split()[1])] = line
+            p = line.split()
+            done[int(p[1])] = line
+            if len(p) >= 7:
+                drafts[int(p[1])] = (int(p[5]), int(p[6]))
             if len(done) == len(prompts):
                 break
         elif line.startswith("ERR"):
@@ -192,6 +215,15 @@ def main():
             first_diff = next((k for k in range(min(len(b), len(solo[i]))) if b[k] != solo[i][k]), None)
             print(f"slot {i}: {len(b)} tokens, solo {len(solo[i])}: {'IDENTICAL' if same else f'DIFFERS at {first_diff}'}")
         print("   ", ascii(tok.decode(b)[:160]))
+    if solo_drafts:
+        o_, t_ = sum(v[0] for v in solo_drafts), sum(v[1] for v in solo_drafts)
+        print(f"solo drafts: {o_} of {t_} accepted ({o_ / max(t_, 1):.3f})")
+    if drafts:
+        for i in sorted(drafts):
+            o_, t_ = drafts[i]
+            print(f"slot {i} drafts: {o_} of {t_} accepted ({o_ / max(t_, 1):.3f})")
+        o_, t_ = sum(v[0] for v in drafts.values()), sum(v[1] for v in drafts.values())
+        print(f"batch drafts: {o_} of {t_} accepted ({o_ / max(t_, 1):.3f})", flush=True)
     if a.dump:
         Path(a.dump).write_text(json.dumps({"solo": solo, "batch": [got[i] for i in range(len(prompts))]}), encoding="utf-8")
     eng.send("QUIT")

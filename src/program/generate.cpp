@@ -4299,6 +4299,8 @@ int main(int argc, char** argv) {
             float dprob[strata::kernels::kVerifyMaxT] = {};      // --spec-1) and their odds (the drafter's
             int ndrafts = 0;       // windows are max_window() wide, so the arrays are too)
             bool drafted = false;  // the slot has a draft round's output to verify
+            long long drafts_ok = 0, drafts_total = 0;   // --batch-mtp: drafts the windows fed this slot and the
+                                                         // ones the model accepted (BDONE reports them)
             long long produced = 0, max_new = 0;
             Clock::time_point t0;
             std::vector<int64_t> ids;   // the tokens the session holds: fed tokens, not the last pick
@@ -4441,8 +4443,9 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata batch: non-finite logits in slot %d at position %lld: it ends "
                                          "(BDONE nonfinite) and the next request reads its prompt from token 0\n",
                                  b, (long long) pos[t0]);
-                    std::printf("BDONE %d %lld nonfinite %.1f\n", b, (long long) sl.produced,
-                                std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
+                    std::printf("BDONE %d %lld nonfinite %.1f %lld %lld\n", b, (long long) sl.produced,
+                                std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count(),
+                                (long long) sl.drafts_ok, (long long) sl.drafts_total);
                     sl.active = sl.cached = false;
                     sl.tainted = true;
                     sl.drafted = false;
@@ -4455,6 +4458,8 @@ int main(int argc, char** argv) {
                 for (int t = t0; t < t0 + n; ++t)
                     sl.ids.push_back(tok[t]);   // the fed tokens of the kept rows are held; the picks join
                                                 // when the next window feeds them
+                sl.drafts_ok += n - 1;                // drafts that became committed tokens
+                sl.drafts_total += (t1 - t0) - 1;     // drafts the window fed (trimmed ones never were)
                 bool ended = false;
                 for (int i = 0; i < n; ++i) {   // the model's token after each kept row
                     const int32_t y = picks[(size_t) t0 + i];
@@ -4464,8 +4469,9 @@ int main(int argc, char** argv) {
                     const char* fin = eos ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
                                                : sl.p + i + 1 >= o.max_context ? "length" : nullptr;
                     if (fin != nullptr) {
-                        std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin,
-                                    std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count());
+                        std::printf("BDONE %d %lld %s %.1f %lld %lld\n", b, (long long) sl.produced, fin,
+                                    std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count(),
+                                    (long long) sl.drafts_ok, (long long) sl.drafts_total);
                         sl.active = false;
                         sl.cached = o.prompt_cache > 0 && !sl.tainted;
                         sl.drafted = false;

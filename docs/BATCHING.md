@@ -22,24 +22,19 @@ asked, with a note when it is more than setup would recommend.
 "parallel": 2
 ```
 
-With MTP (`--mtp` and `--spec`), `--batch-mtp` (in the config's `args`, or `STRATA_BATCH_MTP=1` in the server's
-environment) lets each batch slot verify one MTP proposal per window. It is opt-in; without it the batch behaviour
-described below is exactly the one without MTP. It needs VRAM per slot for the draft state and buffers, so check the
-engine's free-memory log before using it on a smaller card. If it cannot run (one slot, no `--mtp`, a layer split with
-`--batch-groups` above 1 or with helper-GPU expert caches or `--remote-expert-opt`, a layer split with two stages on one
-GPU) the engine says so and batches as usual. RTX PRO 5000 owners measured +31% to +39% total throughput with 2 to 4
-clients on one GPU (a RX R9700 run too).
+With MTP (`--mtp` and `--spec`), `--batch-mtp` (in the config's `args`) lets every batch slot draft like a solo request:
+each slot's draft round proposes up to `--spec-1` tokens, its next window carries its token and its drafts as
+consecutive rows, and the window is shared across the slots - when the rows exceed the 8-row window, the least
+likely drafts (lowest draft probability) are trimmed first. The per-slot acceptance a slot's windows saw is the
+last two fields of its `BDONE`. It is opt-in; without it the batch behaviour described below is exactly the one
+without MTP. It needs VRAM per slot for the draft state and buffers, so check the engine's free-memory log before
+using it on a smaller card. If it cannot run (no `--mtp`, the draft stores or the batch commit could not be
+carved) the engine says so and the slots decode without drafts.
 
-**With a layer split** (e.g. `"layer_split": "24"` on two GPUs, `"parallel": 2`, `--spec 4 --mtp ...`) it works the
-same way, with the slot drafters on the **last stage's GPU** (where the solo drafter and the head are): each slot gets a
-drafter that shares the solo drafter's weights and owns only its K/V ring and buffers (the engine logs `--batch-mtp: N
-slot drafters on CUDAk (X MiB ... each)` at start; the K/V ring of each also keeps a pinned-RAM copy, as the solo
-drafter's does). A window carries two rows per active slot (its token and its proposal) through every stage, so at most
-four slots are in one window; more slots (`--batch` up to what fits) rotate through. The windows run through the stages
-one after the other (`--batch-groups 1`): on 0.1.41 a layer split with `--batch` 2 or more pipelines the slots in groups
-by default, and the pipelined path does not run the slots' MTP drafts, so with `--batch-mtp` and no `--batch-groups` the
-engine (0.1.43.1) pipelines and leaves `--batch-mtp` off, and says so (0.1.42/0.1.43 ran one serial group with it: 4 streams on 2x A4000 aggregated 63.9 tok/s against 91.8 pipelined, 85.8 pipelined without `--batch-mtp`; #2038). `--batch-groups 1` or `STRATA_BATCH_MTP_SERIAL=1` keeps `--batch-mtp` with serial windows, which is the better choice for about two streams as measured below; `--batch-groups G` (G above 1) or `--batch-groups auto` given on the command line
-keeps the pipeline and turns `--batch-mtp` off. Only a layer split of two stages on two GPUs has been run.
+**With a layer split** the slots' drafts run through the stages like their other rows; the shape here is this
+fork's (plans/01-engine-batching/phase-7-mtp-per-slot.md), not the upstream one the earlier drafts of this page
+described: one drafter with a per-slot K/V store, not a per-slot drafter, and no `--batch-groups` pipelining
+(that path is not in this engine).
 
 Measured on a layer split of 2x RTX 3080 20 GB (220 W cap) with a Xeon E5-2696 v4, UD-Q4_K_XL, `"layer_split": "23"`,
 `"parallel": 2`, `--spec 4`: two concurrent greedy decodes of 300 tokens, the two streams' tok/s added, median of
@@ -429,9 +424,8 @@ counter-based draw (Philox(seed, position)).
 
 - By default, batch windows carry no MTP drafts: a conversation in a slot decodes one token per window (the solo
   path keeps its drafts, which is why a request alone is not put in a slot, and goes back to it when left alone).
-- `--batch-mtp` uses one proposal per slot. With a layer split it needs each stage on its own GPU, does not combine
-  with `--batch-groups` above 1 (pipelined slot groups run no drafts, #1413) and has not been run with helper expert
-  caches.
+- `--batch-mtp` drafts up to `--spec-1` per slot per round (the window is shared; the least likely drafts are
+  trimmed first). It needs `--mtp`; otherwise the engine says so and the slots decode without drafts.
 - Repetition / frequency / presence penalties are not applied in batch windows.
 - A prompt shorter than one chunk is read in one piece (the slots wait for it); a read gives way only at a chunk
   boundary, and not for pictures.
@@ -526,7 +520,7 @@ tests the server's side with a scripted engine (no GPU).
 
 | Script | What it checks |
 | --- | --- |
-| `tools/batch_test.py` | the same prompts alone (`GEN`) and together in the batch slots (`BGEN`): every slot's greedy tokens equal its solo tokens; prints the aggregate rate. `--batch-groups` in `--extra` tests the pipeline, `--keys "temperature=0.7"` the sampled rows. |
+| `tools/batch_test.py` | the same prompts alone (`GEN`) and together in the batch slots (`BGEN`): every slot's greedy tokens equal its solo tokens; prints the aggregate rate. `--batch-groups` in `--extra` tests the pipeline, `--keys "temperature=0.7"` the sampled rows, `--mtp --batch-mtp` with the slots' drafts (prints each slot's draft acceptance). |
 | `tools/batch_interleave_test.py` | a long prompt read while two slots decode, a prompt that gives way (`BYIELD`) and goes on, and a next turn continued from its slot: each equal to its solo tokens. On a two-stage layer split with pipelined groups add `--batch 4 --batch-groups 2` to `--extra` (its 3 slots do not divide into two groups) and set `STRATA_PIPED_READ_PIECE`; run it without a conversation cache, or step 4 restores the prompt instead of reading it. |
 | `tools/parking_test.py` | a follow-up to a conversation decodes the same tokens whether its state stayed live or came back from the parking cache (with a layer split: every stage's image). |
 | `tools/early_close_test.py` | a client that stops reading a streamed answer early (alone, and with a second request running) does not leave its tokens to the next request (server). |
@@ -561,7 +555,7 @@ On top of `GEN` / `GENI`:
 | `BGENI <slot> <max_new> [keys] <file> <ids>` | in | the same with images |
 | `BADM <slot> <1/0>` | out | after the admission's `DONE`: 1 = it continues in the slot, 0 = it ended |
 | `BT <slot> <id>` | out | a token of that slot |
-| `BDONE <slot> <generated> <stop/length/cancel> <ms>` | out | the slot is free again (it keeps its conversation) |
+| `BDONE <slot> <generated> <stop/length/cancel> <ms> [drafts_ok drafts_offered]` | out | the slot is free again (it keeps its conversation); the last two fields are the slot's `--batch-mtp` draft acceptance |
 | `BSTOP <slot>` | in | end that slot at its next window |
 | `BYIELD <slot>` | in | the prompt being read gives way at its next chunk boundary; its part read waits in `<slot>` (the admission's own, or a free slot for a solo request) |
 | `YIELDED <slot> <tokens>` | out | before the `DONE cancel` of a read that gave way: the request is sent again later and goes on from there |
