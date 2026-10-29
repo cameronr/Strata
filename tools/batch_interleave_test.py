@@ -114,10 +114,11 @@ def main():
         chat("Now in C.")
     sF2, _ = run(eng, out, f"GEN {M} {ids(F2)}") if a.flush > 0 else ([], None)
     sB, _ = run(eng, out, f"GEN {M} {ids(B)}")
-    sC, _ = run(eng, out, f"GEN {M} {ids(C)}")
-    sD, _ = run(eng, out, f"GEN {M} {ids(D)}")
     sE, _ = run(eng, out, f"GEN {M} {ids(E)}")
-    print(f"solo: A {len(sA)}, A2 {len(sA2)}, B {len(sB)}, C {len(sC)}, D {len(sD)}, E {len(sE)} tokens", flush=True)
+    # C and D are NOT soloed here: a solo reference first would leave them checkpointed, and their slot reads
+    # (the ones beside the windows, and the one BYIELD parks) would then be cache reuse with nothing to read.
+    # Their solo references run after those steps; a continuation from the cache is exact, so the comparison holds.
+    print(f"solo: A {len(sA)}, A2 {len(sA2)}, B {len(sB)}, E {len(sE)} tokens", flush=True)
 
     # 2. the slots: A, B, then the long C while they decode
     got = {0: [], 1: [], 2: []}
@@ -142,6 +143,7 @@ def main():
             elif l.startswith("ERR"):
                 raise SystemExit("engine: " + l)
     drain()
+    sC, _ = run(eng, out, f"GEN {M} {ids(C)}")   # solo after the slots: their C read was the fresh one
     print(f"slots: admissions {t_admit:.1f}s; {during_c} slot tokens arrived while the admissions read their prompts",
           flush=True)
     ok = True
@@ -218,6 +220,7 @@ def main():
             done4.add(int(l.split()[1]))
         elif l.startswith("ERR"):
             raise SystemExit("engine: " + l)
+    sD, _ = run(eng, out, f"GEN {M} {ids(D)}")   # solo after the give-way: its slot read was the fresh one
     for s, ref, name in ((1, sE, "E (short, admitted while D waited)"), (2, sD, "D (gave way, then went on)" if yielded else "D (read whole, E admitted beside it)")):
         same = got4[s] == ref
         ok &= same
