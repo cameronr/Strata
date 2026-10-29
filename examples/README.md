@@ -85,10 +85,11 @@ quantized tensors, the experts and most projections, from the GGUF files at star
 
    A picture of ~1,000 tokens (`max_tokens`: up to 1,024) takes ~9 s to encode on the 9700X (`threads`: its 16 logical
    cores), once per picture, and the encoder ~1 GB of RAM. Without images, remove the section and `--vision`.
-5. Set the GPU numbers, as `nvidia-smi` numbers the cards (here the 5070 Ti is 0 and the 3090 is 1; the engine sets
-   `CUDA_DEVICE_ORDER=PCI_BUS_ID` unless the environment names an order). `--main-gpu` runs the model, and nothing
-   else may use that card: a display or another program on it slows generation to a few tokens per second.
-   `--second-gpu` holds more experts and may drive the display.
+5. Set the GPU numbers, as `nvidia-smi` numbers the cards (here the 5070 Ti is 0, an RTX 5060 Ti 1 and the 3090 2;
+   the engine sets `CUDA_DEVICE_ORDER=PCI_BUS_ID` unless the environment names an order). `--main-gpu` runs the model,
+   and nothing else may use that card: a display or another program on it slows generation to a few tokens per
+   second. `--second-gpu` holds more experts and may drive the display; a list (`0,1`) adds more cards as further
+   tiers, each with its own `--second-gpu-reserve-mib` (`2048,512`: a card without a display needs less).
 6. Start a config with its launcher, `run-iq3_s.bat` or `run-ud-q4_k_xl.bat`, or from the Strata folder:
 
        .venv\Scripts\python.exe serve\server.py --engine strata --config examples\iq3_s.json

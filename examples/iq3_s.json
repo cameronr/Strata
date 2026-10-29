@@ -39,7 +39,7 @@
     "--second-gpu",
     "0",
     "--main-gpu",
-    "1"
+    "2"
   ],
   "cwd": ".",
   "tokenizer": "../Strata-data/packs/iq3_s/tokenizer",

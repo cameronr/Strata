@@ -37,7 +37,7 @@
     "--second-gpu",
     "0",
     "--main-gpu",
-    "1",
+    "2",
     "--head-split",
     "0"
   ],
