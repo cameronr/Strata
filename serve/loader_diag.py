@@ -1,8 +1,7 @@
 """serve/loader_diag.py - name the file a Windows engine could not load.
 
 A Windows program that imports a DLL which is not there ends with exit code 0xC0000135 and prints nothing. The person only sees
-"the engine stopped". This reads the engine's import table (the same reader as packaging/binary_deps.py, copied because the
-packaging folder does not travel with Control) and lists the DLLs that are neither beside the engine, nor in the Windows
+"the engine stopped". This reads the engine's import table and lists the DLLs that are neither beside the engine, nor in the Windows
 folders, nor part of the GPU driver, so the start error can say which file is missing.
 """
 

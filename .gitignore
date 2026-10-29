@@ -25,38 +25,24 @@ __pycache__/
 *.occ1
 td.log
 
-# created by setup.py on the user's machine
+# setup.py's outputs (and tools/image/install.py's); the build trees are build*/ above
 /.venv/
-/build/
 /third_party/llama.cpp
+/third_party/stable-diffusion.cpp
+/third_party/*.zip
+/third_party/*.zip.part
+/lamina-*.json
+/lamina-*.log
+/run-*.bat
+/run-*.sh
+# the configs' learned expert profiles (expert_profile_save)
+/*-learned.bin
+# the web app's settings shared with other apps, written next to the config the server runs
+*.shared-settings.json
+# model data kept in the checkout (setup's data folder is ../Lamina-data)
 /models/
 /packs/
 /mtp/
-/run-*.bat
-/run-*.sh
-/strata-*.json
-/strata-*.log
-# the examples' learned expert profiles (expert_profile_save)
-/*-learned.bin
-# the web app's settings shared with other apps, written next to the config the server runs (examples/)
-*.shared-settings.json
-/build-strata.bat
-/build-strata-cuda12.bat
-/build-cuda12/
-/.strata-mcp/
-
-# image encoder (setup.py --vision): build output and the generated build script
-build-vision*/
-build-vision.bat
-build-vision-cuda12.bat
-
-# setup.py outputs (engine, downloads) and release builds
-/engine/
-/engine-cuda12/
-/build-release*/
-/dist/
-*.done
-/third_party/*.zip
 
 # IDEs
 .vscode/
@@ -64,8 +50,3 @@ build-vision-cuda12.bat
 .cursor/
 
 /.ccache/
-
-# the Terminal: local venvs and archives never enter git
-.terminal-venv/
-.terminal-test-venv/
-/release/artifacts/

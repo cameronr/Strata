@@ -1611,28 +1611,6 @@ class SamplingKeys(unittest.TestCase):
         for bad in (-1, True, 2.5, "20"):
             self.assertFalse([k for k in self.keys(temperature=0.7, top_k=bad) if k.startswith("top_k=")], bad)
 
-    def test_tune_keys(self):
-        k = self.keys(temperature=0, strata_tune={"pcie_frac": 0.2, "spec_min_p": 0.7})
-        self.assertIn("pcie_frac=0.2", k)
-        self.assertIn("spec_min_p=0.7", k)
-        bad = self.keys(strata_tune={"pcie_frac": 3, "spec_min_p": True, "pool_workers": 2})
-        self.assertFalse([x for x in bad if x.split("=")[0] in ("pcie_frac", "spec_min_p", "pool_workers")])
-
-    def test_tune_prefill_pipe(self):
-        self.assertIn("pipe=1536.0", self.keys(temperature=0, strata_tune={"prefill_pipe": 1536}))
-        self.assertIn("pipe=0.0", self.keys(temperature=0, strata_tune={"prefill_pipe": 0}))
-        for bad in (-1, True, "800", 1e9):
-            self.assertFalse([x for x in self.keys(temperature=0, strata_tune={"prefill_pipe": bad})
-                              if x.startswith("pipe=")], bad)
-
-    def test_tune_aux_cpus(self):
-        for val, want in ((True, "aux_cpus=1"), (1, "aux_cpus=1"), (False, "aux_cpus=0"), (0, "aux_cpus=0"),
-                          (1.0, "aux_cpus=1"), (0.0, "aux_cpus=0")):
-            self.assertIn(want, self.keys(strata_tune={"aux_cpus": val}), val)
-        for bad in (2, -1, 0.5, "1", None, "auto"):
-            self.assertFalse([x for x in self.keys(strata_tune={"aux_cpus": bad}) if x.startswith("aux_cpus=")], bad)
-        self.assertFalse([x for x in self.keys(temperature=0) if x.startswith("aux_cpus=")])
-
     def test_checkpoint_key(self):
         self.assertIn("ckpt=0", self.keys(temperature=0, strata_checkpoint=False))
         for absent in ({}, {"strata_checkpoint": True}, {"strata_checkpoint": 0}, {"cache_prompt": False}):

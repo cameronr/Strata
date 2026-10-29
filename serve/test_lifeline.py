@@ -45,7 +45,7 @@ SERVER = textwrap.dedent("""
 
 
 def alive(pid: int) -> bool:
-    from strata_control import procs
+    from serve import procs
     return procs.start_token(pid) is not None
 
 
@@ -120,7 +120,7 @@ class Lifeline(unittest.TestCase):
         self.assertTrue(self.wait_gone(info["child"]), "end_children at exit must stop what is still running")
 
     def test_the_child_is_recorded_while_it_runs_and_forgotten_after(self):
-        from strata_control import procs
+        from serve import procs
         proc, info = self.launch("sleep")
         base = Path(self.temp.name) / "Strata" / "procs" if not POSIX else Path(self.temp.name) / "strata" / "procs"
         record = base / f"{info['child']}.json"

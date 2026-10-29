@@ -1,27 +1,20 @@
-# Keep the image to the source only: everything generated is re-created on
-# first start (inside the container or on the /data volume).
+# The image takes the source only: setup.py builds and prepares the rest (Dockerfile)
 .git
-
-# local Python environment (rebuilt in the image)
 .venv/
 __pycache__/
 *.pyc
-.pytest_cache/
-
-# setup.py outputs and downloads (engine, packs, models, logs)
-/engine/
-/build/
-/build*/
-/dist/
-/packs/
-/mtp/
-/models/
-/Strata-data/
+build*/
 third_party/llama.cpp/
+third_party/stable-diffusion.cpp/
 third_party/*.zip
-*.done
+third_party/*.zip.part
+models/
+packs/
+mtp/
+logs/
 *.log
-strata-*.json
-strata-*.txt
+lamina-*.json
 run-*.sh
 run-*.bat
+*-learned.bin
+docs/

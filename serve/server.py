@@ -65,13 +65,12 @@ from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthro
                             tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
-from strata_control import engine_component  # noqa: E402
-from strata_control import vision_reader  # noqa: E402
 from serve import ready as ready_file  # noqa: E402
 from serve import owner_guard  # noqa: E402
 from serve import launch_identity  # noqa: E402
 from serve import logit_bias as bias_api  # noqa: E402
 from serve import lifeline  # noqa: E402
+from serve import offline as offline_policy  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
@@ -101,13 +100,13 @@ ENGINE_QUIT_WAIT_S, ENGINE_TERM_WAIT_S, ENGINE_KILL_WAIT_S = 20, 5, 20
 
 
 def end_leftover_engines(exe: str) -> None:
-    """Before an engine starts: end the ones a lost server left running (strata_control/procs.py). Only a process
+    """Before an engine starts: end the ones a lost server left running (serve/procs.py). Only a process
     this install recorded whose starter is gone, or an orphan of exactly this executable running --serve, and only
     after its PID, start time and command line are checked again at the moment of the signal. Never raises."""
     if os.environ.get("STRATA_KEEP_LEFTOVERS") == "1":
         return
     try:
-        from strata_control import procs
+        from serve import procs
         say = lambda text: print(text, flush=True)        # noqa: E731
         procs.end_leftovers(say=say)
         procs.end_orphans(exe, say=say)
@@ -446,10 +445,9 @@ ENGINE_REQUEST = re.compile(
 _echoing: set[str] = set()      # the logs echo_requests already follows (restart() runs StrataEngine.__init__ again)
 
 DRAFT_HEAD_FAIL = "the draft head does not fit"
-DRAFT_HEAD_HINT = ("a smaller draft vocabulary needs less VRAM: --draft-vocab cyrillic (English, code and the Cyrillic "
-                   "script) or --draft-vocab en (English and code, ~215 MiB less than the default). Start once with "
-                   "it - START-HERE.bat --draft-vocab en (Windows) or ./setup.sh --draft-vocab en - and the model "
-                   "keeps it; or a smaller --context in setup.")
+DRAFT_HEAD_HINT = ("a smaller draft vocabulary needs less VRAM: data/draft_vocab_cyrillic.bin (English, code and the "
+                   "Cyrillic script) or data/draft_vocab_en.bin (English and code, ~215 MiB less than the default) "
+                   "as draft_vocab.bin in the folder of the config's --mtp; or a smaller --max-context.")
 
 
 def start_failure_hint(log: str | None, offset: int) -> str:
@@ -1390,23 +1388,6 @@ class StrataEngine:
         score = sampling.get("score")                    # POST /v1/choose: the engine's `LP` line for these ids
         if score:
             keys += " score=" + ":".join(str(int(t)) for t in score)
-        # setup's calibration (tools/calibrate.py): engine settings for this request only, measured without a restart
-        tune = sampling.get("strata_tune")
-        if isinstance(tune, dict):
-            for k in ("pcie_frac", "spec_min_p"):
-                v = tune.get(k)
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 1.0:
-                    keys += f" {k}={float(v)!r}"
-            # a layer split's prompt chunks (--prefill-pipe): 0 off, 1 evened out, > 1 the rig's b/a in tokens
-            v = tune.get("prefill_pipe")
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 262144.0:
-                keys += f" pipe={float(v)!r}"
-            # --aux-cpus for this request: 1 puts the engine's threads that are neither pool workers nor the host on the
-            # spare CPUs, 0 leaves them where they were created (true/false or 1/0; the engine started without a spare CPU
-            # ignores a 1).  Anything else is not sent.
-            ac = tune.get("aux_cpus")
-            if isinstance(ac, bool) or (isinstance(ac, (int, float)) and ac in (0, 1)):
-                keys += f" aux_cpus={int(ac)}"
         # "strata_checkpoint": false - a one-shot call (a classification, a probe) whose turn no later request
         # extends: no conversation checkpoint for it (#830).  It still reuses a cached prefix.  Absent = as before.
         if sampling.get("strata_checkpoint") is False:
@@ -2546,10 +2527,6 @@ class Vision:
         args = self.reader_args(cfg)
         self.dir = self.work_dir()
         self.spawn = (args, log, env)                   # to start it again after an unload
-        # AMD: the GPU reader (strata-vision-hip) has the CPU reader (strata-vision, same program, no GPU runtime) to
-        # fall back on when it does not start; _start switches to it by itself
-        cpu = vision_reader.cpu_fallback(cfg)
-        self.fallback = (self.reader_args(cpu), log, env) if cpu else None
         self.proc = None
         self.stopped = True
         self.lock = threading.Lock()
@@ -2578,21 +2555,6 @@ class Vision:
         return args
 
     def _start(self):
-        """Start the reader.  When a GPU reader that has a CPU reader to fall back on does not start (the GPU runtime does not
-        load, the card is not in its build, the card is busy), the CPU reader is started instead, for good, with one log line
-        and no question."""
-        try:
-            self._start_reader()
-        except (RuntimeError, OSError) as e:
-            fallback = getattr(self, "fallback", None)
-            if fallback is None:
-                raise
-            why = " ".join(str(e).split())[:240]
-            print(f"[strata] the GPU picture reader did not start ({why}); pictures are read on the CPU", flush=True)
-            self.spawn, self.fallback = fallback, None
-            self._start_reader()
-
-    def _start_reader(self):
         args, log, env = self.spawn
         # cwd is the encoder's directory: the ENC lines name the files relative to it (#480: no space in the line)
         self.proc = popen("the image encoder", args, role="vision", stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -3216,15 +3178,7 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
     # loader is code this server does not own. Applied last so a profile's own `env` cannot remove
     # the policy by naming the same variable.
     if offline:
-        try:
-            from strata_control import offline as offline_policy
-            env.update(offline_policy.OFFLINE_ENV)
-        except ImportError:
-            # The policy module is part of the application; without it, refuse rather than silently
-            # running a child with network access under a flag that promised otherwise.
-            env["STRATA_OFFLINE"] = "1"
-            env["HF_HUB_OFFLINE"] = "1"
-            env["TRANSFORMERS_OFFLINE"] = "1"
+        env.update(offline_policy.OFFLINE_ENV)
     dirs = [d for d in cfg.get("lib_dirs") or [] if Path(d).is_dir()]
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -3541,7 +3495,6 @@ class Service:
         self.admission_changed = threading.Condition(self.status_lock)
         self.mcp = None                                  # serve/mcp.py's McpHub when MCP servers are configured
         self.offline = False                             # no image URL fetch or MCP subprocess in strict local mode
-        self.telemetry_key = ""                         # optional read-only key, valid only on /v1/telemetry
         # sharing the GPU with other programs (all off by default): unload the engine after this many idle seconds,
         # only start it again when this much VRAM is free, and run this command first (e.g. to unload another
         # server's model); the next request after an unload starts the engine again
@@ -6026,17 +5979,6 @@ def make_handler(svc: Service):
             self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong API key"}})
             return False
 
-        def _authorized_telemetry(self) -> bool:
-            if not svc.api_key and not svc.telemetry_key:
-                return True
-            auth = self.headers.get("Authorization", "")
-            given = auth[7:].strip() if auth.lower().startswith("bearer ") else self.headers.get("x-api-key", "")
-            if (svc.api_key and key_matches(given, svc.api_key)) or \
-                    (svc.telemetry_key and key_matches(given, svc.telemetry_key)):
-                return True
-            self._json(401, {"error": {"type": "authentication_error", "message": "missing or wrong telemetry key"}})
-            return False
-
         def do_GET(self):
             path = self.path.split("?")[0].rstrip("/")
             if path.startswith("/fonts/"):
@@ -6095,181 +6037,6 @@ def make_handler(svc: Service):
                 if self._authorized():
                     # the last 12 requests; `?requests=all` every one kept (the Monitor's "Show all", issue #35)
                     self._json(200, svc.metrics(all_requests="requests=all" in self.path))
-                return
-            if path == "/v1/telemetry":
-                if self._authorized_telemetry():
-                    from strata_cli.client import normalize_legacy
-                    snapshot = normalize_legacy(svc.metrics(), svc.v1_status())
-                    snapshot["source"] = "server-v1"
-                    snapshot["work"]["slots_requested"] = getattr(svc, "requested_slots", None)
-                    # Keep /metrics' established slot shape intact; enrich only this versioned contract.
-                    replica_engines = (getattr(svc.engine, "engines", None)
-                                       if hasattr(svc.engine, "replica_view") else None)
-                    if replica_engines:
-                        groups, live_slots, replica_by_slot = [], [], []
-                        group_base = 0
-                        all_batched = True
-                        for replica, child in enumerate(replica_engines):
-                            count = int(getattr(child, "batch", 0) or 0)
-                            all_batched = all_batched and count > 0
-                            count = max(1, count)
-                            child_groups = getattr(child, "slot_group", [])
-                            child_live = getattr(child, "slot_live", [])
-                            for local in range(count):
-                                group = child_groups[local] if local < len(child_groups) else None
-                                groups.append(group_base + group if type(group) is int and group >= 0 else None)
-                                live_slots.append(child_live[local] if local < len(child_live) else None)
-                                replica_by_slot.append(replica)
-                            group_base += int(getattr(child, "slot_groups", 0) or 0)
-                        snapshot["work"]["groups"] = group_base if all_batched and group_base > 0 else None
-                    else:
-                        groups = getattr(svc.engine, "slot_group", [])
-                        live_slots = getattr(svc.engine, "slot_live", [])
-                        replica_by_slot = []
-                    for slot in snapshot["work"]["slots"]:
-                        i = slot.get("slot")
-                        if type(i) is int and 0 <= i < len(groups):
-                            slot["group"] = groups[i]
-                        if type(i) is int and 0 <= i < len(replica_by_slot):
-                            slot["replica"] = replica_by_slot[i]
-                        if type(i) is int and 0 <= i < len(live_slots) and live_slots[i]:
-                            slot["request_id"] = live_slots[i].get("request_id")
-                    slot_by_id = {slot.get("request_id"): slot for slot in snapshot["work"]["slots"]
-                                  if slot.get("request_id")}
-                    with svc.status_lock:
-                        active = list(svc.terminal_requests.values())
-                        snapshot["activity"] = {"last_seq": svc.terminal_event_seq,
-                                                "events": list(svc.terminal_events)[-32:]}
-                        draining = svc.draining
-                        admission_reserved = svc.admission_reserved
-                        admission_rejected = svc.admission_rejected
-                        queue_timeouts = svc.queue_timeouts
-                        client_disconnect_cancels = svc.client_disconnect_cancels
-                        in_flight_tokens = (sum(max(0, int(st.get("generated") or 0))
-                                                for st, _ in svc.live_reqs.values())
-                                            if svc.live_reqs else
-                                            max(0, int(svc.status.get("generated") or 0))
-                                            if svc.status.get("busy") else 0)
-                        output_counter = int(svc.totals.get("output_tokens") or 0) + in_flight_tokens
-                    snapshot["instance"]["id"] = svc.instance_id
-                    snapshot["instance"]["state"] = "draining" if draining else "ready"
-                    if getattr(svc, "launch_attestation", None) is not None:
-                        snapshot["instance"]["launch_attestation"] = svc.launch_attestation
-                    snapshot["rates"]["output_tokens_server_counter"] = output_counter
-                    snapshot["work"]["requests_omitted"] = max(0, len(active) - 50)
-                    snapshot["work"].update(max_queue=svc.max_queue, queue_timeout_s=svc.queue_timeout_s,
-                                            queue_timeouts=queue_timeouts,
-                                            client_disconnect_cancels=client_disconnect_cancels,
-                                            admission_limit=svc.admission_limit(),
-                                            admission_reserved=admission_reserved,
-                                            admission_rejected=admission_rejected,
-                                            oldest_queue_s=max((max(0, time.time() - row["queued_at"])
-                                                                for row in active if row["state"] in ("queued", "waiting")),
-                                                               default=0))
-                    snapshot["work"]["requests"] = [
-                        {**row, "state": slot_by_id[row["id"]]["state"] if row["id"] in slot_by_id else row["state"],
-                         "slot": slot_by_id[row["id"]]["slot"] if row["id"] in slot_by_id else None,
-                         "group": slot_by_id[row["id"]]["group"] if row["id"] in slot_by_id else None,
-                         "replica": slot_by_id[row["id"]]["replica"] if row["id"] in slot_by_id else row.get("replica"),
-                         "generated": slot_by_id[row["id"]].get("generated") if row["id"] in slot_by_id else None,
-                         "prompt_read": slot_by_id[row["id"]].get("prompt_read") if row["id"] in slot_by_id else None}
-                        for row in active[:50]]
-                    snapshot["quality"]["request_correlation"] = "reported"
-                    batch_sample = (getattr(svc.engine, "terminal_batch_sample", None)
-                                    if svc.loaded() and not replica_engines else None)
-                    if replica_engines:
-                        replica_batches = []
-                        for replica, child in enumerate(replica_engines[:16]):
-                            row = {"replica": replica}
-                            sample = (getattr(child, "terminal_batch_sample", None)
-                                      if child.alive() else None)
-                            if sample:
-                                row.update(batch_sample_windows=sample["windows"],
-                                           batch_sample_rows=sample["processed_rows"],
-                                           batch_sample_active_rows=sample["active_rows"],
-                                           batch_sample_span_s=sample["elapsed_ms"] / 1000.0,
-                                           batch_sample_age_s=max(0.0, time.monotonic() -
-                                                                  sample["observed_monotonic"]))
-                            replica_batches.append(row)
-                        snapshot["work"]["replica_batches"] = replica_batches
-                    if batch_sample:
-                        windows = batch_sample["windows"]
-                        snapshot["work"].update(effective_rows_window=batch_sample["processed_rows"] / windows,
-                                                batch_active_rows_window=batch_sample["active_rows"] / windows,
-                                                batch_sample_windows=windows,
-                                                batch_sample_rows=batch_sample["processed_rows"],
-                                                batch_sample_active_rows=batch_sample["active_rows"],
-                                                batch_sample_span_s=batch_sample["elapsed_ms"] / 1000.0,
-                                                batch_sample_age_s=max(0.0, time.monotonic() -
-                                                                       batch_sample["observed_monotonic"]))
-                        snapshot["quality"]["batch_window_rows"] = "measured"
-                        snapshot["quality"]["batch_window_source"] = "engine_bstat"
-                    stage_sample = (getattr(svc.engine, "terminal_stage_sample", None)
-                                    if svc.loaded() and not replica_engines else None)
-                    if replica_engines:
-                        replica_stage_samples = []
-                        for replica, child in enumerate(replica_engines[:16]):
-                            row = {"replica": replica}
-                            sample = (getattr(child, "terminal_stage_sample", None)
-                                      if child.alive() else None)
-                            if sample:
-                                row.update(stage_sample_elapsed_us=sample["elapsed_us"],
-                                           stage_in_flight_us=sample["in_flight_us"],
-                                           stage_sample_age_s=max(0.0, time.monotonic() -
-                                                                  sample["observed_monotonic"]))
-                            replica_stage_samples.append(row)
-                        snapshot["work"]["replica_stage_samples"] = replica_stage_samples
-                    if stage_sample:
-                        snapshot["work"].update(stage_sample_elapsed_us=stage_sample["elapsed_us"],
-                                                stage_in_flight_us=stage_sample["in_flight_us"],
-                                                stage_sample_age_s=max(0.0, time.monotonic() -
-                                                                       stage_sample["observed_monotonic"]))
-                        snapshot["quality"]["stage_in_flight_source"] = "engine_pstat_host_span"
-                    indices = list(getattr(svc, "gpu_indices", []) or [])
-                    visibility = list(getattr(svc, "terminal_visibility_order", []) or [])
-                    reported = (list(getattr(svc.engine, "terminal_stages", []) or [])
-                                if svc.loaded() and not replica_engines else [])
-                    stages = [{**stage, "device_index":
-                               visibility[stage["engine_ordinal"]]
-                               if stage["engine_ordinal"] < len(visibility) else None}
-                              for stage in reported]
-                    snapshot["topology"]["selected_devices"] = indices if replica_engines else visibility or indices
-                    replica_devices = getattr(svc, "replica_gpu_groups", []) if replica_engines else []
-                    snapshot["topology"]["replica_devices"] = [
-                        {"replica": i, "devices": list(devices)}
-                        for i, devices in enumerate(replica_devices[:16])]
-                    replica_stages = []
-                    for replica, child in enumerate((replica_engines or [])[:16]):
-                        child_reported = (list(getattr(child, "terminal_stages", []) or [])
-                                          if child.alive() else [])
-                        spawn = getattr(child, "spawn", None)
-                        child_env = spawn[4] if isinstance(spawn, tuple) and len(spawn) > 4 else None
-                        child_visibility = visible_device_order(child_env, getattr(svc, "backend", None))
-                        configured_cards = (set(replica_devices[replica])
-                                            if replica < len(replica_devices) else set())
-                        child_stages = []
-                        for stage in child_reported:
-                            ordinal = stage["engine_ordinal"]
-                            card = (child_visibility[ordinal]
-                                    if type(ordinal) is int and 0 <= ordinal < len(child_visibility) else None)
-                            child_stages.append({**stage, "device_index": card if card in configured_cards else None})
-                        replica_stages.append({"replica": replica, "stages": child_stages})
-                    snapshot["topology"]["replica_stages"] = replica_stages
-                    snapshot["topology"]["mode"] = ("layer split (engine reported)" if stages else
-                                                     getattr(svc, "terminal_topology_mode", None))
-                    snapshot["topology"]["configured_split"] = getattr(svc, "terminal_configured_split", None)
-                    snapshot["topology"]["stages"] = stages
-                    snapshot["topology"]["resolved"] = bool(stages) and all(
-                        stage["device_index"] is not None for stage in stages)
-                    snapshot["topology"]["source"] = "engine_start_log" if stages else None
-                    snapshot["quality"]["placement"] = ("reported" if snapshot["topology"]["resolved"] else
-                                                         "partial" if stages else "unavailable")
-                    present = {d.get("index") for d in snapshot["devices"]}
-                    for index in indices:
-                        if index not in present:
-                            snapshot["devices"].append({"index": index, "name": None, "mem_used": None,
-                                                        "mem_total": None, "util": None, "temp": None, "power": None})
-                    self._json(200, snapshot)
                 return
             if path == "/api/requests" and svc.api_monitor:
                 if self._authorized():
@@ -7149,7 +6916,7 @@ def warn_tight_ram(arena_mib) -> None:
               f"{total / 2**30:.0f} GB, leaving {left:.1f} GB for everything else. "
               + ("Linux may stop the engine in the middle of an answer. " if os.name != "nt" else
                  "Windows will slow down (paging to disk). ")
-              + "Close other programs, or run START-HERE --setup and pick a smaller size (Q2_0 / IQ2_XS).", flush=True)
+              + "Close other programs, or set up the smaller quant (setup --model iq3_s).", flush=True)
 
 
 def warn_budget_over_ram(args) -> str | None:
@@ -7524,34 +7291,6 @@ def lift_reasoning_effort_arg(cfg: dict) -> None:
 SAMPLING_ALIASES = {"repeat_penalty": "repetition_penalty", "repeat_last_n": "penalty_last_n"}
 
 
-def apply_saved_tuning(cfg: dict, *, say=None) -> dict:
-    """The run config with the active saved tuning for its choices put on top (strata_control/presets.py), with no measurement.
-    Every start path runs this (the Terminal, `runtime start`, the app's load, a restart of the app, an unload and a load), so the
-    tuning is applied every time and never re-measured. A tune's own worker sets STRATA_NO_PRESET so that it measures the
-    configuration it was given. Never fails a start: a store that cannot be read means the configuration as it is."""
-    if os.environ.get("STRATA_NO_PRESET"):
-        return cfg
-    say = say or (lambda line: print(line, flush=True))
-    try:
-        from strata_control import presets as _presets
-        out, applied = _presets.overlay(cfg)
-        if applied.get("applied"):
-            changes = {**(applied.get("args") or {}), **(applied.get("env") or {})}
-            note = applied.get("notice") or ""
-            say(f"[strata] saved tuning '{applied['preset']['name']}' applied: "
-                f"{' '.join(f'{k} {v}' for k, v in changes.items()) or 'the standard settings (nothing to change)'}"
-                f"{'; ' + note if note and 'identical' not in note else ''}")
-            if applied.get("state") == "soft":
-                say("[strata] this PC or engine changed since it was saved (" + "; ".join(applied["reasons"]) +
-                    "): a short re-check is available (strata presets recheck)")
-        elif applied.get("why_not"):
-            say(f"[strata] saved tuning '{applied['preset']['name']}' {applied['why_not']}; re-tune with strata tune auto")
-        return out
-    except Exception as e:  # noqa: BLE001
-        say(f"[strata] saved tuning could not be read ({type(e).__name__}); starting with the configuration as it is")
-        return cfg
-
-
 def sampling_defaults_from_config(cfg: dict) -> dict:
     """The run config's optional `sampling` block: defaults for the sampling fields a request leaves out, so
     a plain client gets configured sampling instead of greedy.  Supported: temperature, top_p, top_k, min_p,
@@ -7608,10 +7347,6 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
             if not number or value != int(value) or value <= 0:
                 raise SystemExit(f"[strata] config sampling.seed={value!r}: expected a positive integer")
             out[key] = int(value)
-        elif key == "strata_tune":           # a saved tuning's per-request settings (strata_control/presets.py)
-            if not isinstance(value, dict):
-                raise SystemExit(f"[strata] config sampling.strata_tune={value!r}: expected an object")
-            out[key] = {k: v for k, v in value.items() if k in ("pcie_frac", "spec_min_p", "aux_cpus")}
         elif key == "experimental_speed_projection":
             if not isinstance(value, bool):
                 raise SystemExit(f"[strata] config sampling.experimental_speed_projection={value!r}: expected true or "
@@ -7730,33 +7465,7 @@ def default_model_name(cfg: dict) -> str:
     return cfg.get("model_name") or FAMILY_MODEL_NAMES.get(cfg.get("arch") or "qwen4exp", "qwen3.8-flash-next")
 
 
-def with_component_engine(cfg: dict) -> dict:
-    """A run config that names "component:strata-engine" gets the engine package for this PC: the path in `exe`, and
-    the package's own folder first on the library path (the GPU runtime libraries ship beside the binary)."""
-    if not engine_component.is_reference(cfg.get("exe")):
-        return cfg
-    cfg = dict(cfg)
-    cfg["exe"] = _component_exe(cfg["exe"], cfg)
-    cfg["lib_dirs"] = [*engine_component.package_lib_dirs(Path(cfg["exe"]).parent), *(cfg.get("lib_dirs") or [])]
-    return cfg
-
-
-def _component_exe(reference: str, cfg: dict) -> str:
-    """The engine a run config names as "component:strata-engine". No engine for this PC is a clear notice and exit 5;
-    the server never goes looking on the internet for one (strata_control/engine_component.py)."""
-    try:
-        return engine_component.expand(reference, cfg)
-    except engine_component.EngineMissing as e:
-        print(f"[strata] {e}", file=sys.stderr, flush=True)
-        raise SystemExit(e.exit_code) from None
-
-
 def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> int:
-    try:                                               # files made by a run as administrator still belong to the user
-        from strata_control import private_files as _pf
-        _pf.adopt_user_defaults()
-    except Exception:
-        pass
     event_sink = lifecycle_event
 
     def notify_lifecycle(kind: str, payload: dict) -> None:
@@ -7870,8 +7579,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     config_bytes = Path(a.config).read_bytes() if a.config else b""
     cfg = parse_config_text(config_bytes.decode("utf-8-sig"), a.config) if a.config else {}   # Notepad adds a BOM
     split_joined_args(cfg)
-    if a.config and a.engine == "strata":
-        cfg = apply_saved_tuning(cfg)
     attestation_key = os.environ.pop("STRATA_OWNER_ATTEST_KEY", None)
     launch_attestation = None
     if a.owner_fd is not None:
@@ -7958,18 +7665,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if a.offline:
         # The same decision, reported through the policy module so the two cannot drift: a profile
         # that permits a network source is refused here rather than on its first request.
-        try:
-            from strata_control import offline as offline_policy
-            blocked = offline_policy.ensure_strictly_offline(cfg)
-        except ImportError:
-            blocked = []
+        blocked = offline_policy.ensure_strictly_offline(cfg)
         if blocked:
             ap.error("--offline cannot be strict for this profile: " + "; ".join(blocked))
     lazy = False
     if a.engine == "strata":
         if not cfg:
             ap.error("--engine strata needs --config")
-        cfg = with_component_engine(cfg)
         vision = None
         # The engine's own environment. It carries the offline policy too: an engine that fetched a
         # missing shard or a plugin would break the promise the flag makes.
@@ -7988,9 +7690,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             # relative paths are the config's cwd's, as for the engine below
             vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
-                    for k, v in cfg["vision"].items() if not (k == "exe" and engine_component.is_reference(v))}
-            if engine_component.is_reference(cfg["vision"].get("exe")):     # the engine from the component folder
-                vcfg["exe"] = _component_exe(cfg["vision"]["exe"], cfg)
+                    for k, v in cfg["vision"].items()}
             if vcfg.get("elastic") is True and cfg.get("vram_elastic") is not True:
                 print('[strata] the vision section\'s "elastic" needs "vram_elastic": true (the expert cache gives the '
                       "encoder its VRAM): the encoder starts with the model instead", flush=True)
@@ -8011,10 +7711,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                   flush=True)
         # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
         # it is told about (WinError 2), so it is made absolute here
-        if engine_component.is_reference(cfg["exe"]):      # "component:strata-engine": the engine package for this PC
-            exe = _component_exe(cfg["exe"], cfg)
-        else:
-            exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
+        exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
         try:
             silence = engine_silence_s(cfg)             # #481: checked before the (minutes-long) start
         except ValueError as e:
@@ -8106,14 +7803,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     if svc.aliases:
         print(f"[strata] model aliases: {', '.join(svc.aliases)}", flush=True)
     svc.api_key = preflight_api_key
-    try:
-        svc.telemetry_key = api_key_of(os.environ.get("STRATA_TELEMETRY_KEY") or cfg.get("telemetry_read_key", ""))
-    except ValueError as e:
-        print(f"[strata] invalid telemetry_read_key: {e}", file=sys.stderr)
-        return 2
-    if set(key_list(svc.api_key)) & set(key_list(svc.telemetry_key)):
-        print("[strata] telemetry_read_key must differ from every inference API key", file=sys.stderr)
-        return 2
     if not svc.api_key and "api_key" in cfg:             # #569: written, but empty: the server has none (a warning, not a stop)
         print("[strata] the api_key in the config is empty: this server has no API key (anyone who can reach it can "
               "use it); set one, or leave api_key out", file=sys.stderr, flush=True)

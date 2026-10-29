@@ -1,15 +1,13 @@
-"""Tests for image generation's setup side (tools/image/qimage.py, setup.py --images): the pins, the quant and backend
+"""Tests for image generation's setup side (tools/image/qimage.py, tools/image/install.py): the pins, the quant and backend
 choices, the CMake definitions, the source unpacking and the run config's "images" section.  No GPU, no network.
 
     python -m unittest tools.test_qimage
 """
 from __future__ import annotations
 
-import argparse
 import contextlib
 import io
 import json
-import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tools" / "image"))
+import install  # noqa: E402
 import qimage as QI  # noqa: E402
 import setup  # noqa: E402
 
@@ -70,21 +69,13 @@ class Choices(unittest.TestCase):
         self.assertEqual(QI.default_args("cuda"), ["--diffusion-fa"])
         self.assertEqual(QI.default_args("vulkan"), ["--diffusion-fa", "--vae-tiling", "--vae-tile-overlap", "0.25"])
 
-    def test_setup_recommends_never_forces(self):
-        ns = argparse.Namespace(image_backend=None, image_quant=None)
-        self.assertEqual(quiet(setup.image_backend_choice, ns, {"vram_gb": 12.0, "arch": 86}, False)[:2],
-                         ("cuda", "Q6_K"))
-        self.assertEqual(quiet(setup.image_backend_choice, ns, {"vram_gb": 32.3, "uma": True, "arch": "gfx1103"},
-                               True)[:2], ("vulkan", "Q8_0"))
-        ns.image_quant = "Q8_0"                      # more than recommended: kept, with a warning
+    def test_quant_recommended_never_forced(self):
+        self.assertEqual(quiet(install.choose_quant, "cuda", 12.0, None), "Q6_K")
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            r = setup.image_backend_choice(ns, {"vram_gb": 8.0, "arch": 86}, False)
-        self.assertEqual(r[:2], ("cuda", "Q8_0"))
-        self.assertIn("recommends Q4_K_M", out.getvalue())
-        ns.image_quant, ns.image_backend = None, "cpu"
-        self.assertEqual(quiet(setup.image_backend_choice, ns, {"vram_gb": 24.0}, False)[:2], ("cpu", "Q4_K_M"))
-
+        with contextlib.redirect_stdout(out):      # more than recommended: kept, with a note
+            self.assertEqual(install.choose_quant("cuda", 8.0, "Q8_0"), "Q8_0")
+        self.assertIn("Q4_K_M fits", out.getvalue())
+        self.assertEqual(quiet(install.choose_quant, "cpu", 24.0, None), "Q4_K_M")
 
 class Build(unittest.TestCase):
     def test_cmake_defs(self):
@@ -120,19 +111,20 @@ class Build(unittest.TestCase):
             self.assertFalse(QI.source_ok(src))          # another pin: unpacked again
 
     def test_build_is_skipped_when_the_stamp_matches(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "IMAGE_ENGINE", Path(d)):
-            (Path(d) / QI.SD_EXE).write_bytes(b"x")
-            (Path(d) / "BUILD.json").write_text(json.dumps({**QI.build_stamp("cuda", 86), "lib_dirs": [d]}))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "ROOT", Path(d)):
+            b = Path(d) / "build-image-cpu"
+            (b / "bin").mkdir(parents=True)
+            (b / "bin" / QI.SD_EXE).write_bytes(b"x")
+            (b / "lamina-image.json").write_text(json.dumps(QI.build_stamp("cpu", None)))
+            tc = setup.Toolchain(None, None, None, None, None, None)
             with mock.patch.object(setup, "cmake_build") as cb:
-                exe, libs = quiet(setup.build_image_engine, "cuda", {"arch": 86})
+                exe, libs = quiet(install.build, tc, "cpu", None)
             cb.assert_not_called()
-            self.assertEqual((exe, libs), (Path(d) / QI.SD_EXE, [d]))
-            with mock.patch.object(setup, "cmake_build") as cb, mock.patch.object(setup, "get_sd_cpp"), \
-                    mock.patch.object(setup, "apply_native_runner"), \
-                    mock.patch.object(setup, "find_nvcc", return_value=(None, None)):
-                with self.assertRaises(SystemExit):     # another arch: compiled again (here: no nvcc, so it stops)
-                    quiet(setup.build_image_engine, "cuda", {"arch": 89})
-
+            self.assertEqual((exe, libs), (b / "bin" / QI.SD_EXE, []))
+            with mock.patch.object(setup, "cmake_build") as cb, mock.patch.object(install, "sd_source"), \
+                    mock.patch.object(setup, "vs_environment", return_value={}):
+                quiet(install.build, tc, "cpu", "86")     # another stamp: compiled again
+            cb.assert_called_once()
 
 class Config(unittest.TestCase):
     def test_section(self):
@@ -145,23 +137,18 @@ class Config(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ImageGen({**c, "out_dir": d})              # serve accepts what setup writes
 
-    def test_images_no_drops_the_section(self):
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "strata-q2_0.json"
-            p.write_text(json.dumps({"exe": "x", "images": {"exe": "sd-cli"}, "mine": 1}))
-            quiet(setup.write_setup_config, p, {"exe": "y", "images": None})
+    def test_setup_keeps_the_section(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(setup, "ROOT", Path(d)):
+            (Path(d) / "examples").mkdir()
+            (Path(d) / "examples" / "m.json").write_text(json.dumps(
+                {"exe": "./build/lamina.exe", "args": ["--max-context", "8"], "vision": {"exe": "v"}}))
+            p = Path(d) / "lamina-m.json"
+            p.write_text(json.dumps({"exe": "x", "args": [], "images": {"exe": "sd-cli"}, "api_key": "k"}))
+            setup.write_config("m", Path(d) / "data", "RTX 3090", 8081, False, None, None)
             cfg = json.loads(p.read_text())
-            self.assertNotIn("images", cfg)
-            self.assertEqual(cfg["mine"], 1)
-            p.write_text(json.dumps({"exe": "x", "images": {"exe": "sd-cli"}}))
-            quiet(setup.write_setup_config, p, {"exe": "y"})      # not asked: carried over
-            self.assertEqual(json.loads(p.read_text())["images"], {"exe": "sd-cli"})
-
-    def test_flags(self):
-        src = (ROOT / "setup.py").read_text(encoding="utf-8")
-        for flag in ("--images", "--image-quant", "--image-backend", "--image-gpu-policy"):
-            self.assertRegex(src, re.escape(f'ap.add_argument("{flag}"'))
-
+            self.assertEqual((cfg["images"], cfg["api_key"]), ({"exe": "sd-cli"}, "k"))   # not the example's
+            self.assertNotIn("vision", cfg)
+            self.assertEqual(cfg["args"], ["--max-context", "8"])
 
 class Native(unittest.TestCase):
     """I2: the native DiT runner's patch for the pinned stable-diffusion.cpp, and its config switch."""

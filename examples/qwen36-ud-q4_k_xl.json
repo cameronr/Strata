@@ -1,8 +1,8 @@
 {
-  "exe": "./build/strata.exe",
+  "exe": "./build/lamina.exe",
   "args": [
     "--native",
-    "../Strata-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+    "../Lamina-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
     "--main-gpu",
     "RTX 3090",
     "--max-context",
@@ -14,7 +14,7 @@
     "--vision"
   ],
   "cwd": ".",
-  "tokenizer": "../Strata-data/packs/qwen36-ud-q4_k_xl/tokenizer",
+  "tokenizer": "../Lamina-data/packs/qwen36-ud-q4_k_xl/tokenizer",
   "model_name": "qwen3.6-35b-a3b-ud-q4_k_xl",
   "port": 8083,
   "sampling": {
@@ -24,12 +24,12 @@
     "min_p": 0.0,
     "presence_penalty": 0.0
   },
-  "log": "./strata-qwen36-ud-q4_k_xl.log",
+  "log": "./lamina-qwen36-ud-q4_k_xl.log",
   "lib_dirs": [],
   "vision": {
-    "exe": "./build-vision/bin/strata-vision.exe",
-    "mmproj": "../Strata-data/models/qwen36-UD-Q4_K_XL/mmproj-F16.gguf",
-    "model": "../Strata-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+    "exe": "./build-vision/bin/lamina-vision.exe",
+    "mmproj": "../Lamina-data/models/qwen36-UD-Q4_K_XL/mmproj-F16.gguf",
+    "model": "../Lamina-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
     "gpu": false,
     "threads": 16,
     "max_tokens": 1024

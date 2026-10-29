@@ -1,10 +1,10 @@
 {
-  "exe": "./build/strata.exe",
+  "exe": "./build/lamina.exe",
   "args": [
     "--pack",
-    "../Strata-data/packs/ud-q4_k_xl",
+    "../Lamina-data/packs/ud-q4_k_xl",
     "--native",
-    "../Strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "../Lamina-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
     "--expert-profile",
     "./data/expert-profile.bin",
     "--expert-cache",
@@ -22,7 +22,7 @@
     "--adapt-every",
     "1",
     "--mtp",
-    "../Strata-data/mtp/rt-tuned",
+    "../Lamina-data/mtp/rt-distilled",
     "--max-context",
     "262144",
     "--kv",
@@ -42,7 +42,7 @@
     "0"
   ],
   "cwd": ".",
-  "tokenizer": "../Strata-data/packs/ud-q4_k_xl/tokenizer",
+  "tokenizer": "../Lamina-data/packs/ud-q4_k_xl/tokenizer",
   "model_name": "qwen3.8-flash-next-ud-q4_k_xl",
   "port": 8082,
   "sampling": {
@@ -52,12 +52,12 @@
     "min_p": 0.0,
     "presence_penalty": 0.0
   },
-  "log": "./strata-ud-q4_k_xl.log",
+  "log": "./lamina-ud-q4_k_xl.log",
   "lib_dirs": [],
   "vision": {
-    "exe": "./build-vision/bin/strata-vision.exe",
-    "mmproj": "../Strata-data/packs/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
-    "model": "../Strata-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    "exe": "./build-vision/bin/lamina-vision.exe",
+    "mmproj": "../Lamina-data/packs/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
+    "model": "../Lamina-data/models/UD-Q4_K_XL/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
     "gpu": false,
     "threads": 16,
     "max_tokens": 1024

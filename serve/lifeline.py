@@ -26,7 +26,7 @@ import threading
 import time
 
 from serve import winjob
-from strata_control import procs
+from serve import procs
 
 _REAL_POPEN = subprocess.Popen                  # tests replace subprocess.Popen; isinstance needs the class
 LINUX = sys.platform.startswith("linux")
@@ -240,7 +240,7 @@ def popen(args, role: str = "engine", **kw) -> subprocess.Popen:
     the engine the clean way (STOP, QUIT, wait) instead of the engine dying under a request that could have been
     finished or cancelled. What ties the engine's life to ours is the guarantee below, not the shared terminal.
 
-    It also leaves a record (strata_control/procs.py) so that, if everything here dies anyway, the next start can
+    It also leaves a record (serve/procs.py) so that, if everything here dies anyway, the next start can
     find this process by PID, start time and command line and end it."""
     how = mechanism()
     isolate = role in ISOLATED_ROLES

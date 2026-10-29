@@ -27,7 +27,7 @@ exec docker run --rm --gpus all \
   -e "CUDA_ARCH=$ARCH" \
   -v "$HERE":/src -v "$HERE/build-selftest":/src/build -w /src "$DEV_IMAGE" bash -c '
     set -e
-    [ -d third_party/llama.cpp ] || /venv/bin/python -c "import setup; setup.get_llama_cpp()"
+    /venv/bin/python -c "import setup; setup.fetch_llama()"
     # always (re)configure: cheap, and it recovers from a previous failed configure instead of skipping on a partial cache
     cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
       -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON \

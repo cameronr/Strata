@@ -1,10 +1,10 @@
 {
-  "exe": "./build/strata.exe",
+  "exe": "./build/lamina.exe",
   "args": [
     "--pack",
-    "../Strata-data/packs/iq3_s",
+    "../Lamina-data/packs/iq3_s",
     "--native",
-    "../Strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+    "../Lamina-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
     "--expert-profile",
     "./data/expert-profile.bin",
     "--expert-cache",
@@ -22,7 +22,7 @@
     "--adapt-every",
     "1",
     "--mtp",
-    "../Strata-data/mtp/rt-tuned",
+    "../Lamina-data/mtp/rt-distilled",
     "--max-context",
     "262144",
     "--kv",
@@ -42,7 +42,7 @@
     "RTX 3090"
   ],
   "cwd": ".",
-  "tokenizer": "../Strata-data/packs/iq3_s/tokenizer",
+  "tokenizer": "../Lamina-data/packs/iq3_s/tokenizer",
   "model_name": "qwen3.8-flash-next-iq3_s",
   "port": 8081,
   "sampling": {
@@ -52,12 +52,12 @@
     "min_p": 0.0,
     "presence_penalty": 0.0
   },
-  "log": "./strata-iq3_s.log",
+  "log": "./lamina-iq3_s.log",
   "lib_dirs": [],
   "vision": {
-    "exe": "./build-vision/bin/strata-vision.exe",
-    "mmproj": "../Strata-data/packs/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
-    "model": "../Strata-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+    "exe": "./build-vision/bin/lamina-vision.exe",
+    "mmproj": "../Lamina-data/packs/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
+    "model": "../Lamina-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
     "gpu": false,
     "threads": 16,
     "max_tokens": 1024

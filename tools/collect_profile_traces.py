@@ -6,7 +6,7 @@ generated text:
 
     python tools/collect_profile_traces.py CONFIG.json OUTDIR [--corpus FILE] [--max-new 250] [--mode usage|routing]
 
-CONFIG.json is a run config setup wrote (strata-*.json: "exe", "args", "env", "tokenizer", "cwd").  The engine is run as
+CONFIG.json is a run config setup wrote (lamina-*.json: "exe", "args", "env", "tokenizer", "cwd").  The engine is run as
 `exe args... --tokens-file F --max-new N --greedy` (--serve and --batch are dropped).  `--mode usage` (default) is the
 SYCL engine's STRATA_USAGE_DUMP=PATH, which counts on the device and works with STRATA_VERIFY_NO_HOST; `--mode routing`
 adds `--dump-routing PATH` (the CUDA/HIP engines and the SYCL host path).  Then, for example:

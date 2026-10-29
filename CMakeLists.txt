@@ -1,6 +1,6 @@
 ﻿# Strata Engine - top-level build.
 #
-# The engine (`strata`) and its GPU tools need STRATA_ENABLE_CUDA and NVIDIA GPUs of compute capability 8.0 or
+# The engine (`lamina`) and its GPU tools need STRATA_ENABLE_CUDA and NVIDIA GPUs of compute capability 8.0 or
 # newer; without CUDA only the CPU-side libraries, their tools and tests build.
 cmake_minimum_required(VERSION 3.24)
 project(strata VERSION 0.1.43.1 LANGUAGES CXX)
@@ -225,9 +225,9 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(strata_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(strata_prefill PUBLIC strata_engine CUDA::cublas CUDA::cudart)
 
-  add_executable(strata src/program/generate.cpp)
-  target_include_directories(strata PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec CUDA::cudart)
+  add_executable(lamina src/program/generate.cpp)
+  target_include_directories(lamina PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(lamina PRIVATE strata_engine strata_prefill strata_spec CUDA::cudart)
   # the hyper-connection read's fused up projection + mix against cuBLAS + gr_mix_r at every sub-chunk size (--bench)
   add_executable(gr_upmix_parity src/prefill/gr_upmix_parity.cu)
   target_link_libraries(gr_upmix_parity PRIVATE strata_prefill CUDA::cudart)
@@ -247,7 +247,7 @@ if(STRATA_ENABLE_CUDA)
     add_test(NAME expert_profile_save_test COMMAND expert_profile_save_test)
     add_test(NAME prompt_cache_spread_test COMMAND prompt_cache_spread_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
-    add_test(NAME deterministic_adapt_help COMMAND strata --deterministic-adapt --help)
+    add_test(NAME deterministic_adapt_help COMMAND lamina --deterministic-adapt --help)
     set_tests_properties(deterministic_adapt_help PROPERTIES
                          PASS_REGULAR_EXPRESSION "--deterministic-adapt")
   endif()
@@ -648,8 +648,8 @@ if(STRATA_NATIVE_EXPERTS)
     target_compile_definitions(strata_qwen35 PRIVATE STRATA_Q36_CPU_POOL=1)
     add_executable(strata-q36 src/qwen35/q36_main.cpp)
     target_link_libraries(strata-q36 PRIVATE strata_qwen35 CUDA::cudart)
-    target_link_libraries(strata PRIVATE strata_qwen35)
-    target_compile_definitions(strata PRIVATE STRATA_HAVE_QWEN35=1)
+    target_link_libraries(lamina PRIVATE strata_qwen35)
+    target_compile_definitions(lamina PRIVATE STRATA_HAVE_QWEN35=1)
     add_executable(strata-q36ref src/qwen35/q36ref.cu)
     target_include_directories(strata-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings CUDA::cudart)

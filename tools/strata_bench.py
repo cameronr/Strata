@@ -3,7 +3,7 @@
 
     BENCH.bat                      (Windows)        ./bench.sh        (Linux)        python tools/strata_bench.py
 
-It starts the server with your existing settings (the newest strata-*.json of this folder, or --config FILE), or uses
+It starts the server with your existing settings (the newest lamina-*.json of this folder, or --config FILE), or uses
 the one already running (it checks the config's port, or --url http://host:port), and sends a fixed suite through the
 real HTTP API, three runs each, medians reported:
 
@@ -650,7 +650,7 @@ def collect_machine(base: str, key: str, cfg: dict | None, gpu_arg: str | None =
 # --------------------------------------------------------------------------------------------------- the server
 def find_configs(folder: Path = ROOT) -> list[Path]:
     out = []
-    for p in folder.glob("strata-*.json"):
+    for p in folder.glob("lamina-*.json"):
         if p.name.endswith(".shared-settings.json"):
             continue
         try:
@@ -929,7 +929,7 @@ def server_base(host, port) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Measure this Strata install and write a shareable report (see the top of this file).")
-    ap.add_argument("--config", help="the model config to run (default: the newest strata-*.json of this folder)")
+    ap.add_argument("--config", help="the model config to run (default: the newest lamina-*.json of this folder)")
     ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8080) instead of starting one")
     ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
     ap.add_argument("--gpu", help="start the server on this GPU only (as the server's --gpu)")
@@ -965,7 +965,7 @@ def main(argv=None) -> int:
                 if len(found) > 1:
                     say(f"Several models are installed; using {cfg_path.name} (the one used last). Pick another with --config FILE.")
         if cfg_path is None or not cfg_path.is_file():
-            print("No Strata model is set up in this folder: run START-HERE.bat (Windows) or ./setup.sh (Linux) first, "
+            print("No model is set up in this folder: run setup.bat --model ... (Windows) or ./setup.sh --model ... (Linux) first, "
                   "or give --url of a running server.", file=sys.stderr)
             return 2
         cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
