@@ -167,27 +167,27 @@ public:
     /// `fn` runs once each layer's CPU rows are in and the next layer's prediction has gone out, but the last's (the
     /// tail's): the main GPU's link then has nothing to carry until the next layer's router writes its rows to the
     /// host.  Set before the first `run`.
-    /// With `after_gpu2`, a layer's hook runs only once the second GPU's rows are in too (a guarded tier: its copies
-    /// can block this thread, which launches that GPU's graphs, while the main GPU waits for them).
-    void set_rows_in(RowsFn fn, void* user, bool after_gpu2 = false) {
+    /// With `after_tiers`, a layer's hook runs only once the GPU tiers' rows are in too (a guarded tier: its copies
+    /// can block this thread, which launches the tiers' graphs, while the main GPU waits for them).
+    void set_rows_in(RowsFn fn, void* user, bool after_tiers = false) {
         rows_in_ = fn;
         rows_user_ = user;
-        rows_after_gpu2_ = after_gpu2;
+        rows_after_tiers_ = after_tiers;
     }
     cudaEvent_t window_done() const { return done_; }
-    /// The pool gives a second GPU a share of each layer (`GpuPlanSink::gpu2_flag`): it writes its rows into the
-    /// pool's rows and raises its token group's flag, and a branch of the window, forked at the ring, takes them
-    /// into VRAM while the CPU works.  Set before the first `run`.
-    void set_gpu2(bool on) { gpu2_ = on; }
+    /// The pool gives `n` GPU tiers (at most kMaxGpuTiers) a share of each layer (`GpuPlanSink::tier_flag`): each
+    /// writes its rows into the pool's rows and raises its flag for the token group, and a branch of the window per
+    /// tier, forked at the ring, takes them into VRAM while the CPU works.  Set before the first `run`.
+    void set_tiers(int n) { n_tiers_ = n; }
     /// `fn` is asked every ~2 ms while the host waits for a ring: on failure the window's waits are released and `run`
     /// returns the reason.  Set before the first `run`.
     void set_watch(WatchFn fn, void* user) { watch_ = fn; watch_user_ = user; }
 
     double ms_wait = 0, ms_pool = 0, ms_host = 0, ms_commit = 0, ms_predict = 0;
     int64_t windows = 0, predict_late = 0;
-    /// Layers whose second-GPU rows came after the CPU's, and the host time from the CPU's rows to theirs.
-    int64_t late2 = 0;
-    double ms_late2 = 0;
+    /// Per GPU tier: the layers whose rows came after the CPU's, and the host time from the CPU's rows to theirs.
+    int64_t late2[kMaxGpuTiers] = {};
+    double ms_late2[kMaxGpuTiers] = {};
 
 private:
     bool capture(int T, std::string& err);
@@ -266,16 +266,18 @@ private:
     int groups_[9] = {};
     float* h_ymiss_ = nullptr;   float* m_ymiss_ = nullptr;     // T * k * n_embd
     // the FFN input as the router kernel writes it (quant_router_): Q8_K rows `xk_stride_` bytes apart for the layers
-    // the pool takes them (xk_layer_), q8_1 rows for the second GPU
+    // the pool takes them (xk_layer_), q8_1 rows for the GPU tiers
     bool quant_router_ = false;
     std::vector<uint8_t> xk_layer_;
     int64_t xk_stride_ = 0;
     uint8_t* h_xk_ = nullptr;    uint8_t* m_xk_ = nullptr;      // T rows
     uint8_t* h_xq1_ = nullptr;   uint8_t* m_xq1_ = nullptr;     // T rows of n_embd / 32 blocks
-    // the second GPU's share (set_gpu2), per token group: the flag it raises (64 bytes apart) and its entries,
-    // [n, pad x3, entries] (mapped; `list2_` their device copies, which the combine reads)
-    bool gpu2_ = false;
+    // the GPU tiers' shares (set_tiers), per token group: the flag each raises (64 bytes apart; token group g, tier t
+    // at line g * kMaxGpuTiers + t) and their entries, [n, each tier's end, entries] (mapped; `list2_` their device
+    // copies, which the combine reads)
+    int n_tiers_ = 0;
     uint32_t* h_flag2_ = nullptr; uint32_t* m_flag2_ = nullptr;
+    uint32_t* tier_flag(int grp, int t) const { return h_flag2_ + (size_t) (grp * kMaxGpuTiers + t) * 16; }
     int32_t* h_list2_ = nullptr; int32_t* m_list2_ = nullptr;
     int32_t* list2_ = nullptr;
     int64_t list2_stride_ = 0;
@@ -289,7 +291,7 @@ private:
     TailFn tail_ = nullptr;
     void* tail_user_ = nullptr;
     RowsFn rows_in_ = nullptr;
-    bool rows_after_gpu2_ = false;
+    bool rows_after_tiers_ = false;
     void* rows_user_ = nullptr;
     int32_t* h_pids_ = nullptr;  int32_t* m_pids_ = nullptr;     // 2 x T * k
     float* h_pw_ = nullptr;      float* m_pw_ = nullptr;         // 2 x T * k
@@ -305,8 +307,8 @@ private:
     cudaEvent_t shfork_ = nullptr, shjoin_ = nullptr, res_ready_ = nullptr;
     cudaStream_t ples_ = nullptr;                                 // the PLE block's projections, beside layer 0
     cudaEvent_t plefork_ = nullptr, plejoin_ = nullptr;
-    cudaStream_t g2s_ = nullptr;                                  // the second GPU's rows, per token group
-    cudaEvent_t g2fork_ = nullptr, g2join_[2] = {};
+    cudaStream_t g2s_[kMaxGpuTiers] = {};                         // each GPU tier's rows, per token group
+    cudaEvent_t g2fork_ = nullptr, g2join_[2][kMaxGpuTiers] = {};
     cudaStream_t cps_ = nullptr;                                  // the wait for the CPU's rows, per token group
     cudaEvent_t cpfork_ = nullptr, cpjoin_[2] = {};
     cudaStream_t kst_ = nullptr;                                  // the QSA mixer's keys
@@ -361,8 +363,8 @@ private:
     int64_t cap_ = 0, max_blocks_ = 0, attn_scratch_floats_ = 0;
 
     // --window-profile: stamps [window size][layer, then one row for the window][stage]: a layer's main-stream stages,
-    // then the ends of its shared expert's branch and of the second GPU's rows' branch
-    static constexpr int kLayerStamps = 13, kStamps = 15;
+    // then the ends of its shared expert's branch and of each GPU tier's rows' branch
+    static constexpr int kLayerStamps = 13, kStamps = kLayerStamps + 1 + kMaxGpuTiers;
     bool profile_ = false;
     unsigned long long* stamps_ = nullptr;
     std::vector<unsigned long long> h_stamps_;

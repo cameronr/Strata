@@ -94,8 +94,8 @@ int bitwise_diff(const std::vector<float>& a, const std::vector<float>& b, const
     return bad;
 }
 
-// ---- the MoE combine: copy all rows + add the hits + one combine per token  vs  the second GPU's rows taken into VRAM
-// (fetch_listed_rows) and native_moe_gather_combine; from rep 2 on the shared rows gated by shared_expert_gate_rows vs
+// ---- the MoE combine: copy all rows + add the hits + one combine per token  vs  the GPU tiers' rows taken into VRAM
+// (fetch_listed_rows, whole or in each tier's part) and native_moe_gather_combine; from rep 2 on the shared rows gated by shared_expert_gate_rows vs
 // the gather-combine gating them
 int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
     const int64_t N = 2560, K = 10;
@@ -163,6 +163,13 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
             check(cudaHostGetDevicePointer((void**) &m_list, h_list, 0), "cudaHostGetDevicePointer");
             h_list[0] = (int32_t) raw.size();
             std::copy(raw.begin(), raw.end(), h_list + 4);
+            {   // from rep 6 on, three GPU tiers' parts of the list, each fetched on its own
+                const int32_t c1 = (int32_t) (rng() % (raw.size() + 1));
+                const int32_t c2 = c1 + (int32_t) (rng() % (raw.size() - (size_t) c1 + 1));
+                h_list[1] = c1;
+                h_list[2] = c2;
+                h_list[3] = (int32_t) raw.size();
+            }
 
             // old: copy all rows, add the hits, combine per token
             std::memcpy(h_map, host_zeroed.data(), host.size() * sizeof(float));
@@ -177,7 +184,11 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
             std::memcpy(h_map, host_poison.data(), host.size() * sizeof(float));
             up(d_hit, hit_poison);
             const bool second = rep >= 4;
-            if (second) strata::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s);
+            if (second && rep >= 6)
+                for (int part = 0; part < 3; ++part)
+                    strata::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s, part);
+            else if (second)
+                strata::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s);
             strata::kernels::native_moe_gather_combine(d_hit, m_map, d_dst, d_count + 1,
                                                        rep % 2 == 0 ? nullptr : d_dst + split, d_count + 2,
                                                        second ? d_list + 4 : nullptr, second ? d_list : nullptr, d_w,
@@ -206,8 +217,8 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
     }
     std::printf("gather_combine: %s\n",
                 bad ? "MISMATCH"
-                    : "bitwise equal (n_tok 1-4, 8; 8 plans each, one or two lists, the second GPU's rows fetched, "
-                      "the shared rows gated)");
+                    : "bitwise equal (n_tok 1-4, 8; 8 plans each, one or two lists, the GPU tiers' rows fetched "
+                      "whole and in three parts, the shared rows gated)");
     return bad;
 }
 

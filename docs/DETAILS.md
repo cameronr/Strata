@@ -539,6 +539,15 @@ is idle, computes the prompt's experts the first GPU lacks, and holds the last r
 3090 with and without an RTX 5070 Ti as the second GPU, against upstream Strata and llama.cpp:
 [COMPARISON.md](COMPARISON.md).
 
+`--second-gpu N,M[,P]` (`--tier-gpus` the same) adds GPUs as further tiers, up to three: each holds the profile's next
+experts after the GPUs before it, then the conversation's (its own adaptive tier, ranked after theirs), and computes
+the ones a verify window routes there beside the CPU, each with its own flag and row fetch on the main GPU. The first
+keeps the prompt path's share, the head's rows and `--prompt-split`'s stage; the later ones' experts stream to it in
+prompts. `--second-gpu-gib`, `--second-gpu-reserve-mib` and `--second-gpu-prefetch-mb` take a value per tier, the last
+for the tiers past it (the prefetch's default 12,0: copies into a card on a slower link than the 5070 Ti's x16 slowed
+the CPU pool's reads more than they saved). An RTX 5060 Ti on PCIe 4.0 x4 as a third tier beside the 3090 and the
+5070 Ti: UD-Q4_K_XL generates code 12% faster and edits 17% (fixed text, time a round), IQ3_S code and edits 7-8%.
+
 ## Before you start
 
 You need **only a graphics driver**: NVIDIA 580 or newer (update it with the NVIDIA App or from

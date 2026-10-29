@@ -1758,6 +1758,18 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(child_env({"gpu": [0, 2], "args": [], "gpu_order": "as_given"})["CUDA_VISIBLE_DEVICES"], "0,2")
         self.assertIsNone(hip_speed_scores([0], root="/nonexistent/kfd"))
 
+    def test_engine_gpus(self):
+        """The Monitor's cards: --main-gpu and --second-gpu's GPU tiers (one card or a list; the last flag counts)."""
+        from serve.server import engine_gpus
+        self.assertEqual(engine_gpus({"args": []}), [])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "2"]}), [2])
+        self.assertEqual(engine_gpus({"args": ["--second-gpu", "0", "--main-gpu", "1"]}), [1, 0])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "2", "--second-gpu", "0,1"]}), [2, 0, 1])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "2", "--tier-gpus", "1,0"]}), [2, 1, 0])
+        self.assertEqual(engine_gpus({"args": ["--main-gpu", "2", "--second-gpu", "0,1", "--second-gpu", "-1"]}), [2])
+        self.assertEqual(engine_gpus({"args": ["--second-gpu", "1"]}), [0, 1])           # --main-gpu's default
+        self.assertEqual(engine_gpus({"gpu": [3], "args": ["--second-gpu", "0,1"]}), [3])  # the config's "gpu" wins
+
     def test_kfd_scores(self):
         """AMD on Linux: the GPU nodes of the KFD topology, SIMDs x clock, node order = the config's index."""
         import tempfile

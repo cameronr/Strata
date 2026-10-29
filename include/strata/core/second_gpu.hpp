@@ -1,7 +1,7 @@
-// include/strata/core/second_gpu.hpp - a second GPU as another expert tier.
+// include/strata/core/second_gpu.hpp - a GPU as another expert tier (--second-gpu's GPUs, one object each).
 //
-// It holds experts the first GPU's cache does not (the profile's next ranks, then the conversation's, through its
-// own AdaptiveTier) and computes them for each layer of a verify window while the CPU pool computes the misses.
+// It holds experts no GPU before it holds (the profile's next ranks, then the conversation's, through its own
+// AdaptiveTier) and computes them for each layer of a verify window while the CPU pool computes the misses.
 // It never spins on host memory: per layer the host launches captured graphs once the CPU pool's workers have
 // started (copy the plan and the activations in, the grouped experts, their rows out), and the last one writes
 // the rows into the window's own rows in mapped host memory and raises a flag there, which the first GPU waits for;

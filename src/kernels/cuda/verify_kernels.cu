@@ -252,18 +252,14 @@ __global__ void fetch_blobs_kernel(const unsigned long long* __restrict__ src, c
 
 // block (x, i): part x of listed row i, block (0, i) also its entry of the device list
 __global__ void fetch_listed_rows_kernel(const int32_t* list, const float4* src, float4* __restrict__ dst,
-                                         int32_t* __restrict__ list_dev, int cap, long long n4) {
+                                         int32_t* __restrict__ list_dev, int cap, long long n4, int part) {
     const int n = min(list[0], cap), i = (int) blockIdx.y;
+    const int lo = part > 0 ? min(list[part], n) : 0, hi = part >= 0 ? min(list[1 + part], n) : n;
     const bool first = blockIdx.x == 0 && threadIdx.x == 0;
-    if (i >= n) {
-        if (i == 0 && first) list_dev[0] = 0;
-        return;
-    }
+    if (i == 0 && first) list_dev[0] = n;   // every part writes the same count
+    if (i < lo || i >= hi) return;
     const int r = list[4 + i];
-    if (first) {
-        list_dev[4 + i] = r;
-        if (i == 0) list_dev[0] = n;
-    }
+    if (first) list_dev[4 + i] = r;
     if (r < 0 || r >= cap) return;
     const long long step = (long long) gridDim.x * blockDim.x;
     for (long long c = (long long) blockIdx.x * blockDim.x + threadIdx.x; c < n4; c += step)
@@ -363,11 +359,11 @@ void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, 
 }
 
 void fetch_listed_rows(const int32_t* list, const float* src, float* dst, int32_t* list_dev, int cap, int64_t n_embd,
-                       void* stream) {
+                       void* stream, int part) {
     if (cap <= 0) return;
     const long long n4 = n_embd / 4;
     fetch_listed_rows_kernel<<<dim3((unsigned) ((n4 + 255) / 256), (unsigned) cap), 256, 0, (cudaStream_t) stream>>>(
-        list, (const float4*) src, (float4*) dst, list_dev, cap, n4);
+        list, (const float4*) src, (float4*) dst, list_dev, cap, n4, part);
     check("fetch_listed_rows");
 }
 

@@ -274,10 +274,17 @@ bool AdaptiveTier::adapt(std::vector<float>& usage, std::string& err, bool decay
     admitted_ = 0;
     blocked_.assign((size_t) (n_layers_ * n_expert_), 0);   // the experts still under way
     for (const auto& pr : pending_) blocked_[(size_t) pr.first] = 1;
-    if (upper_ != nullptr) {
+    if (!uppers_.empty()) {
         upper_has_.assign((size_t) (n_layers_ * n_expert_), 0);
-        for (size_t i = 0; i < upper_has_.size(); ++i) upper_has_[i] = (*upper_->res_)[i] >= 0;
-        for (size_t i = 0; i < upper_->staged_; ++i) upper_has_[(size_t) upper_->pending_[i].first] = 1;
+        for (const AdaptiveTier* up : uppers_) {
+            for (size_t i = 0; i < upper_has_.size(); ++i) upper_has_[i] |= (*up->res_)[i] >= 0 ? 1 : 0;
+            for (size_t i = 0; i < up->staged_; ++i) upper_has_[(size_t) up->pending_[i].first] = 1;
+        }
+    }
+    if (!lowers_.empty()) {
+        lower_has_.assign((size_t) (n_layers_ * n_expert_), 0);
+        for (const AdaptiveTier* lo : lowers_)
+            for (size_t i = 0; i < lower_has_.size(); ++i) lower_has_[i] |= (*lo->res_)[i] >= 0 ? 1 : 0;
     }
     using Ranked = AdaptiveMoveOrder;   // out < 0: an empty slot
     std::vector<Ranked> moves;
@@ -289,10 +296,10 @@ bool AdaptiveTier::adapt(std::vector<float>& usage, std::string& err, bool decay
         const float* u = usage.data() + l * n_expert_;
         const int32_t* r = res.data() + l * n_expert_;
         const uint8_t* bl = blocked_.data() + l * n_expert_;
-        const uint8_t* up = upper_ != nullptr ? upper_has_.data() + l * n_expert_ : nullptr;
-        const int32_t* lo = lower_ != nullptr ? lower_->res_->data() + l * n_expert_ : nullptr;
+        const uint8_t* up = !uppers_.empty() ? upper_has_.data() + l * n_expert_ : nullptr;
+        const uint8_t* lo = !lowers_.empty() ? lower_has_.data() + l * n_expert_ : nullptr;
         for (int32_t e = 0; e < (int32_t) n_expert_; ++e) {
-            const float ue = lo != nullptr && lo[e] >= 0 ? 0.5f * u[e] : u[e];
+            const float ue = lo != nullptr && lo[e] ? 0.5f * u[e] : u[e];
             if (r[e] < 0) {
                 if (ue >= 2.0f && !bl[e] && (up == nullptr || !up[e]) && src_->in_ram(l, e))
                     cand.emplace_back(ue, e);

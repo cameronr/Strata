@@ -55,11 +55,11 @@ public:
     /// does not hold is never a candidate (its copy would have no source; it lives in another GPU's frozen slots).
     void set_frozen(int64_t n) { frozen_ = n; }
     /// A tier in front of this one: the experts it holds or is loading are not candidates here, and this tier's
-    /// copies of them are evicted first.
-    void set_upper(const AdaptiveTier* upper) { upper_ = upper; }
+    /// copies of them are evicted first.  Each call adds one.
+    void add_upper(const AdaptiveTier* upper) { uppers_.push_back(upper); }
     /// A tier behind this one: a candidate it holds counts half its use here (moving it only shifts work from that
-    /// tier's GPU to this one's).
-    void set_lower(const AdaptiveTier* lower) { lower_ = lower; }
+    /// tier's GPU to this one's).  Each call adds one.
+    void add_lower(const AdaptiveTier* lower) { lowers_.push_back(lower); }
     /// An update waits while the previous one's moves are under way, instead of dropping the ones not staged yet (a
     /// tier whose moves all go out before the next window).
     void set_wait(bool on) { wait_ = on; }
@@ -109,13 +109,13 @@ private:
     int dev_ = -1, main_ = 0;
     bool paced_ = false;
     cudaEvent_t after_ = nullptr;
-    const AdaptiveTier* upper_ = nullptr;
-    const AdaptiveTier* lower_ = nullptr;
+    std::vector<const AdaptiveTier*> uppers_, lowers_;
     bool wait_ = false;
     bool deterministic_ = false;
     int64_t frozen_ = 0;
     std::vector<uint8_t> blocked_;                        // per (layer, expert): not a candidate, rebuilt each call
     std::vector<uint8_t> upper_has_;                      // per (layer, expert), rebuilt each call
+    std::vector<uint8_t> lower_has_;                      // per (layer, expert), rebuilt each call
     std::vector<std::vector<int32_t>> free_;              // per layer
     // The queued moves in order and their (residency index, slot) once landed: [0, admitted_) admitted, up to sent_
     // sent (and off_ bytes of the next), up to staged_ with their residents evicted.

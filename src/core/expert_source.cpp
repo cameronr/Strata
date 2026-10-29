@@ -305,9 +305,9 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         for (int64_t i = 0; i < n_tok * k; ++i)
             if (ids[i] >= 0 && ids[i] < d.n_expert) ++d.routed[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]];
     // ---- plan v0.3 P6: who computes each routed entry.  Distinct experts in routing order: the ones the main GPU's
-    // VRAM tier holds are its own (the window decides them itself, from the same residency), the second GPU's when it
-    // takes this layer, the last pcie_num/256 of the rest the PCIe share (published FIRST, so the GPU reads them while
-    // the CPU works), the others the CPU's.
+    // VRAM tier holds are its own (the window decides them itself, from the same residency), a GPU tier's when the
+    // tiers take this layer, the last pcie_num/256 of the rest the PCIe share (published FIRST, so the GPU reads them
+    // while the CPU works), the others the CPU's.
     const int64_t n = n_tok * k;
     if (n > 128) {
         d.failed = true;
@@ -317,18 +317,21 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     }
     const int32_t* res = d.host_res != nullptr ? d.host_res + (size_t) d.layers * (size_t) d.n_expert : nullptr;
     auto in_vram = [&](int32_t e) { return res != nullptr && res[e] >= 0; };   // e in range
-    int32_t kind[128];                     // per entry: -1 CPU, 0 VRAM, 1 PCIe, 2 the second GPU
-    // the second GPU's share: group g = the expert in its slot g2_slot[g], entries g2_ent[g2_start[g] ..)
-    int n2g = 0, n2e = 0;
-    int32_t g2_slot[128], g2_start[129], g2_ent[128];
-    auto slot2 = [&](int32_t e) -> int32_t {   // its slot there, -2 - p for prefetch slot p, or -1
-        if (d.gpu2 == nullptr) return -1;
-        const int32_t s = d.host_res2[(size_t) d.layers * (size_t) d.n_expert + (size_t) e];
-        if (s >= 0) return s;
-        const int p = d.gpu2->prefetched(d.layers, e);
-        return p >= 0 ? -2 - p : -1;
+    int32_t kind[128];                     // per entry: -1 CPU, 0 VRAM, 1 PCIe, 2 + t GPU tier t
+    // tier t's share: group g = the expert in its slot g2_slot[t][g], entries g2_ent[t][g2_start[t][g] ..)
+    const int NT = d.n_tiers;
+    int n2g[kMaxGpuTiers] = {}, n2e[kMaxGpuTiers] = {};
+    int32_t g2_slot[kMaxGpuTiers][128], g2_start[kMaxGpuTiers][129], g2_ent[kMaxGpuTiers][128];
+    // the first tier that holds `e` or has prefetched it, and its slot there (-2 - p for prefetch slot p); -1: none
+    auto tier_of = [&](int32_t e, int32_t& slot) -> int {
+        const size_t at = (size_t) d.layers * (size_t) d.n_expert + (size_t) e;
+        for (int t = 0; t < NT; ++t) {
+            if (d.tiers[t].res[at] >= 0) { slot = d.tiers[t].res[at]; return t; }
+            const int p = d.tiers[t].gpu->prefetched(d.layers, e);
+            if (p >= 0) { slot = -2 - p; return t; }
+        }
+        return -1;
     };
-    auto on_gpu2 = [&](int32_t e) { return slot2(e) != -1; };
     int64_t distinct[128], first_of[128];
     int nd = 0;
     for (int64_t i = 0; i < n; ++i) {
@@ -337,32 +340,36 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             if (ids[j] == ids[i]) { first_of[i] = first_of[j]; break; }
         if (first_of[i] == i) distinct[nd++] = i;
     }
-    // The second GPU takes this layer's share only when the layer's misses are big enough that the CPU would need
-    // longer for all of them than its round trip (~100 us: ~4 MB of experts at the pool's ~45 GB/s); otherwise it
-    // would only add its latency.  Its rows reach the main GPU through the sink.
-    GpuPlanSink* const S2 = d.gpu2 != nullptr && d.plan != nullptr && d.plan->gpu2_flag != nullptr ? d.plan : nullptr;
-    d.gpu2_used = false;
+    // The tiers take this layer's shares only when the layer's misses are big enough that the CPU would need longer
+    // for all of them than their round trip (~100 us: ~4 MB of experts at the pool's ~45 GB/s); otherwise they would
+    // only add their latency.  Their rows reach the main GPU through the sink.
+    GpuPlanSink* const S2 = NT > 0 && d.plan != nullptr && d.plan->tier_flag[0] != nullptr ? d.plan : nullptr;
+    d.tier_used = false;
+    int8_t tier_q[128];      // per distinct expert: its tier, or -1
+    int32_t slot_q[128];     // and its slot there
+    for (int q = 0; q < nd; ++q) tier_q[q] = -1;
     if (S2 != nullptr) {
-        uint64_t miss_bytes = 0, gpu2_bytes = 0;
-        bool only_there = false;   // an expert only in its VRAM (--vram-pin-gib): no other device can compute it
+        uint64_t miss_bytes = 0, tier_bytes = 0;
+        bool only_there = false;   // an expert only in a tier's VRAM (--second-gpu-pin-gib): no other device has it
         for (int q = 0; q < nd; ++q) {
             const int32_t e = ids[distinct[q]];
             if (e < 0 || e >= d.n_expert || in_vram(e)) continue;
             miss_bytes += lay.blob_bytes(d.layers);
-            if (on_gpu2(e)) {
-                gpu2_bytes += lay.blob_bytes(d.layers);
+            tier_q[q] = (int8_t) tier_of(e, slot_q[q]);
+            if (tier_q[q] >= 0) {
+                tier_bytes += lay.blob_bytes(d.layers);
                 only_there = only_there || !d.src->in_ram(d.layers, e);
             }
         }
-        d.gpu2_used = gpu2_bytes > 0 && (only_there || miss_bytes >= d.gpu2_min_bytes);
-        if (gpu2_bytes > 0 && !d.gpu2_used) ++d.gpu2_skipped;
+        d.tier_used = tier_bytes > 0 && (only_there || miss_bytes >= d.tier_min_bytes);
+        if (tier_bytes > 0 && !d.tier_used) ++d.tier_skipped;
     }
-    auto on_gpu2_now = [&](int32_t e) { return d.gpu2_used && on_gpu2(e); };
+    auto on_tier_now = [&](int q) { return d.tier_used && tier_q[q] >= 0; };
     GpuPlanSink* P = d.plan != nullptr && d.plan->pcie && n <= d.plan->cap ? d.plan : nullptr;
     int nmiss = 0;
     for (int q = 0; q < nd; ++q) {
         const int32_t e = ids[distinct[q]];
-        if (e >= 0 && e < d.n_expert && !in_vram(e) && !on_gpu2_now(e)) ++nmiss;
+        if (e >= 0 && e < d.n_expert && !in_vram(e) && !on_tier_now(q)) ++nmiss;
     }
     const bool pcie_ok = P != nullptr && d.pcie_num > 0 && d.src->layer_mapped(d.layers);
     const int m = pcie_ok ? (nmiss * d.pcie_num) >> 8 : 0;
@@ -376,12 +383,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         if (e >= 0 && e < d.n_expert) {
             if (in_vram(e)) {
                 kd = 0;
-            } else if (on_gpu2_now(e)) {
-                kd = 2;
-                g2_slot[n2g] = slot2(e);
-                g2_start[n2g++] = n2e;
+            } else if (on_tier_now(q)) {
+                const int t = tier_q[q];
+                kd = 2 + t;
+                g2_slot[t][n2g[t]] = slot_q[q];
+                g2_start[t][n2g[t]++] = n2e[t];
                 for (int64_t i = i0; i < n; ++i)
-                    if (first_of[i] == i0) g2_ent[n2e++] = (int32_t) i;
+                    if (first_of[i] == i0) g2_ent[t][n2e[t]++] = (int32_t) i;
             } else {
                 if (pcie_ok && miss_rank >= nmiss - m && fetches < P->staging_cap && fetches < 64) {
                     const uint8_t* src = d.src->blob(d.layers, e);
@@ -398,15 +406,22 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         for (int64_t i = i0; i < n; ++i)
             if (first_of[i] == i0) kind[i] = kd;
     }
-    g2_start[n2g] = n2e;
-    if (S2 != nullptr) {   // the main GPU takes the second GPU's rows once their flag rises: at once without a share
-        S2->gpu2_list[0] = n2e;
-        for (int i = 0; i < n2e; ++i) S2->gpu2_list[4 + i] = g2_ent[i];
-        if (n2g == 0) {
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            *(volatile uint32_t*) S2->gpu2_flag = S2->ring;
-            S2->gpu2_ring = S2->ring;
+    for (int t = 0; t < NT; ++t) g2_start[t][n2g[t]] = n2e[t];
+    if (S2 != nullptr) {   // the main GPU takes each tier's rows once its flag rises: at once without a share
+        int32_t* L = S2->gpu2_list;
+        int at = 0;
+        for (int t = 0; t < NT; ++t) {
+            for (int i = 0; i < n2e[t]; ++i) L[4 + at + i] = g2_ent[t][i];
+            at += n2e[t];
+            L[1 + t] = at;
         }
+        L[0] = at;
+        std::atomic_thread_fence(std::memory_order_seq_cst);   // every tier's list before any flag
+        for (int t = 0; t < NT; ++t)
+            if (n2g[t] == 0) {
+                *(volatile uint32_t*) S2->tier_flag[t] = S2->ring;
+                S2->tier_ring[t] = S2->ring;
+            }
     }
     if (P != nullptr) {                          // the PCIe groups: staging slot q, their entries in routing order
         const uint64_t bb = lay.blob_bytes(d.layers);
@@ -463,10 +478,14 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
                 d.fail_expert = e;
                 return;
             }
-            if (kind[i] >= 0) {             // a GPU computes this entry (a VRAM hit, a PCIe read, the second GPU)
+            if (kind[i] >= 0) {             // a GPU computes this entry (a VRAM hit, a PCIe read, a GPU tier)
                 if (kind[i] == 0) ++d.cache_hits;
-                if (kind[i] == 2) ++d.gpu2_entries;   // its row is the second GPU's to write
-                else if (!skip_gpu_rows) std::memset(row, 0, (size_t) H * sizeof(float));
+                if (kind[i] >= 2) {         // its row is that tier's to write
+                    ++d.tier_entries;
+                    ++d.tiers[kind[i] - 2].entries;
+                } else if (!skip_gpu_rows) {
+                    std::memset(row, 0, (size_t) H * sizeof(float));
+                }
                 continue;
             }
             ++d.cache_refused;
@@ -494,30 +513,39 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             ++d.multi_entries;
         }
     const auto c3 = std::chrono::steady_clock::now();
-    // the second GPU's share goes out once the CPU's workers have started on theirs: its launch takes the host
-    // tens of microseconds.  It takes the q8_1 rows the window's router wrote, and writes its rows into `out` itself.
+    // the tiers' shares go out once the CPU's workers have started on theirs: a launch takes the host tens of
+    // microseconds.  They take the q8_1 rows the window's router wrote, and write their rows into `out` themselves.
     struct Submit2 {
         ExpertDispatch* d;
-        int n_tok, n_groups;
+        int n_tok;
         int64_t k;
-        const int32_t *slots, *starts, *entries;
+        const int* n_groups;
+        const int32_t (*slots)[128];
+        const int32_t (*starts)[129];
+        const int32_t (*entries)[128];
         float* out;
         bool ok;
-    } s2{&d, (int) n_tok, n2g, k, g2_slot, g2_start, g2_ent, out, true};
+    } s2{&d, (int) n_tok, k, n2g, g2_slot, g2_start, g2_ent, out, true};
     void (*submit2)(void*) = [](void* p) {
         Submit2& s = *(Submit2*) p;
         GpuPlanSink& S = *s.d->plan;
-        // the layer's gate/up activations as the second GPU's kernels take them: Q8_K rows under --expert-math exact
-        // on a K-quant layer, else q8_1
+        // the layer's gate/up activations as the tiers' kernels take them: Q8_K rows under --expert-math exact on a
+        // K-quant layer, else q8_1
         const auto& nf = strata::kernels::cpu::expert_layout().fmt[(size_t) s.d->layers];
         const bool xk = strata::kernels::gpu_expert_act(nf.gu_act) == 15;
         const uint8_t* xa = xk ? S.xk : S.x1;
         const int64_t xs = xk ? S.xk_stride : (int64_t) (strata::kernels::cpu::H / 32) * 36;
-        s.ok = xa != nullptr && s.d->gpu2->submit(s.d->layers, xa, xs, s.n_tok, s.k, s.slots, s.starts, s.entries,
-                                                   s.n_groups, s.out, S.gpu2_flag, S.ring, s.d->gpu2_err);
-        if (s.ok) S.gpu2_ring = S.ring;
+        for (int t = 0; t < s.d->n_tiers && s.ok; ++t) {   // (the last tier first measured within 1.4% either way)
+            if (s.n_groups[t] <= 0) continue;
+            s.ok = xa != nullptr && s.d->tiers[t].gpu->submit(s.d->layers, xa, xs, s.n_tok, s.k, s.slots[t],
+                                                               s.starts[t], s.entries[t], s.n_groups[t], s.out,
+                                                               S.tier_flag[t], S.ring, s.d->tier_err);
+            if (s.ok) S.tier_ring[t] = S.ring;
+        }
     };
-    if (n2g <= 0) submit2 = nullptr;
+    bool shares = false;
+    for (int t = 0; t < NT; ++t) shares = shares || n2g[t] > 0;
+    if (!shares) submit2 = nullptr;
     pt("run", njobs);
     // STRATA_POOL_FUSED=1 (opt-in): the layer's gate/up and down rows as one batch, no barrier between them
     static const bool pool_fused = [] { const char* v = std::getenv("STRATA_POOL_FUSED"); return v != nullptr && std::atoi(v) != 0; }();
@@ -531,7 +559,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     }
     if (!s2.ok) {
         d.failed = true;
-        d.fail = d.gpu2_err.c_str();
+        d.fail = d.tier_err.c_str();
         d.fail_layer = d.layers;
         return;
     }
@@ -553,8 +581,13 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
 
 void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids, const float* w, int64_t n_tok,
                            int64_t k) {
-    if (d.failed || d.gpu2 == nullptr || d.gpu2->prefetch_slots() <= 0) return;
-    // the predicted experts neither GPU holds, ranked by their summed routing weight over the window's tokens
+    if (d.failed) return;
+    const uint64_t bb = strata::kernels::cpu::expert_layout().blob_bytes(layer);
+    int room = 0;   // the prefetch slots the tiers' budgets take
+    for (int t = 0; t < d.n_tiers; ++t)
+        room += (int) (std::min)((uint64_t) d.tiers[t].gpu->prefetch_slots(), d.tiers[t].prefetch_bytes / bb);
+    if (room <= 0) return;
+    // the predicted experts no GPU holds, ranked by their summed routing weight over the window's tokens
     int32_t cand[128];
     float score[128];
     int nc = 0;
@@ -562,26 +595,36 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
         const int32_t e = ids[i];
         if (e < 0 || e >= d.n_expert) continue;
         const size_t at = (size_t) layer * (size_t) d.n_expert + (size_t) e;
-        if (d.host_res[at] >= 0 || d.host_res2[at] >= 0 || !d.src->pinned(layer, e)) continue;
+        bool held = d.host_res[at] >= 0 || !d.src->pinned(layer, e);
+        for (int t = 0; t < d.n_tiers && !held; ++t) held = d.tiers[t].res[at] >= 0;
+        if (held) continue;
         int c = 0;
         while (c < nc && cand[c] != e) ++c;
         if (c == nc) { cand[nc] = e; score[nc++] = 0.0f; }
         score[c] += w[i];
     }
-    const int m = (int) (std::min)((uint64_t) (std::min)(nc, d.gpu2->prefetch_slots()),
-                                   d.gpu2_prefetch_bytes / strata::kernels::cpu::expert_layout().blob_bytes(layer));
+    // the likeliest first, the first tier's slots filled first
+    int m[kMaxGpuTiers] = {}, total = 0;
+    for (int t = 0; t < d.n_tiers; ++t) {
+        m[t] = (int) (std::min)((uint64_t) (std::min)(nc - total, d.tiers[t].gpu->prefetch_slots()),
+                                d.tiers[t].prefetch_bytes / bb);
+        total += m[t];
+    }
     const uint8_t* src[128];
-    for (int q = 0; q < m; ++q) {
+    for (int q = 0; q < total; ++q) {
         int best = q;
         for (int c = q + 1; c < nc; ++c) if (score[c] > score[best]) best = c;
         std::swap(cand[q], cand[best]);
         std::swap(score[q], score[best]);
         src[q] = d.src->blob(layer, cand[q]);
     }
-    if (!d.gpu2->prefetch(layer, cand, src, m, strata::kernels::cpu::expert_layout().blob_bytes(layer), d.gpu2_err)) {
-        d.failed = true;
-        d.fail = d.gpu2_err.c_str();
-        d.fail_layer = layer;
+    for (int t = 0, at = 0; t < d.n_tiers; at += m[t++]) {
+        if (m[t] > 0 && !d.tiers[t].gpu->prefetch(layer, cand + at, src + at, m[t], bb, d.tier_err)) {
+            d.failed = true;
+            d.fail = d.tier_err.c_str();
+            d.fail_layer = layer;
+            return;
+        }
     }
 }
 

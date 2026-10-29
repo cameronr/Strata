@@ -2822,19 +2822,24 @@ def gpu_list(cfg: dict) -> list[int]:
 
 def engine_gpus(cfg: dict) -> list[int]:
     """The cards the engine works on, numbered as nvidia-smi numbers them: the config's "gpu", else its arguments'
-    --main-gpu (default 0) and --second-gpu; [] when neither names one."""
+    --main-gpu (default 0) and --second-gpu (one card or a list, "0,1": the GPU tiers; the last of either flag counts);
+    [] when neither names one."""
     if gpu_list(cfg):
         return gpu_list(cfg)
     args = [str(x) for x in cfg.get("args") or []]
 
-    def value(flag):
-        i = args.index(flag) if flag in args else -1
-        return int(args[i + 1]) if 0 <= i < len(args) - 1 and args[i + 1].lstrip("-").isdigit() else None
-    main, second = value("--main-gpu"), value("--second-gpu")
-    if main is None and (second is None or second < 0):
+    def values(*flags):
+        at = [i for i, a in enumerate(args) if a in flags and i + 1 < len(args)]
+        if not at:
+            return None
+        items = [x.strip() for x in args[at[-1] + 1].split(",")]
+        return [int(x) for x in items if x.lstrip("-").isdigit()]
+    main, tiers = values("--main-gpu"), values("--second-gpu", "--tier-gpus") or []
+    tiers = [t for t in tiers if t >= 0]
+    if not main and not tiers:
         return []
-    main = main or 0
-    return [main] + ([second] if second is not None and second >= 0 and second != main else [])
+    main = main[0] if main else 0
+    return [main] + [t for i, t in enumerate(tiers) if t != main and t not in tiers[:i]]
 
 
 def engine_binary(exe: str, cfg: dict | None = None) -> str:

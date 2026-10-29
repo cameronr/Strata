@@ -106,13 +106,17 @@ Verifier::~Verifier() {
     if (side_) cudaStreamDestroy(side_);
     if (shs_) cudaStreamDestroy(shs_);
     if (ples_) cudaStreamDestroy(ples_);
-    if (g2s_) cudaStreamDestroy(g2s_);
+    for (cudaStream_t st : g2s_)
+        if (st) cudaStreamDestroy(st);
+    for (auto& per : g2join_)
+        for (cudaEvent_t e : per)
+            if (e) cudaEventDestroy(e);
     if (cps_) cudaStreamDestroy(cps_);
     if (kst_) cudaStreamDestroy(kst_);
     if (sgs_) cudaStreamDestroy(sgs_);
     for (cudaEvent_t e : {join_, bfork_, bjoin_, pfork_, pjoin_, shfork_, shjoin_, res_ready_, done_, g2fork_, plefork_,
                           plejoin_,
-                          g2join_[0], g2join_[1], cpfork_, cpjoin_[0], cpjoin_[1], efork_, rdone_, kjoin_, iproj_,
+                          cpfork_, cpjoin_[0], cpjoin_[1], efork_, rdone_, kjoin_, iproj_,
                           sgjoin_})
         if (e) cudaEventDestroy(e);
     if (arena_) cudaFree(arena_);
@@ -200,7 +204,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     const uint64_t TS = (uint64_t) (s.idx_block - 1) * ID;
     const int max_in = (int) std::max<uint64_t>(std::max<uint64_t>(N, ZV), NH * HD);
 
-    // ---- mapped staging (portable where the second GPU writes: its rows and flags)
+    // ---- mapped staging (portable where the GPU tiers write: their rows and flags)
     const unsigned portable = cudaHostAllocMapped | cudaHostAllocPortable;
     list2_stride_ = (4 + (int64_t) (T * K) + 3) & ~3ll;
     const auto& lay = strata::kernels::cpu::expert_layout();
@@ -225,7 +229,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(64, (void**) &h_flagA_, (void**) &m_flagA_) &&
               mapped(64, (void**) &h_flagB_, (void**) &m_flagB_) &&
               mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_, portable) &&
-              mapped(128, (void**) &h_flag2_, (void**) &m_flag2_, portable) &&
+              mapped(2 * kMaxGpuTiers * 64, (void**) &h_flag2_, (void**) &m_flag2_, portable) &&
               mapped((size_t) (2 * list2_stride_) * 4, (void**) &h_list2_, (void**) &m_list2_) &&
               mapped(T * (uint64_t) xk_stride_, (void**) &h_xk_, (void**) &m_xk_) &&
               mapped(T * (N / 32) * 36, (void**) &h_xq1_, (void**) &m_xq1_) &&
@@ -369,7 +373,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         cudaStreamCreateWithFlags(&ples_, cudaStreamNonBlocking) != cudaSuccess ||
         cudaEventCreateWithFlags(&plefork_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&plejoin_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaStreamCreateWithFlags(&g2s_, cudaStreamNonBlocking) != cudaSuccess ||
+
         cudaStreamCreateWithFlags(&cps_, cudaStreamNonBlocking) != cudaSuccess ||
         cudaStreamCreateWithFlags(&kst_, cudaStreamNonBlocking) != cudaSuccess ||
         cudaEventCreateWithFlags(&kjoin_, cudaEventDisableTiming) != cudaSuccess ||
@@ -382,8 +386,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         cudaEventCreateWithFlags(&efork_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&rdone_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&g2fork_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&g2join_[0], cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&g2join_[1], cudaEventDisableTiming) != cudaSuccess ||
+
         cudaEventCreateWithFlags(&join_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&bfork_, cudaEventDisableTiming) != cudaSuccess ||
         cudaEventCreateWithFlags(&bjoin_, cudaEventDisableTiming) != cudaSuccess ||
@@ -396,6 +399,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         err = "verify: stream create failed";
         return false;
     }
+    for (int t = 0; t < kMaxGpuTiers; ++t)
+        if (cudaStreamCreateWithFlags(&g2s_[t], cudaStreamNonBlocking) != cudaSuccess ||
+            cudaEventCreateWithFlags(&g2join_[0][t], cudaEventDisableTiming) != cudaSuccess ||
+            cudaEventCreateWithFlags(&g2join_[1][t], cudaEventDisableTiming) != cudaSuccess) {
+            err = "verify: stream create failed";
+            return false;
+        }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
                  (double) count.used / 1048576.0);
     return true;
@@ -438,8 +448,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             gpu_stamp(stamps_ + ((size_t) T * (size_t) (g.n_layers + 1) + (size_t) row) * kStamps + i, st);
     };
     stamp(g.n_layers, 0, cs);
-    if (gpu2_ && !quant_router_) {
-        err = "verify: the second GPU takes the native router's q8_1 rows (a native pack)";
+    if (n_tiers_ > 0 && !quant_router_) {
+        err = "verify: the GPU tiers take the native router's q8_1 rows (a native pack)";
         return false;
     }
     // the layer's short branches: `fork` starts stream `to` from the main stream's work so far, `mark` records what
@@ -809,7 +819,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             ra.ids_out = m_ids_ + tb * K; ra.w_out = m_w_ + tb * K; ra.seq = m_seq_;
             if (quant_router_) {   // the q8_1 rows for both GPUs' experts, the Q8_K rows for the CPU's
                 ra.xq1 = nat_xq_ + (size_t) tb * (N / 32) * 36;
-                ra.xq1_out = gpu2_ ? m_xq1_ + (size_t) tb * (N / 32) * 36 : nullptr;
+                ra.xq1_out = n_tiers_ > 0 ? m_xq1_ + (size_t) tb * (N / 32) * 36 : nullptr;
                 ra.xk_out = xk_layer_[(size_t) l] ? m_xk_ + (size_t) tb * (size_t) xk_stride_ : nullptr;
                 ra.xk_stride = (int) xk_stride_;
             }
@@ -835,16 +845,24 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                             MT * K, plan_ptr_off_, cs);
         }
         stamp(l, 4, cs);
-        // after the doorbell: the second GPU's rows of this token group, taken into VRAM once their flag rises, and
-        // the wait for the CPU's rows, each on a branch beside the routed experts; then the branches forked after the
-        // FFN read: the shared expert, and the next layer's prediction
-        if (gpu2_) {
-            if (!fork(g2s_, g2fork_)) return false;
-            wait_flag_ge(m_flag2_ + (size_t) grp * 16, (uint32_t) (l * G + grp + 1), g2s_);
+        // after the doorbell: each GPU tier's rows of this token group, taken into VRAM once its flag rises, and the
+        // wait for the CPU's rows, each on a branch beside the routed experts; then the branches forked after the FFN
+        // read: the shared expert, and the next layer's prediction
+        if (n_tiers_ > 0 && cudaEventRecord(g2fork_, cs) != cudaSuccess) {
+            err = "verify: a branch could not fork";
+            return false;
+        }
+        for (int t = 0; t < n_tiers_; ++t) {
+            if (cudaStreamWaitEvent(g2s_[t], g2fork_, 0) != cudaSuccess) {
+                err = "verify: a branch could not fork";
+                return false;
+            }
+            wait_flag_ge(m_flag2_ + (size_t) (grp * kMaxGpuTiers + t) * 16, (uint32_t) (l * G + grp + 1), g2s_[t]);
             fetch_listed_rows(m_list2_ + grp * list2_stride_, m_ymiss_ + (size_t) tb * K * N,
-                              hit_out_ + (size_t) tb * K * N, list2_ + grp * list2_stride_, (int) (n * K), N, g2s_);
-            stamp(l, kLayerStamps + 1, g2s_);
-            if (!mark(g2s_, g2join_[grp])) return false;
+                              hit_out_ + (size_t) tb * K * N, list2_ + grp * list2_stride_, (int) (n * K), N, g2s_[t],
+                              t);
+            stamp(l, kLayerStamps + 1 + t, g2s_[t]);
+            if (!mark(g2s_[t], g2join_[grp][t])) return false;
         }
         if (!fork(cps_, cpfork_)) return false;
         wait_flag_ge(m_flag_, (uint32_t) (l * G + grp + 1), cps_);   // the CPU's share is in the mapped rows
@@ -970,7 +988,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         stamp(l, 8, cs);
         if (!wait(cpjoin_[grp])) return false;                 // the CPU's share is in the mapped rows
         stamp(l, 9, cs);
-        if (gpu2_ && !wait(g2join_[grp])) return false;        // the second GPU's, in `hit_out`
+        for (int t = 0; t < n_tiers_; ++t)                     // the GPU tiers', in `hit_out`
+            if (!wait(g2join_[grp][t])) return false;
         stamp(l, 10, cs);
         if (beside && (cudaStreamWaitEvent(cs, shjoin_, 0) != cudaSuccess ||
                        cudaStreamWaitEvent(cs, sgjoin_, 0) != cudaSuccess)) {
@@ -978,7 +997,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             return false;
         }
         // only the CPU's rows cross PCIe here; the GPUs' come from `hit_out` (the pool leaves their rows unwritten)
-        const int32_t* list2 = gpu2_ ? list2_ + grp * list2_stride_ : nullptr;
+        const int32_t* list2 = n_tiers_ > 0 ? list2_ + grp * list2_stride_ : nullptr;
         try {
             native_moe_gather_combine(hit_out, m_ymiss_ + (size_t) tb * K * N, vram.dst, vram.counts + 1, pcie.dst,
                                       pcie.counts != nullptr ? pcie.counts + 1 : nullptr,
@@ -1199,8 +1218,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     *(volatile uint32_t*) h_flagB_ = 0;
     *(volatile uint32_t*) h_pseq_ = 0;
     *(volatile uint32_t*) h_pleflag_ = 0;
-    h_flag2_[0] = h_flag2_[16] = 0;
-    sink_.gpu2_ring = 0;
+    for (int grp = 0; grp < 2; ++grp)
+        for (int t = 0; t < kMaxGpuTiers; ++t) *(volatile uint32_t*) tier_flag(grp, t) = 0;
+    for (uint32_t& r : sink_.tier_ring) r = 0;
     std::atomic_thread_fence(std::memory_order_seq_cst);
     last_t_ = T;
     last_pos0_ = pos0;
@@ -1216,10 +1236,12 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     VDBG("launched\n");
     // on a failure every wait of the graph passes, so it runs to its end before the next window resets the flags
     auto release = [&] {
-        h_list2_[0] = h_list2_[list2_stride_] = 0;
+        for (int grp = 0; grp < 2; ++grp)
+            for (int i = 0; i < 4; ++i) h_list2_[grp * list2_stride_ + i] = 0;
         std::atomic_thread_fence(std::memory_order_seq_cst);
-        for (uint32_t* f : {h_flag_, h_flagA_, h_flagB_, h_pleflag_, h_flag2_, h_flag2_ + 16})
-            *(volatile uint32_t*) f = 0xffffffffu;
+        for (uint32_t* f : {h_flag_, h_flagA_, h_flagB_, h_pleflag_}) *(volatile uint32_t*) f = 0xffffffffu;
+        for (int grp = 0; grp < 2; ++grp)
+            for (int t = 0; t < kMaxGpuTiers; ++t) *(volatile uint32_t*) tier_flag(grp, t) = 0xffffffffu;
         cudaStreamSynchronize(cs_);
         return false;
     };
@@ -1237,15 +1259,29 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     volatile uint32_t* const flag = h_flag_;
     const int G = groups_[T] > 0 ? groups_[T] : 1;
     const int gtb[2] = {0, (T + 1) / 2}, gte[2] = {G == 2 ? (T + 1) / 2 : T, T};
-    // a pool whose second-GPU rows came after the CPU's: the host time until they were in
-    const volatile uint32_t* late_flag = nullptr;
-    uint32_t late_want = 0;
-    Clock::time_point late_at{};
-    auto settle = [&](bool now) {
-        if (late_flag != nullptr && (now || *late_flag >= late_want)) {
-            ms_late2 += ms_since(late_at);
-            late_flag = nullptr;
+    // per GPU tier, a pool whose tier rows came after the CPU's: the host time until they were in
+    const volatile uint32_t* late_flag[kMaxGpuTiers] = {};
+    uint32_t late_want[kMaxGpuTiers] = {};
+    Clock::time_point late_at[kMaxGpuTiers] = {};
+    auto settle_tier = [&](int t, bool now) {
+        if (late_flag[t] != nullptr && (now || *late_flag[t] >= late_want[t])) {
+            ms_late2[t] += ms_since(late_at[t]);
+            late_flag[t] = nullptr;
         }
+    };
+    auto settle = [&](bool now) {
+        for (int t = 0; t < n_tiers_; ++t) settle_tier(t, now);
+    };
+    auto any_late = [&] {
+        for (int t = 0; t < n_tiers_; ++t)
+            if (late_flag[t] != nullptr) return true;
+        return false;
+    };
+    // whether every GPU tier's rows of ring `want` are in
+    auto tiers_in = [&](uint32_t want) {
+        for (int t = 0; t < n_tiers_; ++t)
+            if (*(volatile uint32_t*) sink_.tier_flag[t] < want) return false;
+        return true;
     };
     for (int64_t k = 0; k < g.n_layers * G; ++k) {
         const int64_t l = k / G;
@@ -1297,24 +1333,28 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             *(volatile uint32_t*) h_flagA_ = want;
             raise_flag(h_flagB_, want);
         }
-        if (gpu2_ && sink_.gpu2_ring != want) {   // no second-GPU share went out (the pool failed): an empty one
-            sink_.gpu2_list[0] = 0;
+        bool unsent = false;   // a tier's share did not go out (the pool failed): empty ones, each flag raised
+        for (int t = 0; t < n_tiers_; ++t) unsent = unsent || sink_.tier_ring[t] != want;
+        if (unsent) {
+            for (int i = 0; i < 4; ++i) sink_.gpu2_list[i] = 0;
             std::atomic_thread_fence(std::memory_order_seq_cst);
-            *(volatile uint32_t*) sink_.gpu2_flag = want;
+            for (int t = 0; t < n_tiers_; ++t)
+                if (sink_.tier_ring[t] != want) *(volatile uint32_t*) sink_.tier_flag[t] = want;
         }
         *flag = want;
         ms_wait += std::chrono::duration<double, std::milli>(b - a).count();
         ms_pool += ms_since(b);
-        if (gpu2_ && *(volatile uint32_t*) sink_.gpu2_flag < want) {
-            settle(true);   // a split window's other token group
-            late_flag = sink_.gpu2_flag;
-            late_want = want;
-            late_at = Clock::now();
-            ++late2;
-        }
+        for (int t = 0; t < n_tiers_; ++t)
+            if (*(volatile uint32_t*) sink_.tier_flag[t] < want) {
+                settle_tier(t, true);   // a split window's other token group
+                late_flag[t] = sink_.tier_flag[t];
+                late_want[t] = want;
+                late_at[t] = Clock::now();
+                ++late2[t];
+            }
         if (tail_ != nullptr && k + 1 == g.n_layers * G) tail_(tail_user_);
         // the next layer's prediction, published during this layer's pool, else microseconds later (its branch is
-        // joined before the next layer): waited for, so the experts the second GPU takes never depend on timing
+        // joined before the next layer): waited for, so the experts the GPU tiers take never depend on timing
         if (predict_ != nullptr && G == 1 && l + 1 < g.n_layers && native_router_enabled()) {
             const Clock::time_point c = Clock::now();
             if (*(volatile uint32_t*) h_pseq_ < (uint32_t) (l + 1)) {
@@ -1332,24 +1372,22 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             }
             ms_predict += ms_since(c);
         }
-        // a guarded tier's pump never runs while the second GPU is behind: its enqueue can block on a GPU that is
-        // spinning on the second-GPU flag, and this thread is what launches that GPU's next graph (deadlock)
-        if (rows_in_ != nullptr && k + 1 < g.n_layers * G &&
-            (!rows_after_gpu2_ || !gpu2_ || *(volatile uint32_t*) sink_.gpu2_flag >= want))
+        // a guarded tier's pump never runs while a GPU tier is behind: its enqueue can block on a GPU that is spinning
+        // on the tier's flag, and this thread is what launches that tier's next graph (deadlock)
+        if (rows_in_ != nullptr && k + 1 < g.n_layers * G && (!rows_after_tiers_ || tiers_in(want)))
             rows_in_(rows_user_, l);
     }
-    // the last layer's second-GPU rows: no later doorbell bounds the graph's wait for them, and a spin kernel left
+    // the last layer's GPU tier rows: no later doorbell bounds the graph's wait for them, and a spin kernel left
     // running when the engine ends can leave the GPU lost until a power cycle (upstream #267)
-    for (const Clock::time_point w0 = Clock::now();
-         gpu2_ && *(volatile uint32_t*) sink_.gpu2_flag < (uint32_t) (g.n_layers * G);) {
+    for (const Clock::time_point w0 = Clock::now(); !tiers_in((uint32_t) (g.n_layers * G));) {
         settle(false);
         _mm_pause();
         if (ms_since(w0) > 5000.0) {
-            err = "verify: the second GPU's rows of the last layer never came";
+            err = "verify: a GPU tier's rows of the last layer never came";
             return release();
         }
     }
-    while (late_flag != nullptr && ms_since(late_at) < 50.0) {   // the last layer's (the graph ends after them)
+    for (const Clock::time_point w0 = Clock::now(); any_late() && ms_since(w0) < 50.0;) {   // the last layer's
         settle(false);
         _mm_pause();
     }
@@ -1405,7 +1443,8 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             for (int i = 1; i < kLayerStamps; ++i) prof_ns_[(size_t) kind * kStamps + i] += (double) (st[i] - st[i - 1]);
             // the shared expert's branch and the second GPU's rows', from the doorbell (they fork there) to their ends
             prof_ns_[(size_t) kind * kStamps + kLayerStamps] += (double) (st[kLayerStamps] - st[4]);
-            if (gpu2_) prof_ns_[(size_t) kind * kStamps + kLayerStamps + 1] += (double) (st[kLayerStamps + 1] - st[4]);
+            for (int t = 0; t < n_tiers_; ++t)
+                prof_ns_[(size_t) kind * kStamps + kLayerStamps + 1 + t] += (double) (st[kLayerStamps + 1 + t] - st[4]);
             {   // the wait for the CPU's rows, by bucket
                 const double us = (double) (st[9] - st[8]) / 1e3;
                 int b = 0;
@@ -1460,16 +1499,17 @@ void Verifier::print_profile() const {
     static const char* const names[kStamps] = {"stamp gap",      "HC read, mixer",   "mixer",          "HC read, FFN",
                                                "router, ring, hits", "expert inputs", "VRAM experts",
                                                "wait for PCIe plan", "PCIe experts", "wait for CPU",
-                                               "wait for 2nd GPU", "rows + combine", "last HC write",
-                                               "shared expert, beside", "2nd GPU rows, beside"};
+                                               "wait for GPU tiers", "rows + combine", "last HC write",
+                                               "shared expert, beside", "2nd GPU rows, beside",
+                                               "3rd GPU rows, beside", "4th GPU rows, beside"};
     const double nw = (double) prof_windows_;
     std::printf("%-24s GPU time over %lld windows, ms per window: inputs %.3f, head %.3f, whole window %.3f; "
-                "one stamp %.2f us (each stage below includes one; the last two run from the ring beside the "
-                "six before \"rows + combine\")\n", "window profile", (long long) prof_windows_,
+                "one stamp %.2f us (each stage below includes one; the branches \"beside\" run from the ring beside "
+                "the six before \"rows + combine\")\n", "window profile", (long long) prof_windows_,
                 prof_window_ns_[0] / nw / 1e6, prof_window_ns_[1] / nw / 1e6, prof_window_ns_[2] / nw / 1e6,
                 prof_window_ns_[3] / nw / 1e3);
     std::printf("  %-22s %12s %12s %14s\n", "stage", "GDN us/layer", "QSA us/layer", "ms per window");
-    for (int i = 0; i < kStamps; ++i) {
+    for (int i = 0; i < kLayerStamps + 1 + n_tiers_; ++i) {
         const double a = prof_ns_[(size_t) i], b = prof_ns_[(size_t) kStamps + i];
         std::printf("  %-22s %12.1f %12.1f %14.3f\n", names[i],
                     prof_layers_[0] ? a / (double) prof_layers_[0] / 1e3 : 0.0,
@@ -1507,9 +1547,9 @@ void Verifier::set_plan_slot(int grp) {
     const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
     sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob);
     sink_.staging_cap = per;
-    if (gpu2_) {
+    if (n_tiers_ > 0) {
         sink_.gpu2_list = h_list2_ + (size_t) grp * (size_t) list2_stride_;
-        sink_.gpu2_flag = h_flag2_ + (size_t) grp * 16;
+        for (int t = 0; t < n_tiers_; ++t) sink_.tier_flag[t] = tier_flag(grp, t);
         sink_.ring = cur_layer_ + 1;
     }
 }

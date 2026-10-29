@@ -34,6 +34,10 @@ namespace strata::core {
 
 class SecondGpu;
 
+/// GPUs that hold experts beside the main GPU's cache (--second-gpu A[,B,C]): up to three, each computing the experts
+/// it holds of a verify window's layer beside the CPU pool.
+constexpr int kMaxGpuTiers = 3;
+
 /// Where one routed expert's bytes come from.
 ///
 /// Phase 2 has NO cache (`phase-2-correct-engine.md`: hit rate `h = 0`), so the only implementation is a
@@ -97,16 +101,16 @@ struct GpuPlanSink {
     int pcie_mode = 0;
     /// The GPU reads only the rows it did not compute, so the pool leaves the GPU's rows of `out` unwritten.
     bool host_rows_only = false;
-    /// The second GPU's share of this token group (mapped; null without one): its entries, [n, pad x3, entries], and
-    /// the flag its graph raises to `ring` once their rows are in `out`, which the main GPU waits for.  The pool
-    /// raises the flag itself when the second GPU takes no share, and sets `gpu2_ring` to `ring` once the flag is
-    /// raised or a share is submitted.
+    /// The GPU tiers' shares of this token group (mapped; null without a tier): their entries, tier by tier,
+    /// [n, end of tier 0's, of tier 1's, of tier 2's, entries], and per tier the flag its graph raises to `ring` once
+    /// its rows are in `out`, which the main GPU waits for.  The pool raises a tier's flag itself when that tier takes
+    /// no share, and sets its `tier_ring` to `ring` once the flag is raised or a share is submitted.
     int32_t* gpu2_list = nullptr;
-    uint32_t* gpu2_flag = nullptr;
-    uint32_t ring = 0, gpu2_ring = 0;
+    uint32_t* tier_flag[kMaxGpuTiers] = {};
+    uint32_t ring = 0, tier_ring[kMaxGpuTiers] = {};
     /// This token group's activations as the window's router wrote them (mapped): ggml's Q8_K rows, `xk_stride` bytes
     /// apart, when the layer takes them (`pool_takes_q8k`), else null (the pool quantizes the floats); and the q8_1
-    /// rows (n_embd / 32 blocks each) the second GPU takes.
+    /// rows (n_embd / 32 blocks each) the GPU tiers take.
     const uint8_t* xk = nullptr;
     int64_t xk_stride = 0;
     const uint8_t* x1 = nullptr;
@@ -243,16 +247,22 @@ struct ExpertDispatch {
     /// Routed (token, expert) entries per (layer, expert) in verify windows, when the caller sizes it: how many of
     /// the entries a cache of the N most-routed experts would serve.
     std::vector<uint32_t> routed;
-    /// A second GPU's expert tier (verify windows) and its residency table (n_layers x n_expert, slot or -1): the
-    /// experts it holds or has prefetched and the first GPU's cache does not are computed there, beside the CPU pool.
-    SecondGpu* gpu2 = nullptr;
-    const int32_t* host_res2 = nullptr;
-    int64_t gpu2_entries = 0;      ///< routed entries the second GPU served
-    int64_t gpu2_skipped = 0;      ///< layers the CPU took the second GPU's share of (it was quicker)
-    bool gpu2_used = false;        ///< this layer's decision
-    uint64_t gpu2_min_bytes = 0;   ///< a layer's miss bytes from which the second GPU takes its share
-    uint64_t gpu2_prefetch_bytes = 0;   ///< per layer, its likeliest experts no GPU holds, copied there ahead
-    std::string gpu2_err;          ///< `fail` points here when the second GPU failed
+    /// The GPU tiers past the main GPU (verify windows), in order: an expert the main GPU's cache does not hold is
+    /// computed on the first tier that holds it (`res`, n_layers x n_expert, slot or -1) or has prefetched it, beside
+    /// the CPU pool.
+    struct GpuTier {
+        SecondGpu* gpu = nullptr;
+        const int32_t* res = nullptr;
+        uint64_t prefetch_bytes = 0;   ///< per layer, its likeliest experts no GPU holds, copied there ahead
+        int64_t entries = 0;           ///< routed entries it served
+    };
+    GpuTier tiers[kMaxGpuTiers];
+    int n_tiers = 0;
+    int64_t tier_entries = 0;      ///< routed entries the tiers served, all of them
+    int64_t tier_skipped = 0;      ///< layers the CPU took the tiers' shares of (it was quicker)
+    bool tier_used = false;        ///< this layer's decision
+    uint64_t tier_min_bytes = 0;   ///< a layer's miss bytes from which the tiers take their shares
+    std::string tier_err;          ///< `fail` points here when a tier's GPU failed
     /// Set when `dispatch` could not produce an answer.  The loop itself has no error channel, so this is
     /// where a source failure surfaces: the driver checks it after `session_loop` returns rather than the
     /// engine computing from a half-filled `parts`.
@@ -273,12 +283,13 @@ void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, cons
 
 /// Plan v0.3 P6: the pool for a verify window of `n_tok` tokens.  `x_f` is (n_tok, n_embd), `ids` (n_tok, k) and
 /// `out` (n_tok * k, n_embd).  Each distinct missed expert is computed once for all the tokens routed to it;
-/// resident experts' rows are the main GPU's (zeroed, or left unwritten with `GpuPlanSink::host_rows_only`), and the
-/// second GPU writes its share's rows itself, after this returns (`GpuPlanSink::gpu2_flag`).
+/// resident experts' rows are the main GPU's (zeroed, or left unwritten with `GpuPlanSink::host_rows_only`), and each
+/// GPU tier writes its share's rows itself, after this returns (`GpuPlanSink::tier_flag`).
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out);
-/// Copies `layer`'s likeliest experts that neither GPU holds to the second GPU's prefetch slots, where that layer's
-/// dispatch finds them; `ids`/`w` (n_tok, k) are the layer's predicted routing (`Verifier::set_predict`).
+/// Copies `layer`'s likeliest experts that no GPU holds to the tiers' prefetch slots (each tier's `prefetch_bytes`,
+/// the first tier's filled first), where that layer's dispatch finds them; `ids`/`w` (n_tok, k) are the layer's
+/// predicted routing (`Verifier::set_predict`).
 void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids, const float* w, int64_t n_tok,
                            int64_t k);
 
