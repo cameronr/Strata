@@ -37,7 +37,9 @@
     "--pcie-frac",
     "0",
     "--second-gpu",
-    "0",
+    "0,1",
+    "--second-gpu-reserve-mib",
+    "2048,512",
     "--main-gpu",
     "2"
   ],
