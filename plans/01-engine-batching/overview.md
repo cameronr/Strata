@@ -42,6 +42,7 @@ Implementers must load per phase: **how** (Explain mode) over any subsystem befo
 7. [phase-7-mtp-per-slot.md](phase-7-mtp-per-slot.md), draft state per slot.
 8. [phase-8-read-beside-decode.md](phase-8-read-beside-decode.md), prompt reads beside running windows.
 9. [phase-9-peer-tier-sizing.md](phase-9-peer-tier-sizing.md), stretch: peer-tier windows and per-slot memory sizing for this rig.
+10. [phase-10-verify-window-16.md](phase-10-verify-window-16.md), post-ship: the 16-row verify window - the first A/B sweep measured the 8-row draft-depth cap (4 slots verify 1 draft each against spec 4).
 
 Order is deliberate: the safety net first, then the shared types, then the verifier, then kernels, then the loop, then the server. Each phase ships alone and behind flags; absent flags change nothing, mirroring upstream's "opt-in and changes nothing when the options are absent".
 
