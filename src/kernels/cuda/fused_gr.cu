@@ -613,12 +613,16 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void* 
         switch (n_tok) {
 #define STRATA_UP(T) case T: gr_up_q8_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
             STRATA_UP(1) STRATA_UP(2) STRATA_UP(3) STRATA_UP(4) STRATA_UP(5) STRATA_UP(6) STRATA_UP(7) STRATA_UP(8)
+            STRATA_UP(9) STRATA_UP(10) STRATA_UP(11) STRATA_UP(12) STRATA_UP(13) STRATA_UP(14) STRATA_UP(15)
+            STRATA_UP(16)
 #undef STRATA_UP
         }
     else
     switch (n_tok) {
 #define STRATA_UP(T) case T: gr_up_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
         STRATA_UP(1) STRATA_UP(2) STRATA_UP(3) STRATA_UP(4) STRATA_UP(5) STRATA_UP(6) STRATA_UP(7) STRATA_UP(8)
+        STRATA_UP(9) STRATA_UP(10) STRATA_UP(11) STRATA_UP(12) STRATA_UP(13) STRATA_UP(14) STRATA_UP(15)
+        STRATA_UP(16)
 #undef STRATA_UP
     }
     const cudaError_t e = cudaGetLastError();

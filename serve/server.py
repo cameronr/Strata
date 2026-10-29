@@ -889,7 +889,7 @@ def parse_batch_window_sample(line: str) -> dict | None:
     if match is None:
         return None
     windows, rows, active, elapsed_ms = map(int, match.groups())
-    if rows > windows * 8 or active > rows or elapsed_ms > 86_400_000:
+    if (rows > windows * 16 or active > rows or elapsed_ms > 86_400_000):   # rows/window <= kVerifyMaxT
         return None
     return {"windows": windows, "processed_rows": rows, "active_rows": active,
             "elapsed_ms": elapsed_ms}

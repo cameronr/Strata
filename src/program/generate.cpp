@@ -1401,7 +1401,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (o.parallel < 1 || o.parallel > 8) {
-        std::fprintf(stderr, "strata generate: --parallel N takes 1..8 (a verify window holds 8 rows)\n");
+        std::fprintf(stderr, "strata generate: --parallel N takes 1..8 (a verify window holds 16 rows, one per slot is the floor)\n");
         return 2;
     }
     if (o.kv != "fp16" && o.kv != "int8" && o.kv != "k8v4" && o.kv != "q4_0") {
@@ -4352,7 +4352,7 @@ int main(int argc, char** argv) {
             int keep[strata::kernels::kVerifyMaxT + 1], ts[strata::kernels::kVerifyMaxT + 1];
             // the window's shape: slot b gets ts[b] rows - its token plus the drafts its last draft round
             // made, gated as the solo loop gates T (the min_p chain, the drafted eos, the length caps) -
-            // trimmed to the 8-row window by dropping the least likely last draft, one at a time.
+            // trimmed to the window by dropping the least likely last draft, one at a time.
             int S = 0, tot = 0;
             for (int b = 0; b < (int) bs.size(); ++b) {
                 keep[b] = 1;

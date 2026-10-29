@@ -927,7 +927,7 @@ void qsa_block_scores_seg(const SegRow* seg, const int32_t* row_slot, const floa
         std::exit(1);
     }
     // no decline path: the per-row nq=1 call always runs block_scores_kernel, which is exactly what the seg
-    // kernel is. n <= kVerifyMaxT (8) by the verifier's window cap; the rows are validated by run_slot_rows.
+    // kernel is. n <= kVerifyMaxT by the verifier's window cap; the rows are validated by run_slot_rows.
     const dim3 grid((unsigned) score_grid_x(grid_blocks, max_blocks), (unsigned) n);
     block_scores_seg_kernel<<<grid, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(seg, row_slot, q_idx, steps,
                                                                                    max_blocks, scores);
