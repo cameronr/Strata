@@ -196,6 +196,36 @@ replaced in this fork's configs, 1.9215 (+1.9%). IQ3_S's experts take 46.8 GiB, 
 generates 30-68% faster on fixed text; with both GPUs it reads prompts 8% slower to 4% faster, on the 3090 alone
 1.45-1.54x as fast.
 
+## Qwen3.6-35B-A3B
+
+The engine's Qwen3.6 path (`src/qwen35`, upstream's driver on this fork's kernels) on unsloth's UD-Q4_K_XL (the MTP GGUF,
+22.9 GB), measured on 2026-10-29: this fork with its config (`examples/qwen36-ud-q4_k_xl.json`: the RTX 3090 alone,
+65,536 cells, 2 drafts) against mainline llama.cpp build 11606 on the same file with this PC's former Qwen3.6 preset
+(64K cells, 8-bit KV, 2048-token micro-batches, MTP drafts up to 3, the token embedding on the CPU), on the 3090 alone
+(the experts that do not fit in RAM, `--fit`) and with the 5070 Ti, layer split 15,25. The same requests through each
+server's API, greedy, the prompt cache off (this fork's thinking: the server's two engine requests, the thinking cut at
+its budget of 2,250 tokens and the answer after it, 2,982 tokens in 25.1 s).
+
+| | llama.cpp, 3090 | llama.cpp, both GPUs | this fork, 3090 |
+|---|---|---|---|
+| Generation: code, 28-token prompt (t/s) | 179.3 | 214.4 | 124.6 |
+| Generation: thinking (3,000 tokens) | 181.5 | 196.8 | 118.9 |
+| Edit: prompt / generation (t/s) | 3,268 / 227.8 | 3,700 / 238.6 | 934 / 109.6 |
+| 16K-token prompt / generation after it (t/s) | 3,847 / 165.4 | 4,431 / 183.8 | 1,433 / 44.8 |
+| 32K-token prompt / generation after it (t/s) | 3,520 / 146.5 | 4,055 / 154.3 | 1,380 / 23.1 |
+
+This path keeps K and V in fp32 (~45 KB a cell): at 65,536 cells 192 of the 256 experts a layer fit on the 3090 and the
+CPU computes 16-18% of the routed entries; at 8,192 cells every main layer's experts fit, and on fixed text (generate
+mode) it reads a 6,000-token prompt at 2,696 tok/s and writes 195 t/s on the thinking task with 2 drafts, 125 t/s after
+the 6,000 tokens (110 without drafts). Its generation slows with the context more than llama.cpp's: a pass takes ~1 ms
+longer per 1K cells of context with every expert in VRAM. A follow-up turn is read again from the start where its
+history differs from what the engine holds (no prompt-cache checkpoints on this path).
+
+Agreement with llama.cpp (`scratch/q36/parity36.sh`, every expert in VRAM, 8,192 cells): along llama.cpp's own greedy
+text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 4.2e-4 / 1.6e-3 / 1.3e-6 (a 27-token
+coding request, the thinking task, the edit; 138 / 400 / 400 positions), where llama.cpp's CPU backend is 5.1e-4 /
+1.8e-3 / 1.0e-6 from it; the argmax agrees at 100% / 98.75% / 100% of the positions, as the CPU backend's does.
+
 ## Features
 
 | | llama.cpp | Upstream Strata | This fork |

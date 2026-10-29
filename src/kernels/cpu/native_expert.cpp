@@ -60,6 +60,11 @@ bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt
         err = "native experts: ggml-cpu cannot quantize an activation for this layer";
         return false;
     }
+    if (n_embd > H || n_ff > FF) {   // the pool's per-token rows (ExpertPool's SplitBufMulti) are Flash-Next's size
+        err = "native experts: an expert wider than the pool's buffers (at most " + std::to_string(FF) + " x " +
+              std::to_string(H) + ")";
+        return false;
+    }
     if (n_embd % ggml_blck_size((ggml_type) gu_type) || n_ff % ggml_blck_size((ggml_type) d_type) ||
         n_embd % ggml_blck_size(tg->vec_dot_type) || n_ff % ggml_blck_size(td->vec_dot_type)) {
         err = "native experts: expert geometry is not whole blocks";

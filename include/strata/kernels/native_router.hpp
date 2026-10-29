@@ -16,6 +16,10 @@ bool native_router_enabled();
 void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream);
 // `native_router_top10` for n_tok tokens in one launch: logits (n_tok, 512) -> ids, weights (n_tok, 10).
 void native_router_top10_multi(const float* logits, int32_t* ids, float* weights, int n_tok, void* stream);
+// The same contract for (n_expert, k) = (512, 10), through the two above, and Qwen3.6-35B-A3B's (256, 8): logits
+// (n_tok, n_expert) -> ids, weights (n_tok, k).
+bool native_router_topk_supported(int n_expert, int k);
+void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream);
 
 // Plan v0.3 P6: a verify window layer's router in one kernel: bf16_gemv_fp32_mmvf_multi's logits,
 // native_router_top10_multi's ids and weights and doorbell_publish's ring, bitwise, and verify_hit_plan's plan.  The

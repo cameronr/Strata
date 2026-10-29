@@ -15,6 +15,10 @@ bool built();
 /// MMQ covers this ggml type (the i-quants and Q2_0 of ISTA-DASLab's files, the K-quants, Q5_1 and Q8_0 of
 /// unsloth's; IQ1_M is not covered).
 bool supported(int ggml_type);
+/// `supported`, and on every visible GPU llama.cpp's MMQ has a tile for this type and a weight matrix of `w_rows` rows
+/// that fits the card's shared memory - the test its tile choice makes, which aborts the process ("J_best=0") when
+/// nothing fits.  false (said once per type) keeps that product off MMQ (the Qwen3.6 path asks it).
+bool fits(int ggml_type, int64_t w_rows);
 /// Bytes of one expert's gate+up ([2*n_ff, n_embd]) or down ([n_embd, n_ff]) weights in `ggml_type`.
 size_t matrix_bytes(int ggml_type, int64_t rows, int64_t cols);
 /// Bytes of `rows` activation rows of `cols` values quantized for MMQ (the row padded to 512 values).

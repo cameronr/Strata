@@ -15,6 +15,10 @@
 // (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
 
 #include "strata/artifact/gguf_split.hpp"
+#if defined(STRATA_HAVE_QWEN35)
+#include "strata/artifact/gguf_reader.hpp"
+#include "strata/qwen35/engine.hpp"
+#endif
 #include "strata/core/adaptive_tier.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/gpu_select.hpp"
@@ -1198,6 +1202,42 @@ struct PromptBuffers {
     }
 };
 
+#if defined(STRATA_HAVE_QWEN35)
+constexpr int kNotQwen35 = -1;
+/// The family switch: kNotQwen35 for a file this engine runs, else the exit code of Qwen3.6-35B-A3B's engine path
+/// (src/qwen35), which a qwen35moe file (--native's header) runs on.  That path runs on one GPU, --main-gpu's (named as
+/// for this engine), made current before its first CUDA call; it gets the command line without --main-gpu.
+int qwen35_switch(int argc, char** argv) {
+    std::string model, main_gpu = "0";
+    std::vector<char*> rest{argv[0]};
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--main-gpu") == 0 && i + 1 < argc) {
+            main_gpu = argv[++i];
+            continue;
+        }
+        if ((std::strcmp(argv[i], "--native") == 0 || std::strcmp(argv[i], "--model") == 0) && i + 1 < argc)
+            model = argv[i + 1];
+        rest.push_back(argv[i]);
+    }
+    if (model.empty()) return kNotQwen35;
+    try {
+        const strata::GgufFile meta(strata::gguf_split_paths(model).front());
+        if (strata::model_family(meta) != strata::ModelFamily::Qwen35Moe) return kNotQwen35;
+    } catch (const std::exception&) {
+        return kNotQwen35;   // not readable here: the engine below says why
+    }
+    const std::vector<strata::core::GpuInfo> gpus = strata::core::list_gpus();
+    std::string why;
+    const int dev = strata::core::find_gpu(gpus, main_gpu, why);
+    if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
+        std::fprintf(stderr, "strata: --main-gpu %s: %s\n", main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
+        return 2;
+    }
+    std::fprintf(stderr, "strata: Qwen3.6-35B-A3B (qwen35moe) on GPU %d, %s\n", dev, gpus[(size_t) dev].name.c_str());
+    return strata::qwen35::run((int) rest.size(), rest.data());
+}
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1213,6 +1253,9 @@ int main(int argc, char** argv) {
         setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
 #endif
     }
+#if defined(STRATA_HAVE_QWEN35)
+    if (const int rc = qwen35_switch(argc, argv); rc != kNotQwen35) return rc;
+#endif
     Options o;
     bool have_tokens = false;
     bool have_logits_stride = false;

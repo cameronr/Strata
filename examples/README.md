@@ -1,10 +1,13 @@
 # This fork's configs
 
-The configs this fork runs with on a PC with an RTX 3090, an RTX 5070 Ti and 160 GB of RAM, for `serve/server.py`
+The configs this fork runs with on a PC with an RTX 3090, an RTX 5070 Ti, an RTX 5060 Ti and 160 GB of RAM, for
+`serve/server.py`
 (their speeds: [COMPARISON.md](../docs/COMPARISON.md)):
 
 - `iq3_s.json`: ISTA-DASLab's GSQ-RCO IQ3_S (~53 GB of RAM taken).
 - `ud-q4_k_xl.json`: unsloth's UD-Q4_K_XL (~81 GB of RAM taken).
+- `qwen36-ud-q4_k_xl.json`: Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL, on the engine's Qwen3.6 path
+  ([below](#qwen36-35b-a3b)).
 
 This branch's engine leaves out some of upstream's options, which [DETAILS.md](../docs/DETAILS.md) describes and setup
 may write into its own configs: the layer split and the helper GPUs' caches (`--peer-device`; the second GPU here is
@@ -15,12 +18,12 @@ here keeps replaced conversations in RAM) and its checkpoint spread (`--prompt-c
 requests (`--batch`), token biases, prompt lookup chained after the drafts (`--lookup-chain`), upstream's routing
 approximations (the route tail skip, on by default in upstream's CUDA server), the adaptive tier's overlapped copies
 (`STRATA_ADAPT_OVERLAP`), the CPU pool's `--host-core` and `--pool-affinity`, the engine's own watchdog and stall
-report, the PLE read probe, 0.1.44's NVFP4 experts, Qwen3.6-35B-A3B engine and batched commit graph, 0.1.45's CUDA
+report, the PLE read probe, 0.1.44's NVFP4 experts and batched commit graph, 0.1.45's CUDA
 opt-in switches but `STRATA_DEQUANT_WIDE`, the engine of 0.2.0-beta (0.1.45.3): the switches on by default per
 architecture (`STRATA_SM86_PERF`, `STRATA_SM120_PERF`), agentionai's Gyro files (trellis expert types, Hadamard-folded
 experts), the CPU pool's planned worker count, the pinned-memory reserve, the prompt planner and the Linux file tier's
 read-ahead, and the AMD, Intel, Metal (Mac), Turing, Volta and Pascal builds. A
-server config with `parallel` or `vram_elastic` passes the engine a flag it refuses; with `slot_save_path`, a save
+Flash-Next config with `parallel` or `vram_elastic` passes the engine a flag it refuses; with `slot_save_path`, a save
 request ends the engine.
 
 The configs keep what each model's run learned (`expert_profile_save`, upstream's #477): the engine writes a profile
@@ -101,25 +104,49 @@ quantized tensors, the experts and most projections, from the GGUF files at star
 
    (`START-HERE.bat` starts setup's own config.)
 
-Both of this PC's configs also have `--arena-place`, left out here: for RAM whose regions read at different rates,
-as unpaired DIMMs make (two 32 GB and two 48 GB modules), the engine times its RAM arena at the start and keeps the
-experts the CPU reads out of the slow region, again between requests ([DETAILS.md](../docs/DETAILS.md)). On such a
+Both of this PC's Flash-Next configs also have `--arena-place`, left out here: for RAM whose regions read at different
+rates, as unpaired DIMMs make (two 32 GB and two 48 GB modules), the engine times its RAM arena at the start and keeps
+the experts the CPU reads out of the slow region, again between requests ([DETAILS.md](../docs/DETAILS.md)). On such a
 PC add it to a config's arguments; elsewhere it finds nothing to move and costs ~2 s at the start.
 
-This PC's UD-Q4_K_XL config also has `--no-file-cache`, left out here: the engine reads the experts from the GGUF past
-the OS file cache. Where the RAM holds the 72 GiB arena and the cached 72 GB file together (this PC's 160 GB), the
-file settles in the cache on pages the later starts' arenas would have had: here generation fell 7-8% over a session's
-starts, and with the flag it stays at a fresh boot's speed. Each start then reads the experts from the drive (here
-4.3-4.4 GiB/s against 6 from the cache, ~5 s more). With less RAM the cache cannot keep the file beside the arena, and
-the flag costs only the start time ([DETAILS.md](../docs/DETAILS.md)).
+This PC's Flash-Next UD-Q4_K_XL config also has `--no-file-cache`, left out here: the engine reads the experts from the
+GGUF past the OS file cache. Where the RAM holds the 72 GiB arena and the cached 72 GB file together (this PC's 160 GB),
+the file settles in the cache on pages the later starts' arenas would have had: here generation fell 7-8% over a
+session's starts, and with the flag it stays at a fresh boot's speed. Each start then reads the experts from the drive
+(here 4.3-4.4 GiB/s against 6 from the cache, ~5 s more). With less RAM the cache cannot keep the file beside the arena,
+and the flag costs only the start time ([DETAILS.md](../docs/DETAILS.md)).
 
-Both of this PC's configs also have `--prompt-split 26`, left out here: a prompt of more than one chunk runs in two
-stages, the second GPU taking each chunk's layers 26-47 whole while the first runs the next chunk. It pays where the
-second GPU alone reads a chunk about as fast as both together: this PC's 5070 Ti runs the dense steps 1.44x as fast as
-its 3090, and prompts of 32K-128K tokens read 1.13-1.55x as fast. It costs 0.7 GiB more pinned RAM and lends 6-8 GiB
-of the second GPU's cache during such a prompt ([DETAILS.md](../docs/DETAILS.md)). Measure it on your pair before
-adding it, and its layer too, through the server: here generate mode put IQ3_S's best layer at 23 (6-11% faster
-than 26), while through the API 26 was 2-4% faster than 23.
+Both of this PC's Flash-Next configs also have `--prompt-split 26`, left out here: a prompt of more than one chunk runs
+in two stages, the second GPU taking each chunk's layers 26-47 whole while the first runs the next chunk. It pays where
+the second GPU alone reads a chunk about as fast as both together: this PC's 5070 Ti runs the dense steps 1.44x as fast
+as its 3090, and prompts of 32K-128K tokens read 1.13-1.55x as fast. It costs 0.7 GiB more pinned RAM and lends 6-8 GiB
+of the second GPU's cache during such a prompt ([DETAILS.md](../docs/DETAILS.md)). Measure it on your pair before adding
+it, and its layer too, through the server: here generate mode put IQ3_S's best layer at 23 (6-11% faster than 26), while
+through the API 26 was 2-4% faster than 23.
+
+## Qwen3.6-35B-A3B
+
+The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) on a path of its own (`src/qwen35`, from upstream):
+`strata` switches to it from the model file's header, so the config names the file with `--native` like the others. It
+reads the GGUF as it is (no pack, no expert profile; the drafts come from the file's own MTP block, `--mtp N` of them),
+keeps every expert that fits in the VRAM of one GPU (`--main-gpu`) and computes the rest on the CPU.
+
+1. Download unsloth's `Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf` (22,853,663,008 bytes, SHA-256
+   `55983c5a75a1ab969824077b3bb3de4146e82a9234072b48ad4e8f92ad3fe9f1`) and `mmproj-F16.gguf` (899,283,584 bytes,
+   `71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160`) from
+   [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/tree/5bc3e238d916f48a861bac2f8a1990a0e9b7e98d)
+   into `../Strata-data/models/qwen36-UD-Q4_K_XL`.
+2. Write its tokenizer (the same vocabulary as Flash-Next's, its own chat template):
+
+       .venv\Scripts\python.exe tools\strata_tokenizer.py --out ../Strata-data/packs/qwen36-ud-q4_k_xl ^
+         --gguf ../Strata-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+
+3. Start it with `run-qwen36-ud-q4_k_xl.bat`.
+
+The path keeps K and V in fp32 (~45 KB a cell), so the context decides how many experts fit: on a 24 GB card every
+expert at 8,192 cells, 192 of 256 a layer at the config's 65,536. Its speeds against llama.cpp on the same file:
+[COMPARISON.md](../docs/COMPARISON.md). Not on this path yet: the prompt cache's checkpoints (a follow-up turn whose
+history differs anywhere from what the engine holds is read again from the start), `/v1/choose`, and the GPU tiers.
 
 On Linux (built and run on CachyOS with GCC 16.2.1 and CUDA 13.4, on two RTX 3090 and an RTX 5060 Ti) the steps are
 the same, with these differences:

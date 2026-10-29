@@ -34,6 +34,10 @@ bool native_mmvq_multi_exact();
 // One quantization may serve multiple weight matrices sharing the same input.
 // Q8_1 stores FP16 scale and FP16 warp sum of the ORIGINAL float inputs; it does
 // not reconstruct that sum from the quantized integers.
+// silu(gate) * up (n_in x ncols floats each), rounded to q8_1 as native_quantize_q8_1 rounds: the Qwen3.6 path's
+// hidden rows in one kernel.
+void native_swiglu_quantize_q8_1(const float* gate, const float* up, void* x_q8_1, int n_in, int ncols, void* stream);
+
 void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols,
                           void* stream);
 

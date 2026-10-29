@@ -65,8 +65,10 @@ add_library(strata_warnings INTERFACE)
 target_compile_options(strata_warnings INTERFACE
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/W4>
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>
-  # C4324: a struct padded after an alignas member (the CPU pool's activation images), as intended.
+  # C4324: a struct padded after an alignas member (the CPU pool's activation images), as intended; the CUDA
+  # sources that include them (the Qwen3.6 path) see it through the host compiler.
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/wd4324>
+  $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4324>
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-Wall>
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-Wextra>
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/W4>
@@ -634,6 +636,23 @@ if(STRATA_NATIVE_EXPERTS)
     target_include_directories(expert_grouped_parity PRIVATE third_party/ggml src/kernels/cuda)
     target_link_libraries(expert_grouped_parity PRIVATE strata_kernels strata_kernels_cpu CUDA::cudart)
     add_test(NAME expert_grouped_parity COMMAND expert_grouped_parity)
+
+    # Qwen3.6-35B-A3B (GGUF architecture qwen35moe): its own engine path, a library `strata` switches to for such a
+    # model (the family switch at the top of its main) and strata-q36 wraps on its own; the experts that do not fit
+    # in VRAM run on the CPU pool.  strata-q36ref: the reference path tools/qwen35/ checks against llama.cpp.
+    add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
+    target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+                               PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_kernels_cpu strata_warnings
+                          CUDA::cudart)
+    target_compile_definitions(strata_qwen35 PRIVATE STRATA_Q36_CPU_POOL=1)
+    add_executable(strata-q36 src/qwen35/q36_main.cpp)
+    target_link_libraries(strata-q36 PRIVATE strata_qwen35 CUDA::cudart)
+    target_link_libraries(strata PRIVATE strata_qwen35)
+    target_compile_definitions(strata PRIVATE STRATA_HAVE_QWEN35=1)
+    add_executable(strata-q36ref src/qwen35/q36ref.cu)
+    target_include_directories(strata-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings CUDA::cudart)
   endif()
 endif()
 
