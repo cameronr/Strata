@@ -77,3 +77,19 @@ fits full drafts), per-slot grammar, >8 slots.
 Kernel audit + tests: the bulk. Expected: 2x toward +20-30% (full drafts, no trim),
 4x up from +16% by draft depth 1 -> 4; solo unchanged if no spills. If spills eat it,
 the fallback (two-pass kernel) keeps the value with more work.
+
+## As built (2026-10-29, a12958b8a)
+
+Landed as scoped, with one addition: `gu_grouped_kernel` (the plain variant) needed
+the EMAX=8 sub-batch staging too - at GMAX 16 its 45 KB of static smem would have
+halved occupancy for EVERY window including solo's 5-row ones (static smem is sized
+by the constant, not by the group's actual entry count). Both gate/up kernels hold
+23/25 KB; `gr_up_multi_kernel<16>` 106 REG / 32 KB; `gdn_ab_multi_kernel` 48 REG;
+no spills anywhere (cuobjdump). Solo never instantiates a >8 kernel: each T is its
+own template instantiation and the solo window is T <= 5.
+
+CPU gates pass (full build 49/49 targets; batch_read/slot_fit/iq_avx2/bf16_bits/
+platform_memory green - the last needs `--ulimit memlock=-1`, unrelated).
+The GPU gates (digest, parity suite, decode speed, sweep) run in the next window:
+the same `docker stop strata-eddoursul; docker run --gpus all ... strata:src`
+invocation as the phase 9 gates, then `./bench-batch-ab.py --yes --rounds 2`.
