@@ -107,7 +107,7 @@ void ple_dequant_row(int type, const uint8_t* row, float* out160);
 /// row reads take ~0.6 s from the SSD.
 ///
 /// NEVER KEEP THE SHARD MAPPED WHILE READING IT DIRECT: a live section on the same file serializes the unbuffered
-/// reads (311 -> 1,575 us per token, bench/results/2026-09-23-p2-ssd-direct). Direct mode drops its own mapping
+/// reads (311 -> 1,575 us per token, upstream Strata's bench/results/2026-09-23-p2-ssd-direct). Direct mode drops its own mapping
 /// after the header parse; nothing else in the process may hold one.
 enum class PleIo { Direct, Mmap, Ram };
 

@@ -132,7 +132,7 @@ public:
     /// management) instead of one cudaMalloc, so `shrink` can give the tail's VRAM back to the driver - for another
     /// program - and `grow` can take it again, while every slot keeps its address (the captured graphs, the verify
     /// plan's pointers and the prompt path's loan all hold addresses into it).  0 (the default): one cudaMalloc, as
-    /// always.  CUDA only: a HIP build refuses it at open.  The slots past `slots()` after a shrink must hold no
+    /// always.  The slots past `slots()` after a shrink must hold no
     /// resident expert and no loan: the CALLER evicts them first (they become CPU misses).
     void set_segment_bytes(int64_t seg_bytes) { seg_req_ = seg_bytes > 0 ? seg_bytes : 0; }
     bool segmented() const { return !segs_.empty(); }
@@ -226,11 +226,6 @@ public:
     uint64_t slot_offset(int64_t s) const { return off_.empty() ? (uint64_t) s * (uint64_t) blob_ : off_[(size_t) s]; }
 
 private:
-#if defined(STRATA_USE_HIP)
-    bool ensure_blocking_staging(std::size_t bytes, std::string& err);
-    uint8_t* blocking_staging_ = nullptr;
-    std::size_t blocking_staging_bytes_ = 0;
-#endif
     int64_t slot_end(int64_t n) const { return off_.empty() ? n * blob_ : (int64_t) off_[(size_t) n]; }
     bool open_segmented(uint64_t want, std::string& err);
     void release_segmented();

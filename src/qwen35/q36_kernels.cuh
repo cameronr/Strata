@@ -36,8 +36,8 @@ __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v))
 
 // The shared CUDA kernels these ones replace (native_mmvq.cu, native_router.cu) are compiled with --use_fast_math (CMakeLists.txt);
 // this file is not, so on CUDA the division and the exponential they use are spelled out as the instructions that flag selects
-// (div.approx.ftz, rcp.approx.ftz, ex2.approx.ftz via __expf).  HIP builds have no such flag: plain operators.
-#if defined(__CUDACC__) && !defined(__HIPCC__)
+// (div.approx.ftz, rcp.approx.ftz, ex2.approx.ftz via __expf).
+#if defined(__CUDACC__)
 __device__ __forceinline__ float fdiv_fm(float a, float b) {
     float r;
     asm("div.approx.ftz.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));

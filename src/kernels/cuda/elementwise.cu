@@ -204,7 +204,7 @@ void silu_inplace(float* x, int64_t n, void* stream) {
 /// very expensive substitute for one fence instruction.
 ///
 /// **THE STORE IS VOLATILE**, like `doorbell_publish_kernel`'s.  On RDNA4 (gfx1201) a plain store to mapped pinned
-/// memory stays in the GPU's L2 until the stream is synchronized - the host never saw the ring (tests/hip/handoff:
+/// memory stays in the GPU's L2 until the stream is synchronized - the host never saw the ring (upstream's tests/hip/handoff:
 /// 0 of 100 rings seen without a sync; volatile, a system-scope atomic store or a fence after the store: 100 of 100).
 __global__ void doorbell_ring_kernel(uint32_t* seq) {
     __threadfence_system();

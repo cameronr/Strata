@@ -15,9 +15,6 @@
 #pragma once
 
 #include <cstdint>
-#if defined(__HIPCC__) && defined(STRATA_HIP_GFX906)   // PR #638: the gfx906 compat build only
-#include <hip/hip_runtime.h>
-#endif
 
 #include "strata/kernels/rope_scaling.hpp"
 
@@ -50,7 +47,7 @@ inline int rope_mode(const RopeScaling& scaling, RopeTab& rt) {
     return rt.cos != nullptr ? 1 : scaling.type != RopeScalingType::None ? 2 : 0;
 }
 
-#if defined(__CUDACC__) || defined(__HIPCC__)
+#if defined(__CUDACC__)
 /// ggml rope_multi, is_imrope, sections {11, 11, 10, 0}: sector = pair % 32; sector % 3 == 1 -> h (sector < 33),
 /// == 2 -> w (sector < 30), == 0 -> t (sector < 33).  For pairs 0..31 all three bounds hold, so it is pair % 3.
 __device__ __forceinline__ int mrope_pos(const int32_t* tab, int pos, int pair) {

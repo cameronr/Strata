@@ -169,7 +169,7 @@ struct Options {
     std::string native_head_gguf;      // native output.weight experiment; same model shard as the pack
     std::vector<std::string> native_dense_gguf; // repeat for native GDN/QSA projection shards
     /// Plan v0.3 P1: the whole native arithmetic set as ONE switch (model shard 1). It enables exactly the
-    /// combination recorded in bench/results/2026-09-23-attention-ple plus the native indexer, and never the
+    /// combination recorded in upstream Strata's bench/results/2026-09-23-attention-ple plus the native indexer, and never the
     /// <=256-token attention adapter. It becomes the default once P0 shows it is not slower.
     std::string native_preset;
     /// Plan v0.3 P2: how the n-gram table is read. Direct (default) = unbuffered SSD reads, table never in RAM.

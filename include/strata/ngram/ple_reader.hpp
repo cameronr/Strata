@@ -12,7 +12,7 @@
 // kept at most `max_inflight` deep, so a chunk's reads can run while the previous chunk computes.
 //
 // THE ROW CACHE IS NOT THE TABLE. It keeps rows this process has already fetched (90 bytes each, bounded,
-// clock eviction). Measured on the frozen corpus (bench/results/2026-09-23-ngram-io): 1M rows (~95 MB)
+// clock eviction). Measured on the frozen corpus (upstream Strata's bench/results/2026-09-23-ngram-io): 1M rows (~95 MB)
 // would serve up to ~82% of reads; within one long prompt 20-34% of rows recur. Capacity 0 disables it.
 #pragma once
 

@@ -363,7 +363,7 @@ int fused_multi_lds_parity(const float* d_norm, const uint16_t* d_down, const ui
     check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "multi stream");
     // the uploads above (and the caller's weights) run on the legacy stream, which the non-blocking `stream` does not wait for
     check(cudaDeviceSynchronize(), "multi setup");
-    // Max T forces the HIP kernel's full dynamic-LDS request: 8 * 1280 * sizeof(float) = 40 KiB.
+    // Max T: the kernel's largest dynamic shared-memory request, 8 * 1280 * sizeof(float) = 40 KiB.
     fused_gr_read_multi(args.data(), T, d_xn, stream);
     check(cudaStreamSynchronize(stream), "multi max-T sync");
     const Snapshot multi = snapshot();

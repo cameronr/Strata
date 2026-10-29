@@ -10,7 +10,7 @@
 // from how many drafted tokens the verify pass accepted.
 //
 // Cost: T(n tokens) = dense(n) + experts(n) + sync + draft. The defaults are the 23 Sep measurements:
-// dense ratio per token count from native MMVQ (bench/results/2026-09-23-mmvq-multi), distinct experts per window
+// dense ratio per token count from native MMVQ (upstream Strata's bench/results/2026-09-23-mmvq-multi), distinct experts per window
 // from the routing trace (2026-09-23-spec-economics), extra-token CPU cost 0.2-0.35 (2026-09-23-cpu-expert-multi).
 // Replace them with in-engine measurements through `CostModel`.
 #pragma once
