@@ -149,7 +149,14 @@ less ~5 GB, every card of a layer split counted) must still hold at least half o
 slots, and the slots may take at most a fifth of it, up to 4 slots. With Q2_0 at 32K that is 3 slots on a 24 GB
 card, 4 from 32 GB or on a split such as 2 x 16 GB; IQ3_S needs 32 GB or a split. Everywhere else (any 12 or 16 GB
 card alone) it stays at one at a time and setup says: "parallel N reduces waiting for several users but costs
-about 10-25% speed per request on this card". `--parallel N` is honoured as asked either way.
+about 10-25% speed per request on this card". `--parallel N` asks for N; the engine carves what fits and says so.
+
+The startup fit counts everything a slot takes (this branch, phase 9): the session, and with `--batch-mtp` also
+its draft K/V store and the batch commit's per-slot snapshots (0.67 against 0.52 GiB each at a 30K context on
+this rig; the `each added slot takes ...` log line names the parts). When the wanted count does not fit, the
+engine carves the slots that do rather than none (Basalt's partial start): `--parallel 8` at a 30K context logs
+`does not fit ...: starting with 4 slots`, and `INFO ... batch_slots=4`, the `BGEN` bound and the server's
+routing all speak the carved count. Only when not even one slot fits does it run without batch slots.
 
 ## How the server uses the slots
 
@@ -420,6 +427,31 @@ compares the tier as a whole, not "batch windows only": the solo decode speed mo
 more varied workload the gain may be smaller (not measured). Upstream main runs no tier in batch windows, and this
 was not measured against an upstream binary.
 
+**This branch (phase 9).** The paragraphs above describe upstream's stack; this worktree has no `--adapt-async`,
+no `--adapt-min-gain` and no per-window `strata batch:` stats line, and until phase 9 its batch windows never
+triggered a round at all: they counted routing, but the ranking ran only beside solo windows and the landed peer
+moves waited for a solo window to be admitted into residency - a server living in batch windows froze both tiers
+exactly when its expert mix was shifting hardest. Now a batch window advances the same `--adapt-every` rhythm,
+admits the landed moves and stages the next ones at its own shape; the ranking thread lands before the next window
+and before any request starts, and the tiers still stand while a prompt reads beside the slots (that read may hold
+a loan of cache slots). `STRATA_BATCH_ADAPT=0` restores the frozen shape. The exactness settings are untouched:
+they freeze the tier anyway (`--adapt-every 0`), and the digest streams are byte-identical.
+
+Measured on this rig (RTX 4090 + 5070 Ti, production shape: learned profile, `--second-gpu 0`, `--batch-mtp`,
+`--adapt-every 4`; two same-domain coding conversations in two slots, greedy, 200 tokens each, all sent at once;
+two runs per row, aggregate tok/s):
+
+| tier in batch windows | aggregate tok/s |
+| --- | ---: |
+| `STRATA_BATCH_ADAPT=1` (the default now) | **64.5, 64.5** |
+| `STRATA_BATCH_ADAPT=0` (the old frozen shape) | 51.1, 52.0 |
+| one of those conversations alone, rhythm on | 52.2 |
+
+The rhythm is what makes the slots pay here: with the tiers frozen, two batched conversations do not beat one
+alone; with the tiers keeping up, they are 24 % over it. (The saved-profile word counts move equally under both
+switches - the save writes the routing counts, which accumulate either way - so the tok/s is the evidence of
+movement, not the file diff.)
+
 ## Exactness
 
 A batch row's arithmetic is the single-token window's, so with greedy decoding **every conversation of a batch
@@ -492,6 +524,27 @@ on the CPU: a batch window over 4 conversations reads 24 CPU experts per layer a
 what the 4 tokens cost one after the other (`strata batch:` in the engine log: 54 ms per 4-row window, ~20 ms per
 1-row window). This is why setup leaves a 12 GB card at one at a time. Cards that hold most experts in VRAM, and a
 layer split, are where the slots also add speed (below).
+
+### Domain mixes on this rig (this branch)
+
+The shapes the phase-9 plan asks to name: same-domain pairs, a domain mix, and a subagent swarm over a shared
+prefix. Production-shape engine (RTX 4090 + 5070 Ti, learned profile, `--second-gpu 0`, `--batch-mtp`,
+`--adapt-every 4`, slots as noted), conversations sent at once, greedy, 200 tokens each; *first token* is BGEN
+to the slot's first token; *aggregate* is all tokens over wall from first send to last finish. *peer off* drops
+`--second-gpu` (same profile, same main-GPU cache):
+
+| shape | slots | peer on: aggregate, first token | peer off: aggregate, first token |
+| --- | ---: | --- | --- |
+| one coding session | 1 | 52.2 tok/s, 1.0 s | 22.0 tok/s, 5.7 s |
+| two coding sessions, same domain | 2 | 65.3 tok/s, 1.7 s | 25.8 tok/s, 10.7 s |
+| coding + Chinese chat | 2 | 60.7 tok/s, 1.6 s | 26.9 tok/s, 9.5 s |
+| four subagent tasks, shared 1.2K-token repo prefix | 4 | 55.6 tok/s, 3.8-6.4 s | 14.9 tok/s, 24.9-34.5 s |
+
+Two things the table says. The peer tier is the whole story on this pair: without the 4090 holding 881 experts,
+batched decode is 2.4-3.7x slower and admissions crawl (the reads themselves slow down, and they serialize). And
+the domain mix moves the aggregate a little (same-domain pair 65 against mixed pair 61: two conversations routing
+to overlapping experts share more VRAM hits), while the swarm's four 1.2K-token prompts make first tokens an
+admission story (3.8-6.4 s with the peer, the reads going one after the other) rather than a decode one.
 
 A 4-GPU layer split (4 x 16 GB, PCIe Gen3), IQ3_S, `--batch 8 --batch-groups 4 --trim-stage-weights`, through
 the HTTP server, 400 tokens per answer, temperature 0.7 (PR #559):
