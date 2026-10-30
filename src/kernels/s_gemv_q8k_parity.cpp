@@ -13,6 +13,7 @@
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/s_gemv.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -27,13 +28,6 @@ namespace {
 
 using strata::kernels::SForm;
 using strata::kernels::Codebook;
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 /// The host decode, transcribed from `docs/pack-format.md`'s rule: `value = cb[code] * scale + offset`, with
 /// the integer bias applied INSIDE the integer domain before the one multiply.

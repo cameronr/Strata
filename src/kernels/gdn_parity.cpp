@@ -21,6 +21,7 @@
 #include "strata/kernels/gdn.hpp"
 #include "strata/kernels/fused_gdn.hpp"
 #include "strata/kernels/verify_kernels.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -33,13 +34,6 @@
 #include <vector>
 
 namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 float sigmoid_f(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 
@@ -83,15 +77,6 @@ void ref_conv(std::vector<float>& cs, const std::vector<float>& x, const std::ve
         for (int i = 0; i < dc - 2; ++i) cs[(size_t) (i * C + c)] = cs[(size_t) ((i + 1) * C + c)];
         cs[(size_t) ((dc - 2) * C + c)] = x[(size_t) c];
     }
-}
-
-double rel_l1(const std::vector<float>& a, const std::vector<float>& b) {
-    double d = 0, m = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        d += std::fabs((double) a[i] - (double) b[i]);
-        m += std::fabs((double) a[i]);
-    }
-    return d / (m > 1e-30 ? m : 1e-30);
 }
 
 }  // namespace

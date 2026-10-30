@@ -19,6 +19,7 @@
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/s_gemv.hpp"
 #include "strata/kernels/shared_expert.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -31,13 +32,6 @@
 #include <vector>
 
 namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 // THE CONVERSIONS COME FROM `f16_bits.hpp`, and this test used to carry its own copies.  The private
 // `f16_to_f32` here flushed fp16 SUBNORMALS to zero (`if (ex == 0) out = sign`), so 0x0001 decoded as 0.0
@@ -54,14 +48,6 @@ inline float f16_to_f32(uint16_t h) { return f32_from_f16(h); }
 // Normalised L1 difference, used by the moe_combine checks.  (The shared-expert checks above report worst
 // RELATIVE error per output instead, because there the question is per-element accuracy; here it is whether a
 // whole rival READING is distinguishable, which is a vector-level question.)
-double rel_l1(const std::vector<float>& a, const std::vector<float>& b) {
-    double d = 0, m = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        d += std::fabs((double) a[i] - (double) b[i]);
-        m += std::fabs((double) a[i]);
-    }
-    return d / (m > 1e-30 ? m : 1e-30);
-}
 
 /// `block_q8_0` on the host: 34 bytes per 32 elements, `fp16 d` then `int8 qs[32]`.  Written from the LAYOUT
 /// rather than from the kernel, so it can disagree with it.

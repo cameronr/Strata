@@ -19,6 +19,7 @@
 // two are not the same code.
 #include "strata/artifact/dequant.hpp"
 #include "strata/kernels/s_gemv.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -33,13 +34,6 @@
 #include <vector>
 
 namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 // Finite, exactly representable fp16 patterns WITH full mantissas.  Not powers of two: with only powers of
 // two every product is exact and the comparison cannot round, which is how the first version of s2_gemv's test

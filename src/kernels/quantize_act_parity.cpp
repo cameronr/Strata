@@ -13,6 +13,7 @@
 //     round trip = q * d16
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/f16_bits.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -26,13 +27,6 @@
 #include <vector>
 
 namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 // THE CONVERSIONS COME FROM `f16_bits.hpp`, and this test used to carry its own.  The private `f16_bits_to_f32`
 // below flushed fp16 SUBNORMALS to zero, and the private encoder returned NaN for finite fp16 overflow - both

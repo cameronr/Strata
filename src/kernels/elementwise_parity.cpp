@@ -15,6 +15,7 @@
 #include "strata/kernels/dequant_bf16.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/f16_bits.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -25,26 +26,6 @@
 #include <random>
 #include <string>
 #include <vector>
-
-namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
-
-double rel_l1(const std::vector<float>& a, const std::vector<float>& b) {
-    double d = 0, m = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        d += std::fabs((double) a[i] - (double) b[i]);
-        m += std::fabs((double) a[i]);
-    }
-    return d / (m > 1e-30 ? m : 1e-30);
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;

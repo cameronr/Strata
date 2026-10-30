@@ -9,6 +9,7 @@
 // DIFFER - then requires the kernel to agree with the specified one.  Without the first half, the test would
 // pass against either order.
 #include "strata/kernels/sampler.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -23,13 +24,6 @@
 #include <vector>
 
 namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 // The host reference for the specified order: top_k -> top_p -> temperature -> argmax.
 // `temp_first` swaps the first and last stages, which is the intuitive-but-wrong order.

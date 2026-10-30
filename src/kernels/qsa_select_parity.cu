@@ -5,6 +5,7 @@
 // ties, zero scores and every tail length.  --bench times both.
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_select.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -177,19 +178,6 @@ void topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blo
 namespace {
 
 using namespace strata::kernels;
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
-
-template <typename T> T* dev(size_t n) {
-    T* p = nullptr;
-    check(cudaMalloc(&p, n * sizeof(T)), "cudaMalloc");
-    return p;
-}
 
 constexpr int64_t kTrainedCells = 262144;
 constexpr int QD = 512;                 // a query's floats: 4 heads x 128

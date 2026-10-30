@@ -229,46 +229,28 @@ if(STRATA_ENABLE_CUDA)
                          PASS_REGULAR_EXPRESSION "--deterministic-adapt")
   endif()
 
-  # The tests are HOST C++ files that call cudaMalloc/cudaMemcpy themselves, so they need the toolkit headers
-  # and cudart explicitly: enabling the CUDA language gives those to .cu sources automatically, but a .cpp
-  # target is just a C++ target and gets neither.
+  # A kernel test: a program calling the CUDA runtime, linked with strata_kernels (and LIBS), and the ctest test
+  # running it with ARGS (none with NO_TEST). A host .cpp gets the toolkit's headers and cudart explicitly: enabling
+  # the CUDA language gives them to .cu sources only.
+  function(strata_kernel_test name source)
+    cmake_parse_arguments(PARSE_ARGV 2 T "NO_TEST" "" "LIBS;ARGS")
+    add_executable(${name} ${source})
+    target_include_directories(${name} PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    target_link_libraries(${name} PRIVATE strata_kernels ${T_LIBS} CUDA::cudart)
+    if(NOT T_NO_TEST)
+      add_test(NAME ${name} COMMAND ${name} ${T_ARGS})
+    endif()
+  endfunction()
+
   # the coalesced Q8_0 dequant against the per-block kernel: the same bytes in BF16, FP16 and FP32
-  add_executable(dequant_q8_0_identity src/kernels/dequant_q8_0_identity.cu)
-  target_link_libraries(dequant_q8_0_identity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME dequant_q8_0_identity COMMAND dequant_q8_0_identity)
-
-  add_executable(iq_parity src/kernels/iq_parity.cpp)
-  target_include_directories(iq_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(iq_parity PRIVATE strata_kernels CUDA::cudart)
-  add_executable(shared_expert_parity src/kernels/shared_expert_parity.cpp)
-  target_include_directories(shared_expert_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(shared_expert_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME shared_expert_parity COMMAND shared_expert_parity --selftest)
-
-  add_executable(gr_parity src/kernels/gr_parity.cpp)
-  target_include_directories(gr_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(gr_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME gr_parity COMMAND gr_parity --selftest)
-
-  add_executable(draft_proxy_parity src/kernels/draft_proxy_parity.cpp)
-  target_include_directories(draft_proxy_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(draft_proxy_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME draft_proxy_parity COMMAND draft_proxy_parity --selftest)
-
-  add_executable(gdn_parity src/kernels/gdn_parity.cpp)
-  target_include_directories(gdn_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(gdn_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME gdn_parity COMMAND gdn_parity --selftest)
-
-  add_executable(s2_gemv_q8_parity src/kernels/s2_gemv_q8_parity.cpp)
-  target_include_directories(s2_gemv_q8_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(s2_gemv_q8_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME s2_gemv_q8_parity COMMAND s2_gemv_q8_parity --selftest)
-
-  add_executable(sampler_parity src/kernels/sampler_parity.cpp)
-  target_include_directories(sampler_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(sampler_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME sampler_parity COMMAND sampler_parity --selftest)
+  strata_kernel_test(dequant_q8_0_identity src/kernels/dequant_q8_0_identity.cu)
+  strata_kernel_test(iq_parity src/kernels/iq_parity.cpp NO_TEST)
+  strata_kernel_test(shared_expert_parity src/kernels/shared_expert_parity.cpp ARGS --selftest)
+  strata_kernel_test(gr_parity src/kernels/gr_parity.cpp ARGS --selftest)
+  strata_kernel_test(draft_proxy_parity src/kernels/draft_proxy_parity.cpp ARGS --selftest)
+  strata_kernel_test(gdn_parity src/kernels/gdn_parity.cpp ARGS --selftest)
+  strata_kernel_test(s2_gemv_q8_parity src/kernels/s2_gemv_q8_parity.cpp ARGS --selftest)
+  strata_kernel_test(sampler_parity src/kernels/sampler_parity.cpp ARGS --selftest)
   set_tests_properties(sampler_parity PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0")
   # the same fixtures on the other two sampled paths: the one-block kernel and the 0.1.20 kernel
   add_test(NAME sampler_parity_one_block COMMAND sampler_parity --selftest)
@@ -276,35 +258,12 @@ if(STRATA_ENABLE_CUDA)
   add_test(NAME sampler_parity_old COMMAND sampler_parity --selftest)
   set_tests_properties(sampler_parity_old PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=1;STRATA_SAMPLER_ONE_BLOCK=0")
 
-  add_executable(rope_parity src/kernels/rope_parity.cpp)
-  target_include_directories(rope_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(rope_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME rope_parity COMMAND rope_parity --selftest)
-
-  add_executable(quantize_act_parity src/kernels/quantize_act_parity.cpp)
-  target_include_directories(quantize_act_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(quantize_act_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME quantize_act_parity COMMAND quantize_act_parity --selftest)
-
-  add_executable(s_gemv_parity src/kernels/s_gemv_parity.cpp)
-  target_include_directories(s_gemv_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(s_gemv_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME s_gemv_parity COMMAND s_gemv_parity --selftest)
-
-  add_executable(elementwise_parity src/kernels/elementwise_parity.cpp)
-  target_include_directories(elementwise_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(elementwise_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME elementwise_parity COMMAND elementwise_parity --selftest)
-
-  add_executable(s_gemv_q8k_parity src/kernels/s_gemv_q8k_parity.cpp)
-  target_include_directories(s_gemv_q8k_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(s_gemv_q8k_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME s_gemv_q8k_parity COMMAND s_gemv_q8k_parity --selftest)
-
-  add_executable(qsa_parity src/kernels/qsa_parity.cpp)
-  target_include_directories(qsa_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(qsa_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME qsa_parity COMMAND qsa_parity --selftest)
+  strata_kernel_test(rope_parity src/kernels/rope_parity.cpp ARGS --selftest)
+  strata_kernel_test(quantize_act_parity src/kernels/quantize_act_parity.cpp ARGS --selftest)
+  strata_kernel_test(s_gemv_parity src/kernels/s_gemv_parity.cpp ARGS --selftest)
+  strata_kernel_test(elementwise_parity src/kernels/elementwise_parity.cpp ARGS --selftest)
+  strata_kernel_test(s_gemv_q8k_parity src/kernels/s_gemv_q8k_parity.cpp ARGS --selftest)
+  strata_kernel_test(qsa_parity src/kernels/qsa_parity.cpp ARGS --selftest)
 
   # ---- P2.S4: the PLE n-gram hash, the IQ4_NL table read, and the PLE block ----
   # `ngram.cpp` is host-only but lives in `strata_kernels` because `ple.cu` shares its geometry constants, and
@@ -314,32 +273,19 @@ if(STRATA_ENABLE_CUDA)
   # artifacts, so the working directory is pinned to the source tree and a missing input is a hard error
   # INSIDE the test.  A test that passes by finding nothing to compare is the failure mode this project keeps
   # re-learning.
-  add_executable(kv_q8_parity src/kernels/kv_q8_parity.cpp)
-  target_include_directories(kv_q8_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(kv_q8_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME kv_q8_parity COMMAND kv_q8_parity)
+  strata_kernel_test(kv_q8_parity src/kernels/kv_q8_parity.cpp)
 
   # The verify window's batched kernels vs the per-token kernel sequences they replace, bitwise (synthetic data).
-  add_executable(verify_parity src/kernels/verify_parity.cpp)
-  target_include_directories(verify_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(verify_parity PRIVATE strata_kernels strata_prefill strata_kernels_cpu CUDA::cudart)
-  add_test(NAME verify_parity COMMAND verify_parity --selftest)
+  strata_kernel_test(verify_parity src/kernels/verify_parity.cpp LIBS strata_prefill strata_kernels_cpu ARGS --selftest)
 
   # The QSA block scores and top-k against the kernels they replaced, kept in the test: bitwise (synthetic data).
-  add_executable(qsa_select_parity src/kernels/qsa_select_parity.cu)
-  target_link_libraries(qsa_select_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME qsa_select_parity COMMAND qsa_select_parity)
+  strata_kernel_test(qsa_select_parity src/kernels/qsa_select_parity.cu)
   # The MMVQ of 2..8 tokens from interleaved activations against native_mmvq: bitwise (synthetic matrices).
-  add_executable(mmvq_il_parity src/kernels/mmvq_il_parity.cu)
-  target_link_libraries(mmvq_il_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME mmvq_il_parity COMMAND mmvq_il_parity)
+  strata_kernel_test(mmvq_il_parity src/kernels/mmvq_il_parity.cu)
 
   # native_mmvq's multi_exact contract, bitwise: a T-column call against T single-column calls on the same Q8_1
   # bytes, with the flag off as the negative control (synthetic, GPU, no model; the control assumes 32-lane warps)
-  add_executable(mmvq_multi_parity src/kernels/mmvq_multi_parity.cpp)
-  target_include_directories(mmvq_multi_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(mmvq_multi_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME mmvq_multi_parity COMMAND mmvq_multi_parity)
+  strata_kernel_test(mmvq_multi_parity src/kernels/mmvq_multi_parity.cpp)
 
   # Plan v0.3 P0.1: working-set lock of a host region (CPU only).
   add_executable(platform_memory_test src/platform/memory_test.cpp)

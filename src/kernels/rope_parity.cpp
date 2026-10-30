@@ -13,6 +13,7 @@
 // failure - the NEOX pairing being wrong - is a PERMUTATION that a loose tolerance over all 256 dims would
 // happily accept.
 #include "strata/kernels/rope.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -23,17 +24,6 @@
 #include <random>
 #include <string>
 #include <vector>
-
-namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;

@@ -9,9 +9,11 @@
 //      fixed without being fixed.
 //   3. The measured size of that difference is reported, so the number in the state file is one this test
 //      produces rather than one quoted from elsewhere.
+#include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/s_gemv.hpp"
 #include "strata/kernels/s2_gemv_q8.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -21,17 +23,6 @@
 #include <cstring>
 #include <random>
 #include <vector>
-
-namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
-
-}  // namespace
 
 int main(int argc, char** argv) {
     bool selftest = false;
@@ -129,29 +120,8 @@ int main(int argc, char** argv) {
     // BITS and therefore changes the EXPONENT - x = 2.0 became 0x3C80 = 1.25 - so the two paths were driven by
     // unrelated activations and the comparison reported 2770%.  The number was a symptom of the fixture, and
     // the fixture is what the check exists to be able to trust.
-    auto f32_to_f16 = [](float f) -> uint16_t {
-        uint32_t b;
-        std::memcpy(&b, &f, 4);
-        const uint32_t sign = (b >> 16) & 0x8000u;
-        int exp = (int) ((b >> 23) & 0xFF) - 127 + 15;
-        uint32_t man = b & 0x7FFFFFu;
-        if (exp >= 31) return (uint16_t) (sign | 0x7C00u | (man ? 0x200u : 0u));
-        if (exp <= 0) {
-            if (exp < -10) return (uint16_t) sign;
-            man |= 0x800000u;
-            const uint32_t sh = (uint32_t) (14 - exp);
-            uint32_t h = (man >> sh) & 0x3FFu;
-            const uint32_t rem = man & ((1u << sh) - 1u);
-            if (rem > (1u << (sh - 1)) || (rem == (1u << (sh - 1)) && (h & 1u))) ++h;
-            return (uint16_t) (sign | h);
-        }
-        uint16_t h = (uint16_t) (sign | ((uint32_t) exp << 10) | (man >> 13));
-        const uint32_t rem = man & 0x1FFFu;
-        if (rem > 0x1000u || (rem == 0x1000u && (h & 1u))) ++h;
-        return h;
-    };
     std::vector<uint16_t> hx((size_t) n_in);
-    for (long long i = 0; i < n_in; ++i) hx[(size_t) i] = f32_to_f16(x[(size_t) i]);
+    for (long long i = 0; i < n_in; ++i) hx[(size_t) i] = strata::kernels::f16_from_f32(x[(size_t) i]);
     uint16_t* d_hx = nullptr;
     check(cudaMalloc(&d_hx, hx.size() * sizeof(uint16_t)), "m hx");
     check(cudaMemcpy(d_hx, hx.data(), hx.size() * sizeof(uint16_t), cudaMemcpyHostToDevice), "c hx");

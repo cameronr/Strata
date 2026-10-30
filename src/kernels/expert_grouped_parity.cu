@@ -12,6 +12,7 @@
 #include "iq_dot.cuh"
 
 #include "ggml.h"
+#include "parity.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -25,13 +26,6 @@
 namespace {
 
 constexpr int64_t H = 2560, FF = 640, K = 10, MAXT = 8, SLOTS = 48, DISTINCT = 4;
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 }  // namespace
 

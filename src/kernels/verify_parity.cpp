@@ -25,6 +25,7 @@
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/prefill/kernels.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -48,18 +49,6 @@ const strata::kernels::RopeScaling kTestRope = [] {
 
 namespace {
 
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
-
-template <typename T> T* dev(size_t n) {
-    T* p = nullptr;
-    check(cudaMalloc(&p, n * sizeof(T)), "cudaMalloc");
-    return p;
-}
 template <typename T> void up(T* d, const std::vector<T>& h) {
     check(cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice), "upload");
 }

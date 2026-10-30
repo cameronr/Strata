@@ -47,6 +47,7 @@
 //     1e-3 for FP16 paths.  That difference is the FP16 CACHE's cost, not the kernel's, and it is kept
 //     separate so a kernel bug cannot hide inside it.
 #include "strata/kernels/qsa.hpp"
+#include "parity.hpp"
 
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/rope.hpp"
@@ -67,13 +68,6 @@ namespace {
 
 using strata::kernels::f16_from_f32;
 using strata::kernels::f32_from_f16;
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 /// A device buffer with the boilerplate folded in.  A test that allocates twenty buffers by hand spends its
 /// attention on memcpy arguments instead of on the kernel.
@@ -110,15 +104,6 @@ std::vector<float> as_f(const std::vector<double>& v) {
 /// Relative error against the magnitude of the TERMS.  See the header comment.
 double rel_terms(double want, double got, double terms) {
     return std::fabs(want - got) / (terms > 1e-30 ? terms : 1e-30);
-}
-
-double rel_l1(const std::vector<double>& a, const std::vector<double>& b) {
-    double d = 0, m = 0;
-    for (size_t i = 0; i < a.size(); ++i) {
-        d += std::fabs(a[i] - b[i]);
-        m += std::fabs(a[i]);
-    }
-    return d / (m > 1e-30 ? m : 1e-30);
 }
 
 int g_bad = 0;

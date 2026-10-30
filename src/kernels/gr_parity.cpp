@@ -21,6 +21,7 @@
 //      Asserted as a property, not as a value, because that is what the source comment claims.
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/fused_gr.hpp"
+#include "parity.hpp"
 
 #include <cuda_runtime.h>
 
@@ -34,13 +35,6 @@
 #include <vector>
 
 namespace {
-
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 
 /// The same rule the kernel uses, on the host - `ref/quant.py::bf16`.
 float to_bf16(float f) {
