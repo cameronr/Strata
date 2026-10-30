@@ -627,7 +627,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         // the projections of the group's tokens: 2+ tokens are quantized with the interleaved copy the multi-token
         // kernels read
         auto quant = [&](const float* x, int64_t n_in) {
-            if (n >= 2) native_quantize_q8_1_il(x, xq_, xil_, (int) n_in, n, cs);
+            if (n >= 2 && n <= 8) native_quantize_q8_1_il(x, xq_, xil_, (int) n_in, n, cs);
             else native_quantize_q8_1(x, xq_, (int) n_in, n, cs);
         };
         auto mm = [&](int type, const void* w, float* y, int64_t n_in, int64_t n_out, cudaStream_t ps) {
@@ -1224,7 +1224,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     copy_from_mapped(shead_->input(), head_mixed_, (int64_t) T * N, cs);
                     mapped_bump(shead_->handoff(), cs);
                 }
-                if (T >= 2) {
+                if (T >= 2 && T <= 8) {
                     native_quantize_q8_1_il(head_mixed_, xq_, xil_, (int) N, T, cs);
                     native_mmvq_il(head_->type(), head_->weights(), xq_, xil_, head_logits_, (int) N, (int) head_rows_,
                                    T, cs);

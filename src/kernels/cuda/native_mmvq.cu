@@ -784,7 +784,7 @@ __global__ void native_small_mmvq_kernel(const Weight* __restrict__ w,
 // row) value is accumulated over kbx in the same order, summed across warps in the same order and reduced with
 // the same warp tree as the ncols = 1 kernel, so every column is BITWISE equal to a single-column call on that
 // column (checked by bench/micro/native_mmvq_multi.cpp). The ncols = 1 kernels are untouched.
-constexpr int MAX_NCOLS = 8;
+constexpr int MAX_NCOLS = 16;
 
 // Each format splits its dot product into `load` (everything that depends only on the weight block: codes,
 // unpacked scales, block scale) and `apply` (the activation loads and the original *_impl expression). `load` runs
@@ -1080,7 +1080,15 @@ void launch_multi(const void* weights, const void* x_q8_1, float* y, int n_in, i
         case 6: launch_multi_n<F, 6>(weights, x_q8_1, y, n_in, n_out, s); break;
         case 7: launch_multi_n<F, 7>(weights, x_q8_1, y, n_in, n_out, s); break;
         case 8: launch_multi_n<F, 8>(weights, x_q8_1, y, n_in, n_out, s); break;
-        default: throw std::invalid_argument("native MMVQ multi-column launch requires 2 <= ncols <= 8");
+        case 9: launch_multi_n<F, 9>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 10: launch_multi_n<F, 10>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 11: launch_multi_n<F, 11>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 12: launch_multi_n<F, 12>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 13: launch_multi_n<F, 13>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 14: launch_multi_n<F, 14>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 15: launch_multi_n<F, 15>(weights, x_q8_1, y, n_in, n_out, s); break;
+        case 16: launch_multi_n<F, 16>(weights, x_q8_1, y, n_in, n_out, s); break;
+        default: throw std::invalid_argument("native MMVQ multi-column launch requires 2 <= ncols <= 16");
     }
 }
 
@@ -1374,7 +1382,7 @@ void validate_shape(int n_in, int ncols, int block_elems = Q8K) {
     if (n_in <= 0 || n_in % block_elems != 0) {
         throw std::invalid_argument("native MMVQ requires n_in > 0 and divisible by its block element count");
     }
-    if (ncols < 1 || ncols > MAX_NCOLS) throw std::invalid_argument("native MMVQ requires 1 <= ncols <= 8");
+    if (ncols < 1 || ncols > MAX_NCOLS) throw std::invalid_argument("native MMVQ requires 1 <= ncols <= 16");
 }
 void validate_pointer(const void* p) {
     if (!p || reinterpret_cast<std::uintptr_t>(p) % 4 != 0) {
@@ -1790,7 +1798,7 @@ std::size_t native_q8_1_il_bytes(int n_in, int ncols) {
 
 void native_quantize_q8_1_il(const float* x, void* x_q8_1, void* x_il, int n_in, int ncols, void* stream) {
     validate_shape(n_in, ncols);
-    if (ncols < 2) throw std::invalid_argument("native_quantize_q8_1_il requires 2 <= ncols <= 8");
+    if (ncols < 2 || ncols > 8) throw std::invalid_argument("native_quantize_q8_1_il requires 2 <= ncols <= 8");
     validate_pointer(x);
     validate_pointer(x_q8_1);
     validate_pointer(x_il);
@@ -1838,6 +1846,10 @@ void native_mmvq_il_tune(int rows, bool one) {
 
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
                     int n_out, int ncols, void* stream) {
+    if (ncols > 8) {   // the interleaved copy holds at most 8 columns; wide windows take native_mmvq's multi kernels
+        native_mmvq(ggml_type, weights, x_q8_1, y, n_in, n_out, ncols, stream);
+        return;
+    }
     if (ncols >= 2 && !g_tune_rows && native_mma(ggml_type, weights, x_il, y, n_in, n_out, ncols, stream)) return;
     const bool il = ggml_type == 23 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 8;
     const int r = g_tune_rows && (ncols > 1 || g_tune_one) ? g_tune_rows : il_rows(ggml_type, ncols, n_out);

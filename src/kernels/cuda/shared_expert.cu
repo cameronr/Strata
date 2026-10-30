@@ -170,15 +170,16 @@ void shared_expert_gate_rows(float* out, float* g, int64_t n_embd, int n_tok, vo
 void shared_expert_multi(int n_tok, const float* x, const NativeSharedWeights& nw, const uint16_t* gate_inp_bf16,
                          float* gate, float* up, float* g, float* out, int64_t n_embd, int64_t n_ff, void* stream,
                          void* gate_stream) {
-    if (n_tok < 1 || n_tok > 8 || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream ||
+    if (n_tok < 1 || n_tok > 16 || !nw.q8_1 || !nw.gate_data || !nw.up_data || !nw.down_data || !stream ||
         !gate_stream || !native_bf16)
-        throw std::invalid_argument("shared_expert_multi: needs 1..8 tokens, native weights and gate, scratch and "
+        throw std::invalid_argument("shared_expert_multi: needs 1..16 tokens, native weights and gate, scratch and "
                                     "streams");
     cudaStream_t cs = (cudaStream_t) stream;
     bf16_gemv_fp32_mmvf_multi(x, gate_inp_bf16, g, n_embd, 1, n_tok, gate_stream);
-    // native_mmvq_il's kernels where they are the faster (1 token, or 2+ with the interleaved copy)
-    const bool il = n_tok == 1 || nw.q8_1_il;
-    if (n_tok >= 2 && nw.q8_1_il) native_quantize_q8_1_il(x, nw.q8_1, nw.q8_1_il, (int) n_embd, n_tok, stream);
+    // native_mmvq_il's kernels where they are the faster (1 token, or 2..8 with the interleaved copy, which holds
+    // at most 8 columns)
+    const bool il = n_tok == 1 || (nw.q8_1_il && n_tok <= 8);
+    if (n_tok >= 2 && n_tok <= 8 && nw.q8_1_il) native_quantize_q8_1_il(x, nw.q8_1, nw.q8_1_il, (int) n_embd, n_tok, stream);
     else native_quantize_q8_1(x, nw.q8_1, (int) n_embd, n_tok, stream);
     auto proj = [&](int type, const void* w, float* y) {
         if (il) native_mmvq_il(type, w, nw.q8_1, nw.q8_1_il, y, (int) n_embd, (int) n_ff, n_tok, stream);

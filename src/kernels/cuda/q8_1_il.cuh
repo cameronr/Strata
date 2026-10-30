@@ -16,6 +16,7 @@ namespace {
 // NC columns of the block-major (PM false) or position-major copy: u(b, p, o) = int p of q8_1 block b of every column,
 // scales(b, o) = their scales
 template <int NC, bool PM> struct Q81Il {
+    static_assert(NC >= 2 && NC <= 8, "the interleaved copy holds at most 8 columns per position");
     static constexpr int CP = native_q8_1_il_cp(NC);
     const int* __restrict__ q;
     const float* __restrict__ d;

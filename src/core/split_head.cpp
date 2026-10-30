@@ -108,7 +108,7 @@ bool SplitHead::capture(int T, bool logits, std::string& err) {
     }
     try {
         copy_from_mapped(mixed_, h_in_, (int64_t) T * n_in_, s_);
-        if (T >= 2) {
+        if (T >= 2 && T <= 8) {
             native_quantize_q8_1_il(mixed_, xq_, xil_, (int) n_in_, T, s_);
             native_mmvq_il(type_, w_, xq_, xil_, out_, (int) n_in_, (int) rows_, T, s_);
         } else {
