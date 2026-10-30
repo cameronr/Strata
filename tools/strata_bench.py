@@ -14,7 +14,8 @@ real HTTP API, three runs each, medians reported:
                 of a file to the conversation and continuing from the model's own earlier replies - how many prompt
                 tokens the conversation cache reused, how many had to be read again, time to first token per turn
   5. --clients N   N requests at once (the server needs --batch for them to run together): total tok/s, p50/p95 latency
-                   (--client-prompt TOKENS gives each one a context prompt of about that many tokens)
+                   (--client-prompt TOKENS sizes each request's prompt, --client-tokens N its output, and
+                   --client-warm TOKENS warms each client's prefix first: cached agent sessions, untimed)
   6. --long 32K    the same prompt test at about 32,768 tokens
 
 Speeds are the engine's own timings (the `timings` of the answer: prompt_per_second, predicted_per_second); time to first
@@ -224,10 +225,12 @@ def pctl(values, p):
 # ---------------------------------------------------------------------------------------------------- the suite
 class Suite:
     def __init__(self, base, key, ctx, runs, think, log=print, want_clients=0, want_long=False, quick=False,
-                 want_client_prompt=0):
+                 want_client_prompt=0, want_client_tokens=0, want_client_warm=0):
         self.base, self.key, self.ctx, self.runs, self.think, self.log = base, key, ctx, runs, think, log
         self.clients, self.want_long = want_clients, want_long
         self.client_prompt = want_client_prompt
+        self.client_tokens = want_client_tokens or BURST_MAX_TOKENS
+        self.client_warm = want_client_warm
         self.quick = quick
         self.nonce = str(int(time.time()))
         self.tokens_per_word, self.overhead = 1.1, 40
@@ -371,8 +374,27 @@ class Suite:
                              "first_turn_ttft_s": stat(s[0]["ttft_s"] for s in sessions if s and s[0]["ok"])}
 
     def run_clients(self, n: int):
-        self.log(f"concurrency: {n} requests at once x {self.runs} rounds, {BURST_MAX_TOKENS} new tokens each"
-                 + (f", prompts of about {self.client_prompt} tokens" if self.client_prompt else ""))
+        self.log(f"concurrency: {n} requests at once x {self.runs} rounds, {self.client_tokens} new tokens each"
+                 + (f", prompts of about {self.client_prompt} tokens" if self.client_prompt else "")
+                 + (f", sessions warmed to about {self.client_warm} tokens" if self.client_warm else ""))
+        # --client-warm: the shape of real cached agent traffic (llama-swap's stats: 89% of prompt tokens hit
+        # the conversation cache, new tails of only a few hundred tokens). Each client first loads a long word
+        # list once, untimed, and every measured request then reuses that prefix and adds only its own new
+        # instruction and tail - so the rounds measure cached sessions, not cold prefill.
+        warms = []
+        if self.client_warm:
+            words = max(50, int((self.client_warm - self.overhead) / self.tokens_per_word))
+            warms = [f"[bench {self.tag('bw', n, i)}]\n" + long_prompt(words) for i in range(n)]
+            self.log(f"  warming: {n} sessions of about {self.client_warm} tokens (untimed)")
+            res_w: dict = {}
+            th = [threading.Thread(target=serve_load.one, args=(self.base, self.key, "strata", i, 400, 1, res_w, {},
+                                                                self.think, "", "", warms[i])) for i in range(n)]
+            for t in th:
+                t.start()
+            for t in th:
+                t.join()
+            if errs := [r["err"] for r in res_w.values() if r["err"]]:
+                self.log(f"  warming failed ({errs[:1]}): the rounds will measure cold prompts instead")
         rows = []
         for rd in range(self.runs):
             res: dict = {}
@@ -381,12 +403,18 @@ class Suite:
             for i in range(n):
                 # --client-prompt: pad each request with a unique word-list prompt of the wanted size (the tag
                 # per client and round keeps the conversation cache from reusing one prompt across the others).
-                filler = ""
-                if self.client_prompt:
+                # In warm mode it sizes the new TAIL on the warmed prefix instead.
+                filler, content = "", ""
+                if self.client_warm:
+                    content = warms[i] + "\n\n" + serve_load.prompt_for(i, 400, f" r{rd}")
+                    if self.client_prompt:
+                        tw = max(50, int((self.client_prompt - self.overhead) / self.tokens_per_word))
+                        content += "\n" + long_prompt(tw)
+                elif self.client_prompt:
                     words = max(50, int((self.client_prompt - self.overhead) / self.tokens_per_word))
                     filler = f"[bench {self.tag('b', n, rd, i)}]\n" + long_prompt(words)
-                t = threading.Thread(target=serve_load.one, args=(self.base, self.key, "strata", i, 400, BURST_MAX_TOKENS, res, {},
-                                                                 self.think, f" {self.tag('b', n, rd)}", filler))
+                t = threading.Thread(target=serve_load.one, args=(self.base, self.key, "strata", i, 400, self.client_tokens, res, {},
+                                                                 self.think, f" {self.tag('b', n, rd)}", filler, content))
                 t.start()
                 th.append(t)
             for t in th:
@@ -948,7 +976,14 @@ def main(argv=None) -> int:
     ap.add_argument("--clients", type=int, default=0, metavar="N", help="also send N requests at once")
     ap.add_argument("--client-prompt", type=int, default=0, metavar="TOKENS",
                     help="with --clients: pad each request with a unique prompt of about TOKENS tokens "
-                         "(default 0: the bare instruction, a few dozen tokens)")
+                         "(default 0: the bare instruction, a few dozen tokens; with --client-warm: the new "
+                         "tail on the warmed prefix)")
+    ap.add_argument("--client-tokens", type=int, default=BURST_MAX_TOKENS, metavar="N",
+                    help=f"with --clients: new tokens each concurrent request generates (default {BURST_MAX_TOKENS})")
+    ap.add_argument("--client-warm", type=int, default=0, metavar="TOKENS",
+                    help="with --clients: first load each client's conversation cache with a prompt of about "
+                         "TOKENS tokens (untimed), then measure only short unique tails on that prefix - the "
+                         "shape of cached agent sessions")
     ap.add_argument("--long", action="store_true", help="also a prompt of about 32,768 tokens")
     ap.add_argument("--think", action="store_true", help="leave thinking on (the default suite turns it off)")
     ap.add_argument("--out", help="where to write the results folder (default: bench/results)")
@@ -1010,7 +1045,7 @@ def main(argv=None) -> int:
         t0 = time.time()
         pre = collect_machine(base, key, cfg, a.gpu)
         suite = Suite(base, key, pre.get("context"), max(1, a.runs), a.think, log=say, want_clients=a.clients, want_long=a.long,
-                      want_client_prompt=a.client_prompt)
+                      want_client_prompt=a.client_prompt, want_client_tokens=a.client_tokens, want_client_warm=a.client_warm)
         slots = pre.get("parallel_slots") or 1
         if a.clients and a.clients > slots:
             say(f"Note: the server runs {slots} request(s) at a time (--batch), so {a.clients} clients will partly wait their turn.")
@@ -1021,10 +1056,13 @@ def main(argv=None) -> int:
             machine["gpu"] = pre.get("gpu")
         res = {"schema": SCHEMA, "tool": "tools/strata_bench.py", "date": datetime.date.today().isoformat(),
                "params": {"runs": suite.runs, "think": a.think, "clients": a.clients, "client_prompt": a.client_prompt,
+                          "client_tokens": suite.client_tokens, "client_warm": a.client_warm,
                           "long": a.long, "started_server": started,
                           "command": "python tools/strata_bench.py" + "".join(
                               f" {x}" for x in (f"--clients {a.clients}" if a.clients else "",
                                                 f"--client-prompt {a.client_prompt}" if a.client_prompt else "",
+                                                f"--client-tokens {a.client_tokens}" if a.client_tokens != 128 else "",
+                                                f"--client-warm {a.client_warm}" if a.client_warm else "",
                                                 "--long" if a.long else "",
                                                 "--think" if a.think else "", f"--runs {a.runs}" if a.runs != 3 else "") if x)},
                "elapsed_s": time.time() - t0, "machine": machine, "results": out}

@@ -31,11 +31,13 @@ def prompt_for(i: int, words: int, nonce: str = "") -> str:
             f"Use plain prose, no lists.")
 
 
-def one(url, key, model, i, words, max_tokens, res, extra, think, nonce="", filler=""):
+def one(url, key, model, i, words, max_tokens, res, extra, think, nonce="", filler="", content=""):
     # filler: context text appended after the instruction (strata_bench's --client-prompt); empty keeps the
     # request the bare ~35-token instruction the concurrency test has always sent.
+    # content: the full user text, verbatim (strata_bench's --client-warm session shape); wins over both.
     body = {"model": model, "stream": True, "max_tokens": max_tokens, "temperature": 0,
-            "messages": [{"role": "user", "content": prompt_for(i, words, nonce) + (("\n\n" + filler) if filler else "")}]}
+            "messages": [{"role": "user", "content": content if content else
+                         prompt_for(i, words, nonce) + (("\n\n" + filler) if filler else "")}]}
     if not think:
         body["reasoning_effort"] = "none"
         body["chat_template_kwargs"] = {"enable_thinking": False}
