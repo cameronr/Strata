@@ -355,7 +355,7 @@ private:
     uint32_t* h_pleflag_ = nullptr; uint32_t* m_pleflag_ = nullptr;  // the PLE rows are in h_ple_
     bool host_rows_ = false;
     float* h_rows_ = nullptr;    float* m_rows_ = nullptr;      // T * hc * n_embd: the final rows (set_host_rows)
-    int32_t ahead_tok_[8] = {};                                   // the tokens ple_ahead read for
+    int32_t ahead_tok_[strata::kernels::kVerifyMaxT] = {};         // the tokens ple_ahead read for
     cudaStream_t copy_ = nullptr;                                 // the copy engine's stream (DMA of missed experts)
     struct FlagSet { uint32_t* flag; uint32_t value; };
     FlagSet flag_sets_[2 * 64 * 2] = {};                          // host-function arguments, one per (layer, group)
