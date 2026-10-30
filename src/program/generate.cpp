@@ -364,7 +364,8 @@ void usage() {
                  "                       the fastest link first (a short probe at startup: host-to-device rate x\n"
                  "                       multiprocessors) (--tier-gpus: the same; -1: none). Qwen3.6-35B-A3B and\n"
                  "                       Qwen3.8-27B: the GPUs a layer split may add, in order (auto: CUDA's), the\n"
-                 "                       fewest that hold the model; --layer-split N,N,.. sets each one's layers\n"
+                 "                       fewest that hold the model (Qwen3.6 where none do: the main GPU alone, the\n"
+                 "                       CPU computing the experts it lacks); --layer-split N,N,.. sets the counts\n"
                  "  --second-gpu-gib G[,..]  each tier's VRAM for experts (default: all but its reserve; a list's\n"
                  "                       last value stands for the tiers past it, as in the two below)\n"
                  "  --second-gpu-reserve-mib R[,..]  the VRAM each tier leaves free (default 2048 on a GPU the\n"
@@ -1039,8 +1040,9 @@ int qwen35_switch(int argc, char** argv) {
         std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
         return 2;
     }
-    // --second-gpu: the GPUs a layer split may add, in order (names or numbers, comma-separated; auto: every other GPU
-    // in CUDA's order; -1: none); the engine takes the fewest that hold the model
+    // --second-gpu: the GPUs a layer split may add, in order (names or numbers, comma-separated, a name no visible GPU
+    // answers to left out; auto: every other GPU in CUDA's order; -1: none); the engine takes the fewest that hold the
+    // model
     std::vector<int> stages{dev};
     if (second == "auto") {
         for (const strata::core::GpuInfo& gi : gpus)
@@ -1051,13 +1053,11 @@ int qwen35_switch(int argc, char** argv) {
             const std::string name = second.substr(at, comma - at);
             at = comma + 1;
             const int d = strata::core::find_gpu(gpus, name, why);
-            if (d < 0) {
-                std::fprintf(stderr, "lamina: --second-gpu %s: %s\n", name.c_str(), why.c_str());
-                return 2;
-            }
-            if (std::find(stages.begin(), stages.end(), d) != stages.end()) {
-                std::fprintf(stderr, "lamina: --second-gpu %s names a GPU the split has already\n", name.c_str());
-                return 2;
+            const bool twice = d >= 0 && std::find(stages.begin(), stages.end(), d) != stages.end();
+            if (d < 0 || twice) {
+                std::fprintf(stderr, "lamina: --second-gpu %s left out: %s\n", name.c_str(),
+                             d < 0 ? why.c_str() : "the split has that GPU already");
+                continue;
             }
             stages.push_back(d);
         }

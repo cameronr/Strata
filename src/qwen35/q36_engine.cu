@@ -1108,7 +1108,7 @@ uint64_t buffer_bytes_per_row(const Model& m) {
 /// of `devs`, in order, that hold the model: the layers in order, each stage taking what its GPU holds (its free VRAM
 /// less the engine's buffers at a `chunk`-token prompt chunk and 1.5 GiB: a layer's tensors, the attention layers'
 /// K / V at `ctx` cells; the first stage's the embedding, the last's the head and the MTP block) but a layer for each
-/// later stage, and the last the rest.
+/// later stage, and the last the rest. A model with experts that no split holds runs on the first GPU alone (hybrid).
 bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& devs, const std::vector<int>& split,
                  int ctx, int chunk, std::string& err) {
     const auto& g = m.g;
@@ -1166,9 +1166,19 @@ bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& 
         room[i] = fr > overhead ? fr - overhead : 0;
     }
     CK(cudaSetDevice(devs[0]));
+    const auto take = [&](size_t n, const std::vector<size_t>& ends) {
+        m.stage_dev.assign(devs.begin(), devs.begin() + (std::ptrdiff_t) n);
+        m.stage_end = ends;
+        for (size_t i = n; i < devs.size(); ++i) {   // the GPUs left out: the context the query made goes
+            CK(cudaSetDevice(devs[i]));
+            CK(cudaDeviceReset());
+        }
+        CK(cudaSetDevice(devs[0]));
+    };
     for (size_t n = 1; n <= devs.size(); ++n) {
         std::vector<size_t> ends;
         size_t l = 0;
+        bool stuck = false;   // a GPU before the last holds no layer: more GPUs do not help
         for (size_t i = 0; i < n; ++i) {
             const uint64_t fixed = (i == 0 ? embd : 0) + (i + 1 == n ? tail : 0);
             const uint64_t r = room[i] > fixed ? room[i] - fixed : 0;
@@ -1177,31 +1187,34 @@ bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& 
                 uint64_t need = 0;
                 for (; l < nl; ++l) need += cost[l];
                 if (need > r) {
-                    err = "the model does not fit on these GPUs at a context of " + std::to_string(ctx) + " (the last GPU needs " +
-                          std::to_string(need >> 20) + " MiB more than its " + std::to_string(r >> 20) +
-                          "): a shorter --max-context or another GPU";
+                    err = "the GPUs do not hold the model at a context of " + std::to_string(ctx) + ", the last needing " +
+                          std::to_string(need >> 20) + " MiB of its " + std::to_string(r >> 20) + " MiB of room";
                     break;
                 }
             } else {
                 for (uint64_t used = 0; l + (n - 1 - i) < nl && used + cost[l] <= r; ++l) used += cost[l];
                 if (l == first) {
-                    err = "the layer split leaves GPU " + std::to_string(devs[i]) + " no layer: --layer-split sets the counts";
-                    return false;
+                    err = "GPU " + std::to_string(devs[i]) + " holds no layer";
+                    stuck = true;
+                    break;
                 }
             }
             ends.push_back(l);
         }
         if (ends.size() == n) {
-            m.stage_dev.assign(devs.begin(), devs.begin() + (std::ptrdiff_t) n);
-            m.stage_end = ends;
-            for (size_t i = n; i < devs.size(); ++i) {   // the GPUs left out: the context the query made goes
-                CK(cudaSetDevice(devs[i]));
-                CK(cudaDeviceReset());
-            }
-            CK(cudaSetDevice(devs[0]));
+            take(n, ends);
+            if (n == 1) std::fprintf(stderr, "lamina: GPU %d holds the model: no layer split\n", devs[0]);
             return true;
         }
+        if (stuck) break;
     }
+    if (m.moe) {   // the split needs every expert in VRAM; one GPU runs the rest of them on the CPU
+        take(1, {nl});
+        std::fprintf(stderr, "lamina: no layer split, %s: GPU %d runs alone, the CPU computing the experts it lacks\n",
+                     err.c_str(), devs[0]);
+        return true;
+    }
+    err += "; a shorter --max-context, --layer-split or another GPU";
     return false;
 }
 
@@ -4204,8 +4217,6 @@ static int run_engine(int argc, char** argv) {
                      " on GPU " + std::to_string(stages[i]->dev);
         std::fprintf(stderr, "lamina: the layer split: %s (the head and the MTP block on the last)\n", where.c_str());
         if (chunk == 0) chunk = 2048;   // every expert in VRAM: MMQ's rows at a 2048-token chunk
-    } else if (stage_gpus.size() > 1) {
-        std::fprintf(stderr, "lamina: GPU %d holds the model: no layer split\n", E.dev);
     }
     if (chunk == 0) {
         // auto: the largest chunk (4096 .. 1024) that fits beside every expert in VRAM; 2048 when they will not all fit (a prompt chunk streams every layer's
