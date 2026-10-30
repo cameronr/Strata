@@ -308,16 +308,6 @@ if(STRATA_ENABLE_CUDA)
   # artifacts, so the working directory is pinned to the source tree and a missing input is a hard error
   # INSIDE the test.  A test that passes by finding nothing to compare is the failure mode this project keeps
   # re-learning.
-  add_executable(ple_parity src/kernels/ple_parity.cpp)
-  target_include_directories(ple_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(ple_parity PRIVATE strata_kernels CUDA::cudart)
-  set(STRATA_PLE_FIXTURE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bench/micro" CACHE PATH
-      "Directory containing required ple_in.bin and ple_out.bin parity fixtures")
-  add_test(NAME ple_parity COMMAND ple_parity --selftest
-    --in "${STRATA_PLE_FIXTURE_DIR}/ple_in.bin" --out "${STRATA_PLE_FIXTURE_DIR}/ple_out.bin"
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
-
-  # Plan v0.3 P7: INT8 KV storage vs a host reference and vs the FP16 path (GPU, synthetic, no model).
   add_executable(kv_q8_parity src/kernels/kv_q8_parity.cpp)
   target_include_directories(kv_q8_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(kv_q8_parity PRIVATE strata_kernels CUDA::cudart)

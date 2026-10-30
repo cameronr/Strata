@@ -1552,18 +1552,6 @@ void native_q2_0_mmvq(const void* weights, const void* x_q8_1, float* y,
     launch_check();
 }
 
-void native_q2_0_f32(const void* weights, const float* x, void* scratch_q8_1,
-                     float* y, int n_in, int n_out, int ncols, void* stream) {
-    validate_shape(n_in, ncols, 64);
-    if (n_out <= 0) throw std::invalid_argument("native MMVQ requires n_out > 0");
-    validate_pointer(weights);
-    validate_pointer(x);
-    validate_pointer(scratch_q8_1);
-    validate_pointer(y);
-    validate_stream(stream);
-    native_quantize_q8_1(x, scratch_q8_1, n_in, ncols, stream);
-    native_q2_0_mmvq(weights, scratch_q8_1, y, n_in, n_out, ncols, stream);
-}
 
 void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream) {

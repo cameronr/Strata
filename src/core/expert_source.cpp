@@ -195,8 +195,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     }
     if ((int64_t) d.act_multi.size() < n_tok) d.act_multi.resize((size_t) MAXT);
     const ExpertLayout& lay = expert_layout();
-    const bool native = lay.native;
-    if (native && d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
+    if (d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
     static const bool ptrace = std::getenv("STRATA_POOL_TRACE") != nullptr;
@@ -361,18 +360,16 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     const bool skip_gpu_rows = d.plan != nullptr && d.plan->host_rows_only;
     const auto c1 = std::chrono::steady_clock::now();
     // the gate/up activations: the window's router wrote them as Q8_K rows when the layer takes those
-    const uint8_t* xk = native && d.plan != nullptr ? d.plan->xk : nullptr;
+    const uint8_t* xk = d.plan != nullptr ? d.plan->xk : nullptr;
     auto nact = [&](int64_t t) -> const void* {
         return xk != nullptr ? xk + (size_t) t * (size_t) d.plan->xk_stride
                              : d.nact_multi.data() + (size_t) t * kNativeActBytes;
     };
-    if (native && lay.fmt[(size_t) d.layers].gu_type == 42)   // a native Q2_0 pack: the Q2_0 kernels' activations
+    if (lay.fmt[(size_t) d.layers].gu_type == 42)   // a Q2_0 pack: the Q2_0 kernels' activations
         for (int64_t t = 0; t < n_tok; ++t) act_quant_any(x_f + (size_t) t * H, H, d.act_multi[(size_t) t]);
-    else if (native && xk == nullptr)
+    else if (xk == nullptr)
         for (int64_t t = 0; t < n_tok; ++t)
             native_quant_act(lay.fmt[(size_t) d.layers], x_f + (size_t) t * H, d.nact_multi.data() + (size_t) t * kNativeActBytes);
-    else if (!native)
-        for (int64_t t = 0; t < n_tok; ++t) act_quant_q8_1(x_f + (size_t) t * H, H, d.act_multi[(size_t) t]);
     const auto c2 = std::chrono::steady_clock::now();
     int njobs = 0;
     for (int64_t t = 0; t < n_tok; ++t)
@@ -416,7 +413,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             }
             ExpertJobMulti& jb = d.jobs_multi[(size_t) jo];
             jb.act[jb.nt] = &d.act_multi[(size_t) t];
-            jb.nact[jb.nt] = native ? nact(t) : nullptr;
+            jb.nact[jb.nt] = nact(t);
             jb.out[jb.nt] = row;
             ++jb.nt;
             ++d.multi_entries;
@@ -458,14 +455,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     pt("run", njobs);
     // STRATA_POOL_FUSED=1 (opt-in): the layer's gate/up and down rows as one batch, no barrier between them
     static const bool pool_fused = [] { const char* v = std::getenv("STRATA_POOL_FUSED"); return v != nullptr && std::atoi(v) != 0; }();
-    if (native && pool_fused) {
+    if (pool_fused)
         d.pool->run_fused_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
-    } else if (native) {
+    else
         d.pool->run_split_multi_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
-    } else {
-        if (submit2 != nullptr) submit2(&s2);
-        d.pool->run_split_multi(d.jobs_multi.data(), njobs);
-    }
     if (!s2.ok) {
         d.failed = true;
         d.fail = d.tier_err.c_str();
@@ -813,7 +806,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     const uint64_t want = lay.total - vram_only_bytes_;
 
     // plan v0.3 P6: no experts.bin in a native pack -> the experts come straight from the GGUF
-    const bool from_gguf = !std::ifstream(path, std::ios::binary) && lay.native && !gguf_.empty();
+    const bool from_gguf = !std::ifstream(path, std::ios::binary) && !gguf_.empty();
     // SIZE CHECK BEFORE THE ALLOCATION, not after.  A wrong pack should name the two numbers rather than spend
     // 34 GB and a minute of loading first.
     std::vector<GgufSpan> spans;

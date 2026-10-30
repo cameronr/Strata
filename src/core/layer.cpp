@@ -571,9 +571,5 @@ bool embed_rows(const WeightTable& tables, const ModelGeometry& g, const int32_t
     return true;
 }
 
-uint64_t ple_run_scratch_bytes() {
-    // Internal workspace followed by a disjoint normalized export used for the next history row.
-    return strata::kernels::ple_block_scratch_bytes() + strata::kernels::NG_HC_DIM * sizeof(float);
-}
 
 }  // namespace strata::core

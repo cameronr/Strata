@@ -81,12 +81,6 @@ uint64_t ngram_mixed(const int64_t* ctx, const uint64_t* mult, int n);
 /// heads (0..7) and the trigram heads (8..15) agree about the recent history.
 void ngram_rows(const int32_t* tokens, const int32_t* prev, int n_tokens, const PleConsts& c, uint32_t* out);
 
-/// The IQ4_NL codebook: `{-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113}`,
-/// which is `kvalues_iq4nl` from `ggml-common.h` L1121 and also the manifest's `codebooks.IQ4NL`.
-///
-/// There is NO `-8` in this version of ggml.  Some releases of `dequantize_row_iq4_nl` subtract 8 from the
-/// codebook value; at 3cf03257 they do not, and the difference would shift every one of the 51.2e9 elements.
-int iq4nl_code(int code);
 
 /// One 90-byte row -> 160 floats.  The canonical rule `value = cb[code] * scale + offset` with offset 0,
 /// because IQ4_NL has no min term (`has_offset` is false in the manifest).

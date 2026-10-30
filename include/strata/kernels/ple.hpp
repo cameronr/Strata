@@ -30,8 +30,6 @@
 
 namespace strata::kernels {
 
-/// `ple_block`'s value projection through the pinned CUDA BF16/F32 MMVF (default false: its own BF16 GEMV).
-void ple_set_native_bf16(bool enabled);
 
 /// Weights of the single PLE layer (`ple.layers = [1]`).  `blk.1.*` in the pack.
 ///
@@ -44,8 +42,6 @@ void ple_set_native_bf16(bool enabled);
 ///   norm_key/query/conv      F32 [hc_dim], NO (1+w) folding - `ref/gdn.py` records the same for `ssm_norm`
 ///   conv1d_f16               `ple_conv1d.weight` F16, GGML-NATIVE `kW[k + kern*c]`
 struct PleWeights {
-    const uint8_t* key_codes = nullptr;    // hc_dim * (n_embd/4) bytes
-    const float* key_scales = nullptr;     // hc_dim * (n_embd/64) floats
     const uint16_t* value_bf16 = nullptr;  // n_embd * n_embd
     const float* norm_key = nullptr;       // hc_dim
     const float* norm_query = nullptr;     // hc_dim
@@ -65,40 +61,8 @@ struct PleWeights {
     const uint16_t* key_bf16 = nullptr;
 };
 
-/// Everything the block produces, in the order `ple_layer_xcheck`'s oracle writes it.  Any pointer may be
-/// null; the caller that only wants the result passes nothing else.  Having the intermediates is what makes
-/// the parity test able to say WHICH stage diverged instead of only that the sum did.
-/// Every nonnull output region, including result, must be disjoint from the block's entire scratch region.
-/// result may alias hidden. The block rejects scratch/output overlap before launching any work.
-struct PleOut {
-    float* key = nullptr;         // hc_dim
-    float* value = nullptr;       // n_embd
-    float* gate = nullptr;        // hc
-    float* gated = nullptr;       // hc_dim
-    float* normalized = nullptr;  // hc_dim
-    float* conv = nullptr;        // hc_dim
-    float* result = nullptr;      // hc_dim
-};
 
-/// One token.  `emb` is the 2560-wide gathered n-gram embedding, `hidden` the hc_dim residual stack, and
-/// `hist_rows` the NG_HIST previous NORMALIZED rows, oldest first (the caller owns that cache).
-///
-/// `hist_rows` IS ROW-FASTEST: `hist_rows[row + NG_HIST*channel]`.  That is not a choice - it is
-/// `ggml_reshape_3d(state, d_conv-1, conv_channels, n_seqs)`, so ne0 = the history row varies fastest, and
-/// `ple_layer_xcheck.cpp` L79-83 records the transposed reading failing ggml's own assert.
-///
-/// The block does NOT write back to the history: the caller keeps ownership of its state and this stays a
-/// pure function of its inputs, which is what makes the chunked-versus-single-shot property testable.
-/// Bytes the caller must hand `ple_block` as its workspace: five `hc_dim` buffers (key, query, norm,
-/// gated, conv), one `n_embd` (value) and one `hc` (gate), plus the Q8 activation image and the BF16
-/// embedding copy.  **THE WORKSPACE IS THE CALLER'S BECAUSE THIS FUNCTION IS CAPTURED**: it used to
-/// `cudaMalloc` three times and `cudaStreamSynchronize` once per call, and inside a graph both are errors -
-/// `ple_block: scratch: operation not permitted when stream is capturing`.  Same defect, same fix as
-/// `shared_expert`.
-uint64_t ple_block_scratch_bytes();
 
-void ple_block(const float* emb, const float* hidden, const float* hist_rows, const PleWeights& w,
-               PleOut& out, void* scratch, void* stream);
 
 /// Advance the row-fastest normalized history by one token: hist[r,c] = old_hist[r+1,c], then append
 /// normalized[c] at row NG_HIST-1. One thread owns each channel, making the in-place shift well-defined.

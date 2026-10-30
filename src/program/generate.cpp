@@ -1580,12 +1580,9 @@ int main(int argc, char** argv) {
     // **ITS ABSENCE IS WHY GATE C1 FAILED** (LEDGER L123): layer 1 carries six `blk.1.ple_*` tensors, the whole
     // module was built and parity-tested, and nothing called it.  Everything below is construction - the table
     // is a mapping of the ORIGINAL second GGUF shard, the six weights are already loaded in the arena, and the
-    // three buffers are the only allocation.
+    // history is the session's.
     strata::kernels::PleTable ple_table;
-    std::vector<float> ple_emb_host((size_t) strata::kernels::NG_N_EMBD);
-    float* ple_emb_dev = nullptr;
-    float* ple_scratch = nullptr;
-    if (!o.ple_gguf.empty()) {
+    {
         strata::kernels::PleIoOptions pio;
         pio.mode = o.ple_io == "mmap" ? strata::kernels::PleIo::Mmap
                  : o.ple_io == "ram"  ? strata::kernels::PleIo::Ram
@@ -1605,16 +1602,10 @@ int main(int argc, char** argv) {
                                  "wired - and running without it is a DIFFERENT MODEL (LEDGER L123)\n");
             return 1;
         }
-        // `ple_key` is S2 and the loader has already widened its scales to f32, so the two planes are located
-        // by the sizes the `WeightRef` records rather than re-derived - the same rule `plane_ptrs` follows.
         if (!wk->quantized()) {
             // plan v0.3 P6: the IQ model files' BF16 key (the pack's extra.bin, raw BF16)
             ss.ple.w.key_bf16 = (const uint16_t*) wk->data;
-        } else if (wk->data != nullptr) {
-            ss.ple.w.key_codes = (const uint8_t*) wk->data;
-            ss.ple.w.key_scales = (const float*) ((const uint8_t*) wk->data + wk->codes_bytes);
-        }
-        if (wk->quantized()) {
+        } else {
             // Q2_0 in the Q2_0 file, Q8_0 in UD-Q4_K_XL
             if (!wk->native_data || !strata::kernels::native_mmvq_supported(wk->native_type) || !wk->native_q8_1) {
                 std::fprintf(stderr, "strata generate: native PLE key is absent or incompatible\n");
@@ -1631,34 +1622,13 @@ int main(int argc, char** argv) {
         ss.ple.w.conv1d_f16 = (const uint16_t*) wc->data;
         ss.ple.consts = strata::kernels::ple_artifact_consts();
         ss.ple.table = &ple_table;
-        ss.ple.token = &ss.ple_token;
-        ss.ple.prev = ss.ple_prev;
         ss.ple.hist = ss.ple_hist;
-        ss.ple.emb_host = ple_emb_host.data();
-        if (cudaMalloc((void**) &ple_emb_dev, (size_t) strata::kernels::NG_N_EMBD * 4) != cudaSuccess ||
-            cudaMalloc((void**) &ple_scratch, strata::core::ple_run_scratch_bytes()) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the PLE buffers failed\n");
-            return 1;
-        }
-        ss.ple.emb_dev = ple_emb_dev;
-        ss.ple.scratch = ple_scratch;
         if (!ss.ple.ready()) {
             std::fprintf(stderr, "strata generate: the PLE run is not ready after construction\n");
             return 1;
         }
         std::fprintf(stderr, "strata generate: PLE on, table %llu rows of %s\n",
                      (unsigned long long) ple_table.rows(), o.ple_gguf.c_str());
-    } else {
-        std::fprintf(stderr,
-                     "strata generate: PLE OFF by explicit --no-ple diagnostic request.\n"
-                     "  The tokens below are NOT this model's; this is only useful for A/B measurement.\n");
-    }
-
-    float* d_parts = nullptr;
-    if (cudaMalloc(&d_parts, (size_t) K * g.n_embd * 4) != cudaSuccess ||
-        cudaMemset(d_parts, 0, (size_t) K * g.n_embd * 4) != cudaSuccess) {
-        std::fprintf(stderr, "strata generate: the parts buffer failed\n");
-        return 1;
     }
 
     // ---- the CPU expert pool
@@ -4346,7 +4316,6 @@ int main(int argc, char** argv) {
     check_stack_limit(o.main_gpu, o.main_gpu);
     for (const int d : o.tier_gpus) check_stack_limit(d, o.main_gpu);
 
-    cudaFree(d_parts);
     cudaFree(sbuf);
     cudaFree(arena);
     return 0;

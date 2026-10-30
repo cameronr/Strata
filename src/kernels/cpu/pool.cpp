@@ -376,25 +376,6 @@ void ExpertPool::drain(int id, ExpertScratch& scratch) {
                 else native_down_part(e, r0, r1);
                 r += r1 - r0;
             }
-        } else {
-            // plan v0.3 P6: an equal range of the phase's rows across ALL its experts (a range may span two)
-            const int per = mode_ == 3 ? FF : H;
-            const int64_t g0 = mrows_ * (int64_t) i / mtasks_, g1 = mrows_ * (int64_t) (i + 1) / mtasks_;
-            for (int64_t r = g0; r < g1;) {
-                const int e = (int) (r / per), r0 = (int) (r % per);
-                const int r1 = (int) std::min<int64_t>(per, r0 + (g1 - r));
-                SplitBufMulti& sb = split_multi_[(size_t) e];
-                if (mode_ == 3) {
-                    float* ff[MAXT];
-                    for (int t = 0; t < mjobs_[e].nt; ++t) ff[t] = sb.ff[t];
-                    s2_expert_gu_rows_multi(mjobs_[e].blob, mjobs_[e].act, mjobs_[e].nt, ff, r0, r1);
-                } else {
-                    const ActQ* a2[MAXT];
-                    for (int t = 0; t < mjobs_[e].nt; ++t) a2[t] = &sb.a2[t];
-                    s2_expert_down_rows_multi(mjobs_[e].blob, a2, mjobs_[e].nt, mjobs_[e].out, r0, r1);
-                }
-                r += r1 - r0;
-            }
         }
         done_.fetch_add(1, std::memory_order_release);
     }
@@ -428,44 +409,6 @@ void ExpertPool::run_split(ExpertJob* jobs, int n) {
     ms_drain_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
-    if (n <= 0) return;
-    if (n > kMaxSplitMulti) {
-        // one token at a time through the single-token path
-        std::vector<ExpertJob> single;
-        for (int e = 0; e < n; ++e)
-            for (int t = 0; t < jobs[e].nt; ++t) {
-                ExpertJob j;
-                j.blob = jobs[e].blob;
-                j.act = jobs[e].act[t];
-                j.out = jobs[e].out[t];
-                single.push_back(j);
-            }
-        for (size_t i = 0; i < single.size(); i += kMaxSplit)
-            run_split(single.data() + i, (int) (std::min)((size_t) kMaxSplit, single.size() - i));
-        return;
-    }
-    const auto t0 = std::chrono::steady_clock::now();
-    mjobs_ = jobs;
-    const int threads = n_ + (host_works_ ? 1 : 0);
-    mtasks_ = 3 * threads;
-    mrows_ = (int64_t) n * FF;
-    run_phase(3, mtasks_);
-    const auto t1 = std::chrono::steady_clock::now();
-    for (int e = 0; e < n; ++e)
-        for (int t = 0; t < jobs[e].nt; ++t)
-            act_quant_q8_1(split_multi_[(size_t) e].ff[t], FF, split_multi_[(size_t) e].a2[t]);
-    const auto t2 = std::chrono::steady_clock::now();
-    mrows_ = (int64_t) n * H;
-    run_phase(4, mtasks_);
-    const auto t3 = std::chrono::steady_clock::now();
-    ms_multi_gu += std::chrono::duration<double, std::milli>(t1 - t0).count();
-    ms_multi_q += std::chrono::duration<double, std::milli>(t2 - t1).count();
-    ms_multi_down += std::chrono::duration<double, std::milli>(t3 - t2).count();
-    multi_bytes += (int64_t) n * (int64_t) BLOB;
-    mode_ = 0;
-    ms_drain_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-}
 
 void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*),
                                         void* ctx) {

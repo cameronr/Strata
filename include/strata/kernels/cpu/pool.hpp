@@ -157,12 +157,10 @@ public:
     /// core's bandwidth; this streams every expert at all of them.  At most `kMaxSplit` experts.
     void run_split(ExpertJob* jobs, int n);
     static constexpr int kMaxSplit = 16;
-    /// Plan v0.3 P6: `run_split` for multi-token jobs (at most `kMaxSplitMulti`); the rows of each expert are
-    /// read once for all of its tokens.
-    void run_split_multi(ExpertJobMulti* jobs, int n);
-    /// Plan v0.3 P6: the same for a native pack's layer (ggml-cpu arithmetic, `nact` activations).  `first`, when
-    /// given, runs once on the host: after the workers have started on the first phase, before it joins them (or
-    /// alone when there are no jobs).
+    /// Plan v0.3 P6: a native pack's layer for multi-token jobs (at most `kMaxSplitMulti`; ggml-cpu arithmetic,
+    /// `nact` activations), the rows of each expert read once for all of its tokens.  `first`, when given, runs
+    /// once on the host: after the workers have started on the first phase, before it joins them (or alone when
+    /// there are no jobs).
     void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*) = nullptr,
                                 void* ctx = nullptr);
     static constexpr int kMaxSplitMulti = 96;
@@ -172,7 +170,7 @@ public:
     /// between.  The same bytes as `run_split_multi_native`.  (After Hardin22/Strata-DualGPU 11b1f25.)
     void run_fused_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*) = nullptr,
                           void* ctx = nullptr);
-    /// run_split_multi's phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
+    /// The native runs' phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
     double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
     int64_t multi_bytes = 0;
 
@@ -231,9 +229,9 @@ private:
         ActQ a2;
     };
     std::vector<SplitBuf> split_;
-    // run_split_multi state: mode 3 = gate/up row parts, 4 = down row parts
+    // the native runs' state: mode 5 = gate/up row parts, 6 = down row parts, 7 = both in one phase
     ExpertJobMulti* mjobs_ = nullptr;
-    int64_t mrows_ = 0;     // rows of the current multi phase across all its experts (n * FF, then n * H)
+    int64_t mrows_ = 0;     // rows of the current multi phase across all its experts (n * n_ff, then n * n_embd)
     int mtasks_ = 1;        // equal row ranges the phase is cut into
     struct SplitBufMulti {
         alignas(64) float ff[MAXT][FF];

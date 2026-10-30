@@ -297,11 +297,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         plan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_); dplan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_);
         res_ = b.take<int32_t>((uint64_t) res_words_); slot_ptr_ = b.take<unsigned long long>((uint64_t) hits.slots);
         staging_ = b.take<uint8_t>((uint64_t) kStagingBlobs * strata::kernels::cpu::expert_layout().max_blob);
-        hit_xq_ = b.take<uint8_t>(T * (N / 32) * 34); hit_xs_ = b.take<float>(T * (N / 32));
         nat_xq_ = b.take<uint8_t>(T * (N / 32) * 36);
-        hit_scratch_ = b.take<uint8_t>(std::max<uint64_t>(
-            strata::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
-            strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
+        hit_scratch_ = b.take<uint8_t>(strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff));
         head_mixed_ = b.take<float>(T * N); head_inj_ = b.take<float>(HC);
         sh_gate_ = b.take<float>(T * (uint64_t) g.n_ff);
         sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
@@ -324,7 +321,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     Bump real;
     real.base = (uint8_t*) arena_;
     carve(real);
-    if (lay.native && strata::kernels::expert_math() == strata::kernels::ExpertMath::Exact &&
+    if (strata::kernels::expert_math() == strata::kernels::ExpertMath::Exact &&
         cudaMalloc((void**) &xk_dev_, (size_t) T * (size_t) (N / 256) * 292) != cudaSuccess) {
         err = "verify: the exact hits' Q8_K rows";
         return false;
@@ -904,27 +901,22 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         bool xk_ready = false;   // --expert-math exact: this group's Q8_K rows quantized for the hits
         auto grouped = [&](const Plan& p, const unsigned long long* gp, const int32_t* gs, const int32_t* gn) {
-            if (lay.native) {
-                // the layer's GGUF formats (i-quant gate/up, Q2_0 / IQ4_NL down)
-                const auto& f = lay.fmt[(size_t) l];
-                const NativeExpertLayout L = native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff,
-                                                                  gpu_expert_act(f.gu_act), gpu_expert_act(f.d_act));
-                // --expert-math exact on a K-quant layer: the CPU's Q8_K rows, quantized here from the FFN input
-                // (quantize_q8_K is bitwise ggml's quantize_row_q8_K, as the router kernel's rows for the pool are)
-                const uint8_t* xa = nat_xq_ + (size_t) tb * (N / 32) * 36;
-                int64_t xs = (int64_t) (N / 32) * 36;
-                if (L.gu_act == 15) {
-                    xs = (int64_t) (N / 256) * 292;
-                    xa = xk_dev_ + (size_t) tb * (size_t) xs;
-                    if (!xk_ready) quantize_q8_K(mixed_ + (size_t) tb * N, xk_dev_ + (size_t) tb * (size_t) xs,
-                                                 (int64_t) n * N, cs);
-                    xk_ready = true;
-                }
-                native_expert_grouped(L, gp, gs, gn, p.dst, p.tok, cap, cap, xa, xs, hit_scratch_, hit_out, cs);
-            } else {
-                moe_grouped_s2(gp, gs, gn, p.dst, p.tok, cap, cap, hit_xq_ + (size_t) tb * (N / 32) * 34,
-                               hit_xs_ + (size_t) tb * (N / 32), hit_scratch_, hit_out, cs);
+            // the layer's GGUF formats (i-quant gate/up, Q2_0 / IQ4_NL down)
+            const auto& f = lay.fmt[(size_t) l];
+            const NativeExpertLayout L = native_expert_layout(f.gu_type, f.d_type, f.n_embd, f.n_ff,
+                                                              gpu_expert_act(f.gu_act), gpu_expert_act(f.d_act));
+            // --expert-math exact on a K-quant layer: the CPU's Q8_K rows, quantized here from the FFN input
+            // (quantize_q8_K is bitwise ggml's quantize_row_q8_K, as the router kernel's rows for the pool are)
+            const uint8_t* xa = nat_xq_ + (size_t) tb * (N / 32) * 36;
+            int64_t xs = (int64_t) (N / 32) * 36;
+            if (L.gu_act == 15) {
+                xs = (int64_t) (N / 256) * 292;
+                xa = xk_dev_ + (size_t) tb * (size_t) xs;
+                if (!xk_ready) quantize_q8_K(mixed_ + (size_t) tb * N, xk_dev_ + (size_t) tb * (size_t) xs,
+                                             (int64_t) n * N, cs);
+                xk_ready = true;
             }
+            native_expert_grouped(L, gp, gs, gn, p.dst, p.tok, cap, cap, xa, xs, hit_scratch_, hit_out, cs);
         };
         // plan v0.3 P6: the VRAM groups at once; the PCIe groups once the pool has published them and the copy engine
         // has landed them in staging

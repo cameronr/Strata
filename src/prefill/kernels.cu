@@ -1032,10 +1032,6 @@ void route(const float* logits, int32_t* ids, float* weights, int64_t T, void* s
     route_kernel<<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
     check("route");
 }
-void blob_dequant_f16(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream) {
-    blob_dequant_kernel<true><<<blocks_for(1280LL * 640 + 2560LL * 160), 256, 0, (cudaStream_t) stream>>>(blob, gu16, down16);
-    check("blob_dequant_f16");
-}
 void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream) {
     if (n <= 0) return;
     swiglu_il_kernel<<<blocks_for(n * 640), 256, 0, (cudaStream_t) stream>>>(gu, h16, n);

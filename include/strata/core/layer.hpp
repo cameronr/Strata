@@ -175,23 +175,11 @@ struct PleRun {
     /// Null when the PLE is not wired (no table, or a pack without `blk.1.ple_*`).
     strata::kernels::PleTable* table = nullptr;
     strata::kernels::PleWeights w;
-    /// The session's PLE state, by pointer.
-    const int32_t* token = nullptr;    ///< the token being decoded
-    const int32_t* prev = nullptr;     ///< (2,) predecessors, OLDEST FIRST, `-1` where there is none
-    float* hist = nullptr;             ///< NG_HIST x hc_dim NORMALIZED history, row-fastest
-    /// The gathered 2560-wide row vector on the DEVICE, and the host staging it is copied from: `gather`
-    /// writes HOST memory (the table is a host mapping) and the block wants the device.
-    float* emb_dev = nullptr;
-    float* emb_host = nullptr;
-    /// Internal workspace plus a disjoint normalized export for the next history row.
-    /// Allocate ple_run_scratch_bytes(), not merely the lower-level ple_block_scratch_bytes().
-    float* scratch = nullptr;
+    float* hist = nullptr;             ///< the session's NG_HIST x hc_dim NORMALIZED history, row-fastest
     strata::kernels::PleConsts consts;
     bool ready() const {
-        return table != nullptr && table->is_open() && hist != nullptr && emb_dev != nullptr &&
-               emb_host != nullptr && scratch != nullptr && token != nullptr && prev != nullptr &&
-               ((w.key_codes != nullptr && w.key_scales != nullptr) || w.key_bf16 != nullptr ||
-                w.key_native_data != nullptr) &&
+        return table != nullptr && table->is_open() && hist != nullptr &&
+               (w.key_bf16 != nullptr || w.key_native_data != nullptr) &&
                w.value_bf16 != nullptr &&
                w.norm_key != nullptr && w.norm_query != nullptr && w.norm_conv != nullptr &&
                w.conv1d_f16 != nullptr;
@@ -199,8 +187,6 @@ struct PleRun {
 };
 
 
-/// Internal PLE workspace plus one separate hc_dim normalized row for advancing history.
-uint64_t ple_run_scratch_bytes();
 
 
 }  // namespace strata::core

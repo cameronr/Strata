@@ -90,7 +90,6 @@ namespace {
 const int8_t kIq4Nl[16] = {-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
 }
 
-int iq4nl_code(int code) { return kIq4Nl[code & 15]; }
 
 void iq4nl_dequant_row(const uint8_t* row, float* out160) {
     for (int b = 0; b < PLE_HEAD_DIM / 32; ++b) {

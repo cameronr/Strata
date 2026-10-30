@@ -68,7 +68,7 @@ bool mmq_layer(const strata::kernels::cpu::NativeFmt& f) {
         const char* e = std::getenv("STRATA_PREFILL_MMQ");
         return e == nullptr || std::atoi(e) != 0;
     }();
-    return on && strata::kernels::cpu::expert_layout().native && mmq::supported(f.gu_type) && mmq::supported(f.d_type);
+    return on && mmq::supported(f.gu_type) && mmq::supported(f.d_type);
 }
 bool mmq_any() {
     const auto& lay = strata::kernels::cpu::expert_layout();
@@ -195,11 +195,6 @@ uint64_t ExpertRunner::bytes_needed(int64_t chunk, int64_t n_expert, bool remote
 bool ExpertRunner::init(int device, int main_device, void* stream, core::ExpertSource* src, const core::ExpertCache* cache,
                         const int32_t* res, int64_t n_expert, int64_t max_chunk, bool streams, std::string& err) {
     Impl& m = *impl_;
-    const auto& lay = strata::kernels::cpu::expert_layout();
-    if (stream == nullptr && !lay.native) {
-        err = "prompt experts on a second GPU: need a native pack";
-        return false;
-    }
     m.dev = device;
     m.main = main_device;
     m.remote = stream == nullptr;
@@ -645,12 +640,9 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
                 }
             if (!in_place) cudaMemsetAsync((uint8_t*) m.dq_gu + (size_t) n * gub, 0, MMQ_TAIL, m.s);
             if (!d_place) cudaMemsetAsync((uint8_t*) m.dq_d + (size_t) n * db, 0, MMQ_TAIL, m.s);
-        } else if (lay.native)
+        } else
             strata::kernels::iq_dequant_experts_f16(f.gu_type, f.d_type, (const uint8_t* const*) (m.ptrs + 0 * E + j0), n,
                                                     f.up_off, f.down_off, f.n_ff, f.n_embd, m.dq_gu, m.dq_d, m.s);
-        else
-            for (size_t j = j0; j < j1; ++j)
-                blob_dequant_f16((const uint8_t*) P[0 * E + j], (uint16_t*) P[2 * E + j], (uint16_t*) P[5 * E + j], m.s);
         // the batch's staging slot and the copy-ahead area are free once their last reader is queued: the gather,
         // the gate/up product, or with down read in place too that product
         auto release = [&] {
