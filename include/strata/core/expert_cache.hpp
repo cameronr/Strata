@@ -65,7 +65,7 @@ std::vector<std::pair<int32_t, int32_t>> rank_learned_profile(int64_t n_layers, 
                                                               const std::vector<double>& heat,
                                                               const std::vector<std::pair<int32_t, int32_t>>& prior);
 
-/// The fork's learned profile: every (layer, expert) pair ranked by its share of its layer's routing counted in this run
+/// Lamina's learned profile: every (layer, expert) pair ranked by its share of its layer's routing counted in this run
 /// (`heat`, n_layers x n_expert) plus `w` times a share estimated from `prior` (the profile the engine started from: a
 /// pair's 1 / (rank + 1), normalized over its layer), then by its prior rank, then by index. Against upstream's order
 /// (the experts resident in VRAM first, then the counts) it keeps the generally routed experts a start places on the

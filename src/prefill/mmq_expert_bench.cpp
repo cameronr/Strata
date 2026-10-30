@@ -3,8 +3,8 @@
 //     mmq_expert_bench [rows per expert ...]
 //
 // One MMQ group as the prompt path launches it: 16 experts, R rows each, in one activation array in expert order;
-// gate/up [1280 x 2560] and down [2560 x 640] in the formats of this fork's files: UD-Q4_K_XL's Q4_K / Q5_K gate/up
-// and Q5_1 / Q8_0 down, IQ3_S's IQ3_XXS / IQ3_S / IQ2_S / IQ4_XS gate/up and IQ4_NL / Q2_0 down.
+// gate/up [1280 x 2560] and down [2560 x 640] in the formats of Lamina's Flash-Next files: UD-Q4_K_XL's Q4_K / Q5_K
+// gate/up and Q5_1 / Q8_0 down, IQ3_S's IQ3_XXS / IQ3_S / IQ2_S / IQ4_XS gate/up and IQ4_NL / Q2_0 down.
 // Synthetic weights of the right format (valid scales), random activations of row-varying magnitude.  Per product:
 // the median of 25 runs, the rate in int8-equivalent TOPS (2 x rows x out x in) and in weight GB/s.  Default R: 160
 // (an 8K chunk: 8192 x 10 / 512), 320 (16K), 626 (32K).

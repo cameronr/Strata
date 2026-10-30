@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and run THIS fork's draft_proxy parity selftest: correctness over the shipped 40,525-token draft
+# Build and run Lamina's draft_proxy parity selftest: correctness over the shipped 40,525-token draft
 # head, one tile past the old 49,152-row cap (49,184, the shape that used to throw "too many rows"), and
 # the 106,299 CJK subset - for Q6_K and Q8_0 - plus the copy-vs-exact draft-head timing at each size.
 #
