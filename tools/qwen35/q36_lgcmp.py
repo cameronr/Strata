@@ -1,5 +1,5 @@
 """q36_lgcmp.py A.bin B.bin : two --dump-full-logits files (float32 [steps][248320]) compared: max |dlogit|, mean / max KL(A||B), top-1 agreement.
-Used for the prompt-chunk and the kernel checks of docs/QWEN36.md."""
+Used for the Qwen3.6 path's prompt-chunk and kernel checks."""
 import sys, numpy as np
 V = 248320
 a = np.fromfile(sys.argv[1], dtype=np.float32).reshape(-1, V)

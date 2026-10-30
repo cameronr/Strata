@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One command that measures this Strata install the way it is used, and writes a report you can share.
+"""One command that measures this Lamina install the way it is used, and writes a report you can share.
 
     BENCH.bat                      (Windows)        ./bench.sh        (Linux)        python tools/strata_bench.py
 
@@ -20,8 +20,8 @@ Speeds are the engine's own timings (the `timings` of the answer: prompt_per_sec
 token and latency are measured by this client.  Thinking is off for the suite (--think turns it on), so the answers are
 short and the runs comparable.  The default run takes about 3-10 minutes after the model has loaded (the slower the card, the longer).
 
-The result goes to bench/results/<date>-community-<gpu>-<model>/ : README.md in the format of
-docs/COMMUNITY_BENCHMARKS.md, results.json (every request) and an engine log excerpt.  Home folders, user and host names,
+The result goes to bench/results/<date>-community-<gpu>-<model>/ : README.md (the report), results.json (every
+request) and an engine log excerpt.  Home folders, user and host names,
 IP addresses and API keys are replaced by placeholders before anything is written; read it once before you share it.
 `--compare <older results folder>` prints the two side by side.  Standard library only.
 """
@@ -64,7 +64,7 @@ BURST_MAX_TOKENS = 128
 
 # --------------------------------------------------------------------------------------------------------- redaction
 def redactor(extra: list[str] = (), key: str = ""):
-    """-> f(text) -> text with this machine's home folders, user and host names, the Strata folder, IP addresses and the
+    """-> f(text) -> text with this machine's home folders, user and host names, the Lamina folder, IP addresses and the
     API key replaced.  Applied to everything that is written or printed from the server's or the machine's own text."""
     subs: list[tuple[re.Pattern, str]] = []
 
@@ -75,7 +75,7 @@ def redactor(extra: list[str] = (), key: str = ""):
                 pat = re.escape(form)
                 subs.append((re.compile(r"(?<![\w-])" + pat + r"(?![\w-])" if word else pat, re.I), label))
 
-    add(ROOT, "<strata>")
+    add(ROOT, "<lamina>")
     add(Path.home(), "<home>")
     add(tempfile.gettempdir(), "<tmp>")
     try:
@@ -305,7 +305,7 @@ class Suite:
         """Five pieces of text a coding agent would read: this folder's own documents when they exist (nothing personal),
         else generated filler of the same size."""
         names = []
-        for rel in ("README.md", "docs/HOW_IT_WORKS.md", "docs/DETAILS.md", "docs/INSTALL.md", "docs/MODELS.md", "docs/COMMUNITY_BENCHMARKS.md"):
+        for rel in ("README.md", "docs/HOW_IT_WORKS.md", "docs/USING.md", "docs/SETUP.md", "docs/TROUBLESHOOTING.md", "docs/COMPARISON.md"):
             p = ROOT / rel
             if p.is_file():
                 words = p.read_text(encoding="utf-8", errors="replace").split()
@@ -637,7 +637,7 @@ def collect_machine(base: str, key: str, cfg: dict | None, gpu_arg: str | None =
         "os": f"{platform.system()} {platform.release()} ({platform.version()})" if os.name == "nt" else f"{platform.system()} {platform.release()}",
         "python": platform.python_version(),
         "strata_version": project_version(), "strata_commit": git_commit(),
-        "engine_version": (eng.get("version") or status.get("engine") or str(props.get("build_info", "")).replace("Strata ", "") or None),
+        "engine_version": (eng.get("version") or status.get("engine") or str(props.get("build_info", "")).replace("Lamina ", "") or None),
         "model": view.get("model_name") or status.get("model") or props.get("model_alias"),
         "quant": detect_quant(view) if view else None,
         "context": n_ctx or eng.get("max_context"), "parallel_slots": props.get("total_slots"),
@@ -662,14 +662,17 @@ def find_configs(folder: Path = ROOT) -> list[Path]:
     return sorted(out, key=lambda p: p.stat().st_mtime, reverse=True)
 
 
-def is_strata(base: str, key: str) -> bool:
+def is_lamina(base: str, key: str) -> bool:
     h = try_json(base, "/health", key, 5)
-    return bool(h and h.get("service") == "strata")
+    return bool(h and h.get("service") == "lamina")
 
 
-def without_profile_save(cfg: dict) -> tuple[dict, bool]:
+def without_profile_save(cfg: dict, scratch: Path | None = None) -> tuple[dict, bool]:
     """#2088: the config without `--expert-profile-save FILE` (and its value) - the engine writes that profile when the
-    server quits, and a benchmark's short prompts must not replace the user's calibrated one.  -> (config, removed)."""
+    server quits, and a benchmark's short prompts must not replace the user's calibrated one.  The config key
+    "expert_profile_save" (the server passes it on as that option, and starts from the profile it names) names `scratch`
+    instead, a copy of the user's profile when there is one, so the run starts as the user's runs do; without `scratch`
+    the key goes.  -> (config, removed)."""
     args = list(cfg.get("args") or [])
     out, i, removed = [], 0, False
     while i < len(args):
@@ -680,7 +683,19 @@ def without_profile_save(cfg: dict) -> tuple[dict, bool]:
         else:
             out.append(args[i])
             i += 1
-    return ({**cfg, "args": out} if removed else cfg), removed
+    res = {**cfg, "args": out} if removed else cfg
+    save = cfg.get("expert_profile_save")
+    if isinstance(save, str) and save.strip():
+        res, removed = {**res}, True
+        if scratch is None:
+            res.pop("expert_profile_save")
+            res.pop("expert_profile_save_every", None)
+        else:
+            src = Path(save) if Path(save).is_absolute() else ROOT / (cfg.get("cwd") or ".") / save   # the engine's cwd
+            if src.is_file():
+                shutil.copyfile(src, scratch)
+            res["expert_profile_save"] = str(scratch)
+    return res, removed
 
 
 def start_server(cfg_path: Path, port: int, gpu: str | None, log_path: Path):
@@ -689,10 +704,10 @@ def start_server(cfg_path: Path, port: int, gpu: str | None, log_path: Path):
     except (OSError, ValueError):
         cfg = None
     if isinstance(cfg, dict):
-        safe, removed = without_profile_save(cfg)
+        safe, removed = without_profile_save(cfg, log_path.with_suffix(".profile.bin"))
         if removed:                       # a copy beside the log: the user's config file is not touched
-            print("Note: the bench starts this model without --expert-profile-save, so its short prompts do not "
-                  "overwrite your saved expert profile.", file=sys.stderr)
+            print("Note: the bench saves this model's expert profile into a copy, so its short prompts do not "
+                  "overwrite your saved one.", file=sys.stderr)
             tmp = log_path.with_suffix(".config.json")
             tmp.write_text(json.dumps(safe), encoding="utf-8")
             cfg_path = tmp
@@ -709,7 +724,7 @@ def wait_ready(base: str, key: str, proc, timeout: float, log=print) -> bool:
         if proc is not None and proc.poll() is not None:
             return False
         h = try_json(base, "/health", key, 5)
-        if h and h.get("service") == "strata" and h.get("loaded"):
+        if h and h.get("service") == "lamina" and h.get("loaded"):
             return True
         if time.time() - last > 30:
             log(f"  still loading ({int(time.time() - t0)} s) ...")
@@ -818,7 +833,7 @@ def render_readme(res: dict) -> str:
          f"- CPU: {mc.get('cpu') or 'not read'} ({mc.get('cpu_cores') or '?'} cores, {mc.get('cpu_threads') or '?'} threads); "
          f"installed RAM: {mc.get('ram_gib') or '?'} GiB; storage: not measured",
          f"- OS: {mc.get('os')}; GPU driver: {mc.get('gpu_driver') or 'not read'}; CUDA: {mc.get('cuda') or 'not read'}",
-         f"- Strata: project {mc.get('strata_version') or '?'}, commit {mc.get('strata_commit') or 'not a git checkout'}; "
+         f"- Lamina: project {mc.get('strata_version') or '?'}, commit {mc.get('strata_commit') or 'not a git checkout'}; "
          f"engine {mc.get('engine_version') or 'not read'}",
          "- Background workloads and power limits: not recorded", "",
          "## Model and configuration", "",
@@ -832,7 +847,7 @@ def render_readme(res: dict) -> str:
     if env:
         L += ["Environment of the config: " + ", ".join(f"`{k}={v}`" for k, v in env.items()), ""]
     L += ["## Method", "",
-          f"Run by `{p['command']}` against the HTTP API of a Strata server "
+          f"Run by `{p['command']}` against the HTTP API of a Lamina server "
           f"({'started by the benchmark from the install configuration' if p['started_server'] else 'already running'}); model loading is not "
           f"timed. One warm-up chat and a 1K prompt are discarded first. Every prompt starts with a unique tag, so the conversation "
           f"cache cannot help the fresh-prompt tests.", "",
@@ -928,7 +943,7 @@ def server_base(host, port) -> str:
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Measure this Strata install and write a shareable report (see the top of this file).")
+    ap = argparse.ArgumentParser(description="Measure this Lamina install and write a shareable report (see the top of this file).")
     ap.add_argument("--config", help="the model config to run (default: the newest lamina-*.json of this folder)")
     ap.add_argument("--url", help="use the server already running at this address (http://127.0.0.1:8080) instead of starting one")
     ap.add_argument("--port", type=int, help="the port to start the server on (default: the config's)")
@@ -977,16 +992,16 @@ def main(argv=None) -> int:
     red = redactor(key=key)
     started = False
     try:
-        if is_strata(base, key):
-            say(f"Using the Strata server already running at {base}.")
+        if is_lamina(base, key):
+            say(f"Using the Lamina server already running at {base}.")
         elif a.url:
-            print(f"No Strata server answers at {base}.", file=sys.stderr)
+            print(f"No Lamina server answers at {base}.", file=sys.stderr)
             return 2
         else:
             if try_json(base, "/health", key, 3) is not None:
-                print(f"Port {port} is used by something that is not Strata: pass --port N.", file=sys.stderr)
+                print(f"Port {port} is used by something that is not Lamina: pass --port N.", file=sys.stderr)
                 return 2
-            log_path = Path(tempfile.gettempdir()) / f"strata-bench-{os.getpid()}.log"
+            log_path = Path(tempfile.gettempdir()) / f"lamina-bench-{os.getpid()}.log"
             say(f"Starting {cfg_path.name} on port {port} (loading takes 1-3 minutes; the PC may be slow meanwhile) ...")
             proc = start_server(cfg_path, port, a.gpu, log_path)
             started = True
@@ -1024,9 +1039,9 @@ def main(argv=None) -> int:
             shown = d.relative_to(ROOT)
         except ValueError:
             shown = d
-        say(f"\nReport: {shown / 'README.md'}\nShare it: open a pull request that adds the folder {shown} (see docs/COMMUNITY_BENCHMARKS.md), "
-            f"or paste README.md into a GitHub issue. Home folders, user and host names and IP addresses are already replaced; "
-            f"read it once before you share it.")
+        say(f"\nReport: {shown / 'README.md'}\nShare it: paste README.md into an issue at "
+            f"https://github.com/eddoursul/Lamina/issues. Home folders, user and host names and IP addresses are already "
+            f"replaced; read it once before you share it.")
         return 1 if out["failures"] and not any(out[k] for k in ("chat", "prompts", "agent")) else 0
     finally:
         if started:

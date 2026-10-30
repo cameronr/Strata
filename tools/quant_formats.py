@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-layer tensor formats of a (sharded) GGUF, read from the headers only (docs/QUANTS.md).
+"""Per-layer tensor formats of a (sharded) GGUF, read from the headers only.
 
     python tools/quant_formats.py PATH-OR-GLOB [...]           local shards (any shard; all are read)
     python tools/quant_formats.py --hf REPO REV DIR [--json OUT] Hugging Face: HTTP range requests on each shard's

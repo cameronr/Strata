@@ -1,5 +1,5 @@
 @echo off
-rem Benchmark this Lamina install the way it is used and write a report you can share (docs/COMMUNITY_BENCHMARKS.md).
+rem Benchmark this Lamina install the way it is used and write a report you can share.
 rem It starts the model with your settings (or uses the one already running), takes about 10 minutes and changes nothing.
 rem Options: --clients 4 (several requests at once), --long (a 32K prompt), --compare <older results folder>.
 setlocal

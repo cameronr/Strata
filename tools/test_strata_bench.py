@@ -1,5 +1,5 @@
 """Tests for tools/strata_bench.py with a fake engine behind a real HTTP server: the suite runner, the redaction, the report
-writing and the comparison.  Light: no GPU, no Strata server, a few seconds."""
+writing and the comparison.  Light: no GPU, no Lamina server, a few seconds."""
 from __future__ import annotations
 
 import contextlib
@@ -57,11 +57,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         s = self.server
         if self.path == "/health":
-            self.send_json({"status": "ok", "service": "strata", "loaded": True})
+            self.send_json({"status": "ok", "service": "lamina", "loaded": True})
         elif self.path == "/v1/models":
             self.send_json({"object": "list", "data": [{"id": "fake", "meta": {"n_ctx": s.ctx}}]})
         elif self.path == "/props":
-            self.send_json({"total_slots": 4, "model_alias": "fake-model", "build_info": "Strata 9.9.9"})
+            self.send_json({"total_slots": 4, "model_alias": "fake-model", "build_info": "Lamina 9.9.9"})
         elif self.path == "/v1/status":
             self.send_json({"machine": {"gpu": {"name": "NVIDIA GeForce RTX 9999", "total_mib": 12288}, "ram": {"total_gib": 64.0}},
                             "engine": "9.9.9", "vram": {"free_mib": 1000}})
@@ -181,7 +181,7 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("<ip>", text)
         self.assertEqual(red("127.0.0.1:8080 and version 0.1.40.3 and driver 32.0.15.7"), "127.0.0.1:8080 and version 0.1.40.3 and driver 32.0.15.7")
         self.assertNotIn(str(B.ROOT), red(f"loading {B.ROOT / 'strata-x.json'}"))
-        self.assertIn("<strata>", red(f"loading {B.ROOT / 'strata-x.json'}"))
+        self.assertIn("<lamina>", red(f"loading {B.ROOT / 'strata-x.json'}"))
         self.assertNotIn(str(Path.home()), red(f"in {Path.home() / 'data'}"))
         if len(user) >= 4:
             self.assertNotIn(user, red(f"hello {user} world"))
@@ -317,6 +317,22 @@ class ReportTests(unittest.TestCase):
             used = Path(popen.call_args[0][0][popen.call_args[0][0].index("--config") + 1])
             self.assertNotIn("--expert-profile-save", json.loads(used.read_text())["args"])
             self.assertIn("--expert-profile-save", json.loads(c.read_text())["args"])   # the user's file is as it was
+
+    def test_a_bench_server_saves_the_learned_profile_into_a_copy(self):
+        """The config key expert_profile_save: the run starts from a copy of the user's profile and saves into it."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            learned, copy = Path(d) / "learned.bin", Path(d) / "copy.bin"
+            learned.write_bytes(b"profile")
+            cfg = {"args": ["--spec", "4"], "expert_profile_save": str(learned), "expert_profile_save_every": 1}
+            safe, removed = B.without_profile_save(cfg, copy)
+            self.assertTrue(removed)
+            self.assertEqual((safe["expert_profile_save"], safe["expert_profile_save_every"]), (str(copy), 1))
+            self.assertEqual(copy.read_bytes(), b"profile")
+            self.assertEqual(cfg["expert_profile_save"], str(learned))    # the input is not changed
+            safe, removed = B.without_profile_save(cfg)
+            self.assertTrue(removed)
+            self.assertNotIn("expert_profile_save", safe)
+            self.assertNotIn("expert_profile_save_every", safe)
 
     def test_an_attached_server_is_not_stopped(self):
         """#2088: with --url the bench only reads; the server it did not start keeps running."""

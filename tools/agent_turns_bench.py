@@ -64,7 +64,7 @@ SESSIONS = [
       ("grep", "add_argument", "Now let me find where the server parses its options."),
       ("read_file", "serve/server.py", "The options are in serve/server.py; reading it."),
       ("read_file", "serve/frontend.py", "Requests go through the frontend; let me read it too."),
-      ("read_file", "docs/DETAILS.md", "Checking DETAILS.md for the existing API documentation style.")]),
+      ("read_file", "docs/USING.md", "Checking USING.md for the existing API documentation style.")]),
     ("expert-cache",
      "Explain precisely how the expert cache decides which experts stay in VRAM during decode, then propose and "
      "implement a small improvement to its eviction policy with a measurement plan.",
@@ -79,8 +79,8 @@ SESSIONS = [
      "français.",
      [("read_file", "setup.py", "Je commence par lire l'installateur."),
       ("grep", "def .*ram", "Je cherche les fonctions qui mesurent la RAM."),
-      ("read_file", "docs/INSTALL.md", "Je vérifie ce que la documentation promet sur la RAM."),
-      ("read_file", "docs/MODELS.md", "Le choix du modèle dépend de la RAM ; je lis cette page aussi.")]),
+      ("read_file", "docs/SETUP.md", "Je vérifie ce que la documentation promet sur la RAM."),
+      ("read_file", "README.md", "Le choix du modèle dépend de la RAM ; je lis cette page aussi.")]),
     ("cuda-kernel",
      "The hyper-connection read kernels are latency bound on small batches. Read them, explain where the time goes, "
      "and write a faster variant for 1-4 tokens that keeps the same results bit for bit.",

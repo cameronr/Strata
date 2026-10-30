@@ -11,8 +11,8 @@ a change in how the server keeps the document (the shared prefix below) can be c
 
 --layout split  (the default): the document is the first message, the question the second.
 --layout joined: one message, "document + question" (a client that cannot split them).
---prefix on: the request carries "strata_prefix" naming the document as the shared prefix (docs/DETAILS.md): the
-server reads it once and every question starts from it.  off: the field is left out.
+--prefix on: the request carries "strata_prefix" naming the document as the shared prefix: the server reads it
+once and every question starts from it.  off: the field is left out.
 --parallel N: N questions at a time (the server needs "parallel": N for them to run together).
 """
 from __future__ import annotations

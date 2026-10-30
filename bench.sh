@@ -1,5 +1,5 @@
 #!/bin/sh
-# Benchmark this Lamina install the way it is used and write a report you can share (docs/COMMUNITY_BENCHMARKS.md).
+# Benchmark this Lamina install the way it is used and write a report you can share.
 # It starts the model with your settings (or uses the one already running), takes about 10 minutes and changes nothing.
 # Options: --clients 4 (several requests at once), --long (a 32K prompt), --compare <older results folder>.
 cd "$(dirname "$0")" || exit 1

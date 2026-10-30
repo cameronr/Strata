@@ -6,7 +6,7 @@ the Python setup made, after setup (it uses setup.py's toolchain and downloads):
     .venv/Scripts/python.exe tools/image/install.py --config lamina-iq3_s.json      (the quant by the GPU's VRAM)
     .venv/bin/python tools/image/install.py --backend cpu --print
 
---gpu-policy auto|keep|shrink|unload: what the text model does during an image job (serve/images.py).
+--gpu-policy auto|keep|unload: what the text model does during an image job (serve/images.py).
 """
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def main(argv=None) -> int:
     ap.add_argument("--models-dir", default=str(S.ROOT.parent / "Lamina-data" / "models"),
                     help="where the model files go (default: setup's data folder's models)")
     ap.add_argument("--config", help="a run config (lamina-<model>.json) to write the \"images\" section into")
-    ap.add_argument("--gpu-policy", choices=["auto", "keep", "shrink", "unload"], default="auto")
+    ap.add_argument("--gpu-policy", choices=["auto", "keep", "unload"], default="auto")
     ap.add_argument("--gpu", type=int, help="the GPU's number for the image job (default: CUDA's first)")
     ap.add_argument("--native", choices=["on", "off"], default="off",
                     help="EXPERIMENTAL: the native DiT runner on CUDA (the config's \"native\")")

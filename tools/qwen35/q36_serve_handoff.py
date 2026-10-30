@@ -1,7 +1,7 @@
 """q36_serve_handoff.py PORT [--n 300] : a request that runs alone (the solo path, with MTP drafts), another one arrives while it
 runs (the server stops it and continues it in a batch slot from its held state), the second one ends (the first is alone again and
 goes back to the solo path): the first request's text must be the text of the same request run entirely alone.  Greedy, thinking
-off, every expert in VRAM (in the hybrid mode a different window mix can round differently: see docs/QWEN36.md).
+off, every expert in VRAM (in the hybrid mode a different window mix can round differently).
 
   python tools/qwen35/q36_serve_handoff.py 8199 [--n 300] [--delay 1.0]
 """

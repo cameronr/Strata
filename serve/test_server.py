@@ -627,7 +627,7 @@ class VisionTempFiles(unittest.TestCase):
                 with self.assertRaises(OSError) as cm:
                     popen("the image encoder", ["strata-vision.exe"])
                 self.assertIn("Smart App Control", str(cm.exception))
-                self.assertIn("--vision no", str(cm.exception))
+                self.assertIn("--vision off", str(cm.exception))
         with mock.patch.object(subprocess, "Popen", side_effect=FileNotFoundError("gone")):
             with self.assertRaises(FileNotFoundError):
                 popen("x", ["x"])

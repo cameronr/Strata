@@ -115,7 +115,7 @@ inline const char* ggml_type_name(uint32_t t) {
         return "Q1_0";
     case 42:
         return "Q2_0";
-    // Agention's llama.cpp fork: the APR trellis expert types (docs/GYRO.md)
+    // Agention's llama.cpp fork: the APR trellis expert types (named only: the engine has no kernels for them)
     case 143:
         return "PTQ1_0";
     case 144:

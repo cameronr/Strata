@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""A tiny terminal chat for a running Strata server (start it with run-<model>.bat / run-<model>.sh first).
+"""A tiny terminal chat for a running Lamina server (start it with run-<model>.bat / run-<model>.sh first).
 
-    python chat.py [--port 8080] [--think none|low|medium|high]
+    python chat.py [--port 8081] [--think none|low|medium|high]
 
 Type a message and press Enter.  /image <path> attaches a picture to your next message (when the server was set up
 with images), /think <none|low|medium|high> sets how long the model thinks first, /reset starts a new conversation,
@@ -20,7 +20,7 @@ import urllib.request
 
 
 def stream(url, messages, think, max_tokens):
-    body = {"model": "strata", "messages": messages, "stream": True, "max_tokens": max_tokens,
+    body = {"model": "lamina", "messages": messages, "stream": True, "max_tokens": max_tokens,
             "reasoning_effort": think}
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=3600) as r:
@@ -34,7 +34,7 @@ def stream(url, messages, think, max_tokens):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--port", type=int, default=8081)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--think", default="medium", choices=["none", "low", "medium", "high"],
                     help="how long the model thinks before answering (none = answer directly)")
@@ -45,7 +45,7 @@ def main() -> int:
     gray, reset = ("\033[90m", "\033[0m") if sys.stdout.isatty() else ("", "")
     messages, pending = [], []
     think = "none" if a.no_think else a.think
-    print(f"Strata chat ({url}).  /image <path> = attach a picture, /think none|low|medium|high (now: {think}), "
+    print(f"Lamina chat ({url}).  /image <path> = attach a picture, /think none|low|medium|high (now: {think}), "
           f"/reset = new conversation, /quit = leave.")
     while True:
         try:

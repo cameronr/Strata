@@ -90,7 +90,7 @@ def popen(what: str, args: list, role: str = "engine", **kw):
             raise OSError(f"Windows blocked {what} ({args[0]}): Smart App Control, or an application-control policy, does "
                           "not let a program that is not signed run. Turn Smart App Control off (Windows Security > App "
                           "& browser control > Smart App Control settings), or - for the image encoder only - run setup "
-                          "with --vision no (see docs/TROUBLESHOOTING.md)") from e
+                          "with --vision off (see docs/TROUBLESHOOTING.md)") from e
         raise
 
 
@@ -3628,8 +3628,8 @@ class Service:
             if self.offline and any(src.startswith(("http://", "https://")) for src in images):
                 raise ValueError("offline mode cannot download an image URL; send a data: image instead")
             if self.vision is None:
-                raise ValueError("this server was started without the vision encoder (run setup again and choose "
-                                 "'vision'), so it cannot read images")
+                raise ValueError("this server was started without the vision encoder (run setup again with "
+                                 "--vision on), so it cannot read images")
             pad = self.tok.encode(IMAGE_PAD, parse_special=True)[0]
             start = self.tok.encode(VISION_START, parse_special=True)[0]
             # An image URL is downloaded first, outside the FIFO: under it, a slow server held every other request
