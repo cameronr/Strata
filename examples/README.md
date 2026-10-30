@@ -23,9 +23,9 @@ report, the PLE read probe, 0.1.44's NVFP4 experts and batched commit graph, 0.1
 opt-in switches but `STRATA_DEQUANT_WIDE`, the engine of 0.2.0-beta (0.1.45.3): the switches on by default per
 architecture (`STRATA_SM86_PERF`, `STRATA_SM120_PERF`), agentionai's Gyro files (trellis expert types, Hadamard-folded
 experts), the CPU pool's planned worker count, the pinned-memory reserve, the prompt planner and the Linux file tier's
-read-ahead, and the AMD, Intel, Metal (Mac), Turing, Volta and Pascal builds. A
-Flash-Next config with `parallel` or `vram_elastic` passes the engine a flag it refuses; with `slot_save_path`, a save
-request ends the engine.
+read-ahead, and the AMD, Intel, Metal (Mac), Turing, Volta and Pascal builds. The server has no VRAM resize
+(`vram_elastic`), session files (`slot_save_path`), layer split or AMD / Intel / Mac backends either; `parallel` runs
+the Qwen3.6 path's batch slots (a Flash-Next config with it passes the engine a flag it refuses).
 
 The configs keep what each model's run learned (`expert_profile_save`, upstream's #477): the engine writes a profile
 (`<model>-learned.bin`: in the Lamina folder for these configs, in the data folder for setup's) at exit, on Ctrl+C in
