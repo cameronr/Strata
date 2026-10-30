@@ -832,7 +832,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             for (int t = tb; t < te; ++t) {
                 MoEBuffers mb = ss.moe;
                 mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
-                if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err, nullptr)) return false;
+                if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err)) return false;
             }
             doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
                              m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
@@ -1044,12 +1044,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             }
             fused_gr_read_multi(fa, T, grs_, cs);
         } else {
-            for (int t = 0; t < T; ++t) {
-                BlockBuffers bb = ss.block;
-                bb.R = Rt(t);
-                bb.mixed = head_mixed_ + t * N;
-                if (!lm_head(wt, g, bb, head_logits_ + (size_t) t * n_vocab_, cs, err)) return false;
-            }
+            err = "verify: the model's head is not loaded";
+            return false;
         }
         if (head_ != nullptr && head_->loaded()) {
             try {

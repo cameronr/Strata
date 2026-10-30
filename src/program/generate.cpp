@@ -1,18 +1,7 @@
-// src/program/generate.cpp - P2.S6: `strata generate`.
-//
-// THE DRIVER, and the first program in this project that answers a question.  Everything below it is a
-// component; this is the thing that composes them into a token:
-//
-//     embed_row(token)  ->  48 captured layer graphs (the CPU expert pool behind the doorbell)  ->
-//     lm_head(R)        ->  sample        ->  embed_row(next)  ->  ...
-//
-// WHAT IT IS NOT.  There is no tokenizer here.  `pack/full/tokenizer/` and `tools/strata_tokenizer.py` exist,
-// and a C++ BPE is Phase 1's deliverable rather than this program's, so the prompt arrives as IDS via
-// `--tokens`.  That is not a placeholder: it is exactly what Gate C1 needs, because C1 compares logits against
-// llama.cpp on the SAME ids, and a tokenizer on only one side of that comparison is a second variable.
-//
-// AND IT IS PHASE 2, so hit rate is `h = 0` and the number it prints is slow on purpose
-// (`phase-2-correct-engine.md:5-9`).  What it is FOR is the honest tok/s figure and the logit dump.
+// src/program/generate.cpp - the engine (`lamina`): a model's prompt through the batched prompt path and its
+// decoding in verify windows of the last token and the draft layer's drafts, the experts in the GPUs' VRAM tiers and
+// the CPU pool.  Generate mode reads pretokenized ids (--tokens) and prints the tokens it decodes; --serve keeps
+// the model loaded and takes requests on stdin (serve/server.py speaks to it).
 
 #include "strata/artifact/gguf_split.hpp"
 #if defined(STRATA_HAVE_QWEN35)
@@ -1448,7 +1437,6 @@ int main(int argc, char** argv) {
 
     // the native kernels (the parity tests switch some of them off to compare)
     strata::kernels::gr_set_native_mmvf(true);
-    strata::core::layer_set_native_bf16(true);
     strata::kernels::ple_set_native_bf16(true);
     strata::kernels::shared_expert_set_native_bf16(true);
     strata::kernels::native_moe_combine_set_enabled(true);
@@ -1600,12 +1588,6 @@ int main(int argc, char** argv) {
     }
 
 
-    strata::core::Doorbell db;
-    if (strata::core::doorbell_init(g, K, db) == 0) {
-        std::fprintf(stderr, "strata generate: doorbell_init failed\n");
-        return 1;
-    }
-    ss.db = &db;
 
     // ================================ THE PLE ================================
     //
@@ -2141,56 +2123,6 @@ int main(int argc, char** argv) {
     drive.placement = &placement;
     drive.d.src = srcp;
     drive.d.n_expert = g.n_expert;
-    drive.d.jobs.resize((size_t) K);
-    // ---- R4.2c: THE HIT PATH.  Every one of these is required for `hits_ready()`, which is all-or-nothing on
-    // purpose: a half-configured hit path would compute some experts twice and others not at all, and a token
-    // built on that is wrong rather than refused.
-    void* hit_scratch = nullptr;
-    int32_t* d_hit_slot = nullptr;
-    int32_t* d_hit_dst = nullptr;
-    uint8_t* d_hit_q8 = nullptr;
-    float* d_hit_q8_scale = nullptr;   ///< R4.2h: the fp32 activation scales the CPU path also uses
-    float* d_hit_out = nullptr;
-    if (o.expert_cache > 0) {
-        const uint64_t sb = strata::kernels::moe_hit_grouped_scratch_bytes(K, g.n_embd, strata::kernels::cpu::FF);
-        if (cudaMalloc(&hit_scratch, (size_t) sb) != cudaSuccess ||
-            cudaMalloc((void**) &d_hit_slot, (size_t) K * sizeof(int32_t)) != cudaSuccess ||
-            cudaMalloc((void**) &d_hit_dst, (size_t) K * sizeof(int32_t)) != cudaSuccess ||
-            cudaMalloc((void**) &d_hit_q8, (size_t) (g.n_embd / 32) * 34) != cudaSuccess ||
-            // R4.2h: the fp32 activation scales.  Without this the GPU's hits use the block's fp16 `d`
-            // while the CPU's misses use `ActQ::scale`, which is fp32 - a 4.761e-04 relative disagreement on
-            // every chunk, and the reason enabling the cache changed the tokens.
-            cudaMalloc((void**) &d_hit_q8_scale, (size_t) (g.n_embd / 32) * sizeof(float)) != cudaSuccess ||
-            cudaMalloc((void**) &d_hit_out, (size_t) K * g.n_embd * 4) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the R4 hit path could not allocate its device buffers\n");
-            return 1;
-        }
-        drive.d.cache = &xcache;
-        drive.d.cache_stream = main_cs;
-        drive.d.cache_base = (const uint8_t*) xcache.device_slot(0);
-        drive.d.cache_blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
-        drive.d.cache_slot_off = xcache.slot_offsets();
-        drive.d.hit_scratch = hit_scratch;
-        drive.d.parts_out = d_parts;
-        drive.d.hit_out = d_hit_out;
-        drive.d.parts_elems = K * g.n_embd;
-        drive.d.mixed = ss.block.mixed;
-        drive.d.x_q8_0_hit = d_hit_q8;
-        drive.d.x_q8_0_hit_scale = d_hit_q8_scale;
-        drive.d.d_slot = d_hit_slot;
-        drive.d.d_dst = d_hit_dst;
-        drive.d.h_slot.resize((size_t) K);
-        cudaEvent_t hit_done = nullptr;
-        if (cudaEventCreate(&hit_done) != cudaSuccess) {
-            std::fprintf(stderr, "strata generate: the hit path could not create its probe event\n");
-            return 1;
-        }
-        drive.d.hit_done = (void*) hit_done;
-        drive.d.hit_poke = true;
-        drive.d.h_dst.resize((size_t) K);
-        mem_mark("the R4 hit path");
-        std::fprintf(stderr, "strata generate: R4 hit path ON - resident experts are computed on the GPU\n");
-    }
     // ---- the routing trace (--dump-routing): every verify window row's routed experts (drive_pool_multi)
     std::FILE* routing = nullptr;
     if (!o.dump_routing.empty()) {
@@ -2220,7 +2152,6 @@ int main(int argc, char** argv) {
     // this table
     std::vector<int32_t> host_res;
     int32_t* d_res = nullptr;
-    int32_t* d_hit_count = nullptr;
     strata::core::TokenHits thits;
     const bool graph_hits = o.expert_cache > 0 && !profile.empty();
     if (pinning && !graph_hits) {   // the residency table is their only path (checked with the options above)
@@ -2238,22 +2169,14 @@ int main(int argc, char** argv) {
                 if (slot != strata::core::kNotResident) ++resident;
             }
         if (cudaMalloc((void**) &d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
-            cudaMalloc((void**) &d_hit_count, sizeof(int32_t)) != cudaSuccess ||
             res_put(d_res, host_res) != cudaSuccess) {
             std::fprintf(stderr, "strata generate: the device residency table could not be staged\n");
             return 1;
         }
         thits.d_res = d_res;
         thits.n_expert = g.n_expert;
-        thits.cache_base = drive.d.cache_base;
-        thits.blob = drive.d.cache_blob;
-        thits.d_slot = drive.d.d_slot;
-        thits.d_dst = drive.d.d_dst;
-        thits.d_count = d_hit_count;
-        thits.x_q8 = drive.d.x_q8_0_hit;
-        thits.x_scale = drive.d.x_q8_0_hit_scale;
-        thits.scratch = drive.d.hit_scratch;
-        thits.hit_out = drive.d.hit_out;
+        thits.cache_base = (const uint8_t*) xcache.device_slot(0);
+        thits.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
         drive.d.host_res = host_res.data();
         std::fprintf(stderr, "strata generate: the residency table: %lld resident experts, decided on the device%s\n",
                      (long long) resident, o.disable_hit ? " (--disable-hit)" : "");
@@ -4428,24 +4351,15 @@ int main(int argc, char** argv) {
         // hits/lookups so it can be read directly as the h the cache would deliver, and alongside `refused`
         // so a full cache is visible rather than silently capping the rate.
         if (o.expert_cache > 0) {
-            const int64_t look = drive.d.cache_hits + drive.d.cache_admitted + drive.d.cache_refused;
-            const int64_t hl = drive.d.hit_ready + drive.d.hit_late;
-            std::printf("%-24s %lld of %lld layers the hit work was DONE when the pool returned\n",
-                        "  R4 overlap", (long long) drive.d.hit_ready, (long long) hl);
-            std::printf("%-24s %lld of %lld = %.4f      (%lld admitted, %lld refused, cache %.4f%% full)\n",
-                        "  R4 expert-cache hits", (long long) drive.d.cache_hits, (long long) look,
-                        look > 0 ? (double) drive.d.cache_hits / (double) look : 0.0,
-                        (long long) drive.d.cache_admitted, (long long) drive.d.cache_refused,
-                        100.0 * (double) (drive.d.cache_admitted + drive.d.cache_hits > 0
-                                              ? (double) xcache.resident() / (double) xcache.slots()
-                                              : 0.0));
+            const int64_t look = drive.d.cache_hits + drive.d.cache_refused;
+            std::printf("%-24s %lld of %lld = %.4f\n", "  expert-cache hits", (long long) drive.d.cache_hits,
+                        (long long) look, look > 0 ? (double) drive.d.cache_hits / (double) look : 0.0);
         }
     }
 
     check_stack_limit(o.main_gpu, o.main_gpu);
     for (const int d : o.tier_gpus) check_stack_limit(d, o.main_gpu);
 
-    strata::core::doorbell_free(db);
     cudaFree(d_parts);
     cudaFree(sbuf);
     cudaFree(arena);

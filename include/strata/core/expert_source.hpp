@@ -22,7 +22,6 @@
 #pragma once
 
 #include "strata/core/expert_cache.hpp"
-#include "strata/core/hit_hook.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 
 #include <atomic>
@@ -131,101 +130,12 @@ struct ExpertDispatch {
     int64_t experts = 0;
     int64_t missing = 0;
 
-    // ================================ R4: THE VRAM TIER, MEASURED BEFORE IT IS USED ================================
-    //
-    // **THE CACHE IS CONSULTED AND FILLED HERE, AND NOTHING IS COMPUTED FROM IT YET.**  That is deliberate and
-    // it is `R4-design-note.md` §7 step 2: the *dispatch* is measured on its own before any kernel is written,
-    // because a hit rate measured after the kernel exists cannot say whether a disappointing result was the
-    // policy, the split or the kernel.
-    //
-    // So every expert is still computed by the CPU, exactly as before, and the run is numerically identical
-    // with the cache on or off.  What changes is that the engine now reports **h on its own routing, on a real
-    // workload** - which is the number `R4.1` asks for and which until now existed only from offline traces.
-    //
-    // The policy is compulsory-miss: the first time `(layer, expert)` is routed, if a slot is free it is
-    // admitted and filled from the arena.  No eviction, because eviction policy is the measured question
-    // (`R4.1`'s LFU-decay vs LRU sweep) and a placeholder would set the hit rate everything is sized against.
-    ExpertCache* cache = nullptr;
-    int64_t cache_hits = 0;      ///< lookups already resident
-    int64_t cache_admitted = 0;  ///< lookups that took a slot
-    int64_t cache_refused = 0;   ///< lookups with no slot free (the cache is full)
-    void* cache_stream = nullptr;
-    const char* cache_fail = nullptr;
-
-    // ================================ R4.2c: THE HITS GO TO THE GPU ================================
-    //
-    // **THE SPLIT IS BY ROUTER INDEX, AND THAT IS THE WHOLE TRICK.**  A layer routes ten experts; the resident
-    // ones are computed on the GPU and the rest on the CPU, and both answers have to end up in `parts` at the
-    // index the ROUTER gave them, because that is the order `moe_combine` weights against.  So the CPU's `out`
-    // rows are zeroed for the hits, and each hit carries its routed index to the kernel as `dst`.
-    //
-    // Everything below is per-session state rather than per-call, so the token path allocates nothing (P2.T10).
-    const uint8_t* cache_base = nullptr;   ///< the slot arena on the DEVICE
-    int64_t cache_blob = 0;                ///< bytes per slot
-    const uint64_t* cache_slot_off = nullptr;   ///< plan v0.3 P6: per-slot offsets when the slots differ in size
-    void* hit_scratch = nullptr;           ///< `moe_hit_grouped_scratch_bytes(K, ...)`
-    float* parts_out = nullptr;            ///< the graph's `parts` buffer, on the device
-    /// Where the GPU's hits land, `K x n_embd`, DEVICE and separate from `parts_out` on purpose: see
-    /// `HitPhase`.  Zeroed by the hit path each layer before the kernel writes it.
-    float* hit_out = nullptr;
-    int64_t parts_elems = 0;               ///< `K * n_embd`, the length of both buffers
-    const float* mixed = nullptr;          ///< the layer's normed activation, for the hit kernel's Q8_0
-    uint8_t* x_q8_0_hit = nullptr;         ///< `(n_embd/32) * 34` bytes, its own buffer
-    /// **R4.2h: THE CPU's fp32 ACTIVATION SCALES, `(n_embd/32)` FLOATS.**  Without them the GPU's hits are
-    /// computed with the `block_q8_0`'s fp16 `d` while the CPU's misses use the fp32 `ActQ::scale`
-    /// (`cpu/expert.cpp:92`) - **4.761e-04 relative on 80 of 80 chunks**, measured with both real
-    /// implementations linked in `bench/micro/act_quant_parity.cu`.  That disagreement is why turning the
-    /// cache on changed the generated tokens.  Required whenever the hit path runs.
-    float* x_q8_0_hit_scale = nullptr;
-    int32_t* d_slot = nullptr;             ///< device, K entries
-    int32_t* d_dst = nullptr;              ///< device, K entries
-    std::vector<int32_t> h_slot, h_dst;    ///< host staging, sized at session setup
-    /// **PER ROUTER INDEX, DECIDED IN `Launch` AND CONSUMED BY THE POOL.**  The two callbacks share it
-    /// so the decision is made exactly once, on this layer's ids, and neither side can re-decide it.
-    std::vector<uint8_t> is_hit;
-    bool decided = false;
-    /// Plan v0.3 P4 token graph: the residency table (`n_layers x n_expert`, slot or -1), the host's copy of what the
-    /// device hit path reads (in verify windows `Verifier::residency`).  When set, the pool leaves a resident
-    /// expert's row to the GPU without any `Launch` callback.
+    /// The verify windows' routed experts a GPU held and those none held (the stats line).
+    int64_t cache_hits = 0;
+    int64_t cache_refused = 0;
+    /// The residency table (`n_layers x n_expert`, slot or -1): the host's copy of what the device hit path reads
+    /// (`Verifier::residency`).  The pool leaves a resident expert's rows to the GPU.
     const int32_t* host_res = nullptr;
-    /// Plan v0.3 P4: split every expert by rows across the pool's threads (default on; A/B `--no-split-rows`).
-    bool split_rows = true;
-
-    // ================================ R4.2d: DID THE GPU ACTUALLY START? ================================
-    //
-    // **THE HIT PATH IS 0.91 ms SLOWER AND THE ONLY EXPLANATION LEFT IS THAT IT NEVER OVERLAPS.**  The kernel
-    // is 159 GB/s against the CPU's 35, the CPU's half of the drain falls 6 ms, and none of it reaches the
-    // token - which is what it would look like if the enqueued hit kernels did not BEGIN until the host next
-    // entered the driver, i.e. after `pool()` returned.  That is the third sighting of this driver behaving
-    // that way (rounds 195/287 on the doorbell, round 36 on the head and sampler) and it decides whether R4 can
-    // pay at all, so it gets measured rather than argued.
-    //
-    // `hit_done` is recorded on the stream straight after the hit kernel.  `Combine` - which runs after the
-    // pool - queries it: SUCCESS means the GPU finished while the CPU was working, NOT-READY means it had not.
-    // Same shape as the doorbell's `rings_mid_graph`, and for the same reason.
-    void* hit_done = nullptr;      ///< cudaEvent_t, created at session setup
-    int64_t hit_ready = 0;         ///< layers where the hit work was DONE by the time the pool returned
-    int64_t hit_late = 0;          ///< layers where it was not
-    /// The candidate fix, as an A/B arm: enter the driver once right after the hit launch.  If submission is
-    /// lazy, this starts the GPU work before the pool instead of after it.
-    bool hit_poke = false;
-    bool hit_cpu_order = false;    ///< experimental CPU-order GPU expert arithmetic; opt-in only
-    int64_t n_hits = 0;                    ///< this layer's hits
-    /// Set by `Launch` and consumed by `Combine`, so a `Combine` with no `Launch` in front of it cannot
-    /// add a stale buffer into `parts`.
-    bool hit_pending = false;
-    const char* hit_fail = nullptr;
-
-    /// Whether the hit path is wired up.  All of it or none of it: a half-configured hit path would compute
-    /// some experts twice and others not at all, which is a wrong token rather than an error.
-    bool hits_ready() const {
-        return cache != nullptr && cache_base != nullptr && parts_out != nullptr && hit_out != nullptr &&
-               mixed != nullptr &&
-               hit_scratch != nullptr && x_q8_0_hit != nullptr && x_q8_0_hit_scale != nullptr && d_slot != nullptr && d_dst != nullptr;
-    }
-
-    std::vector<strata::kernels::cpu::ExpertJob> jobs;
-    strata::kernels::cpu::ActQ act;
     /// Plan v0.3 P6 verify window: one quantized activation per token, the multi-token jobs, and the expert ->
     /// job map (reset after every layer).
     std::vector<strata::kernels::cpu::ActQ> act_multi;
@@ -277,10 +187,6 @@ struct ExpertDispatch {
     int64_t fail_expert = -1;
 };
 
-/// `strata::core::PoolFn`, exactly.  Silent on failure BY SIGNATURE - see `ExpertDispatch::fail`.
-void expert_pool_dispatch(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_embd,
-                          int64_t k, float* out);
-
 /// Plan v0.3 P6: the pool for a verify window of `n_tok` tokens.  `x_f` is (n_tok, n_embd), `ids` (n_tok, k) and
 /// `out` (n_tok * k, n_embd).  Each distinct missed expert is computed once for all the tokens routed to it;
 /// resident experts' rows are the main GPU's (zeroed, or left unwritten with `GpuPlanSink::host_rows_only`), and each
@@ -293,14 +199,6 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
 void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids, const float* w, int64_t n_tok,
                            int64_t k);
 
-/// **THE HITS, LAUNCHED AFTER THE MISSES ARE STAGED AND BEFORE `post[l]`.**  Same shape as `PoolFn` and for the
-/// same reason: `session_loop` owns the ORDER and this owns the work, so the loop needs to know nothing about
-/// expert caches.  Returns immediately when there are no hits, which is every layer until the cache is warm.
-///
-/// It must run AFTER the host has copied the misses into `parts_dev` (it writes into the same buffer, on rows
-/// the CPU zeroed) and BEFORE `post[l]` (which reads it).  Both are stream-ordered on the loop's own stream.
-void expert_hit_run(void* user, void* stream, HitPhase phase, const int32_t* ids, int64_t k);
-/// The pool half of the same decision; see `ExpertDispatch::is_hit`.
 
 /// **PHASE 2'S ONLY SOURCE: `experts.bin`, memory-mapped, no cache.**
 ///
