@@ -26,6 +26,7 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/qwen35/engine.hpp"
+#include "strata/program/serve_io.hpp"
 #include "q36_kernels.cuh"
 #if defined(STRATA_Q36_CPU_POOL)
 #include "strata/kernels/cpu/native_expert.hpp"
@@ -58,6 +59,8 @@
 #include <tuple>
 #include <type_traits>
 #include <vector>
+
+using strata::program::serve_print;   // the --serve protocol's replies (serve_io.hpp)
 
 namespace {
 
@@ -3219,13 +3222,13 @@ struct Serve {
             for (int j = 0; j < rows_kept; ++j) {
                 if (j == 1) y = E.rows_pick[r0 + 1];
                 ss.live.push_back(fed[j]);
-                std::printf("BT %d %d\n", b, y);
+                serve_print("BT %d %d\n", b, y);
                 ++sl.produced;
                 sl.hist.push_back(y);
                 const char* fin = is_eos(y) ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
                                   : ss.pos + j + 2 > E.ctx ? "length" : nullptr;
                 if (fin) {
-                    std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
+                    serve_print("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                     if (sl.offered > 0)
                         std::fprintf(stderr, "lamina batch: slot %d: %lld of %lld MTP proposals accepted\n", b, sl.accepted,
                                      sl.offered);
@@ -3264,7 +3267,6 @@ struct Serve {
             }
             nx_of.push_back(i);
         }
-        std::fflush(stdout);
         if (!nx.empty()) {
             // (more rows than the window holds: the proposals come in two calls)
             for (size_t at = 0, k = 0; at < nx.size();) {
@@ -3316,13 +3318,13 @@ struct Serve {
             } else {
                 y = E.rows_pick[r];
             }
-            std::printf("BT %d %d\n", b, y);
+            serve_print("BT %d %d\n", b, y);
             ++sl.produced;
             sl.hist.push_back(y);
             const char* fin = is_eos(y) ? "stop" : sl.stop ? "cancel" : sl.produced >= sl.max_new ? "length"
                               : ss.pos + 1 > E.ctx ? "length" : nullptr;
             if (fin) {
-                std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
+                serve_print("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                 sl.active = false;
                 ss.active = false;
                 --n_active;
@@ -3330,7 +3332,6 @@ struct Serve {
                 sl.x = y;
             }
         }
-        std::fflush(stdout);
     }
 
     /// The length of session ss's held tokens when they are a proper start of `ids` with the same pictures, else 0.
@@ -3365,8 +3366,7 @@ struct Serve {
         const bool adm = line[0] == 'B';
         const bool geni = line.rfind(adm ? "BGENI " : "GENI ", 0) == 0;
         if (!adm && !geni && line.rfind("GEN ", 0) != 0) {
-            std::printf("ERR expected: GEN <max_new> [key=value ...] <id,id,...> or GENI <max_new> [keys] <file> <id,id,...>\n");
-            std::fflush(stdout);
+            serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...> or GENI <max_new> [keys] <file> <id,id,...>\n");
             return;
         }
         char* p = const_cast<char*>(line.c_str()) + (adm ? (geni ? 6 : 5) : (geni ? 5 : 4));
@@ -3377,8 +3377,7 @@ struct Serve {
             p = e1;
             slot = (int) b;
             if (e1 == line.c_str() || b < 0 || b >= (long) slots.size() || slots[(size_t) b].active || E.n_sess < 2) {
-                std::printf("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", E.n_sess < 2 ? 0 : E.n_sess);
-                std::fflush(stdout);
+                serve_print("ERR BGEN: no such free slot (--batch %d) or a bad max_new\n", E.n_sess < 2 ? 0 : E.n_sess);
                 return;
             }
         }
@@ -3426,27 +3425,24 @@ struct Serve {
         }
         const std::vector<int32_t> ids = parse_ids(p);
         if (max_new < 1 || ids.empty() || (geni && emb.empty())) {
-            std::printf("ERR bad request: max_new or the ids\n");
-            std::fflush(stdout);
+            serve_print("ERR bad request: max_new or the ids\n");
             return;
         }
         if (geni && !E.vision) {
-            std::printf("ERR this engine was started without --vision\n");
-            std::fflush(stdout);
+            serve_print("ERR this engine was started without --vision\n");
             return;
         }
         if ((int64_t) ids.size() + max_new > E.ctx) {
-            std::printf("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%d)\n", ids.size(), max_new, E.ctx);
-            std::fflush(stdout);
+            serve_print("ERR prompt (%zu tokens) + max_new (%lld) exceeds the context (%d)\n", ids.size(), max_new, E.ctx);
             return;
         }
         bool bad = false;
         for (int32_t t : ids) bad |= t < 0 || t >= (int32_t) E.m->g.n_vocab;
-        if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); std::fflush(stdout); return; }
+        if (bad) { serve_print("ERR a token id is outside the vocabulary\n"); return; }
         ImgReq ir;
         if (geni) {
             const std::string ve = build_images(emb, ids, E.m->g.n_embd, img_keys, ir);
-            if (!ve.empty()) { std::printf("ERR %s\n", ve.c_str()); std::fflush(stdout); return; }
+            if (!ve.empty()) { serve_print("ERR %s\n", ve.c_str()); return; }
         }
         stop.store(false);
         // ---- the session: the held state continues when the request extends it (the recurrent state cannot step back)
@@ -3478,9 +3474,8 @@ struct Serve {
         const int64_t fresh = (int64_t) (ids.size() - reuse);
         bool cancelled = false;
         const int64_t got = E.process(ids.data() + reuse, fresh, [&](int64_t done) -> bool {
-            std::printf("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) fresh, ms_since(t0),
+            serve_print("PP %lld %lld %.0f %.1f\n", (long long) done, (long long) fresh, ms_since(t0),
                         (double) done / std::max(1e-9, ms_since(t0) / 1000.0));
-            std::fflush(stdout);
             if (n_active > 0 && done < fresh) {
                 poll_control();
                 // the slots decoding go on between a read's chunks (the last chunk's
@@ -3505,9 +3500,8 @@ struct Serve {
         E.sess[(size_t) E.cur].pos = E.pos;
         const double prompt_ms = ms_since(t0);
         if (cancelled) {
-            std::printf("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms, reuse, (long long) got);
-            if (adm) std::printf("BADM %d 0\n", slot);
-            std::fflush(stdout);
+            serve_print("DONE 0 %zu %.1f 0.0 cancel 0 0 %zu 0 0 0 0 0.0 %lld 0\n", ids.size(), prompt_ms, reuse, (long long) got);
+            if (adm) serve_print("BADM %d 0\n", slot);
             return;
         }
         std::mt19937_64 rng(smp.seed);
@@ -3526,13 +3520,13 @@ struct Serve {
                 E.host_logits(lg);
                 nx = sample(lg, smp, hist, rng);
             }
-            std::printf("T %d\n", nx);
+            serve_print("T %d\n", nx);
             ++produced;
             hist.push_back(nx);
             const char* fin = is_eos(nx) ? "stop" : stop.load() ? "cancel" : max_new <= 1 ? "length"
                               : E.pos + 1 > E.ctx ? "length" : nullptr;
             const bool cont = fin == nullptr;
-            std::printf("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
+            serve_print("DONE %lld %zu %.1f %.1f %s 0 0 %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
                         ms_since(d0), cont ? "length" : fin, reuse, (long long) fresh);
             if (cont) {
                 Slot& sl = slots[(size_t) slot];
@@ -3548,8 +3542,7 @@ struct Serve {
                 ss.active = true;
                 ++n_active;
             }
-            std::printf("BADM %d %d\n", slot, cont ? 1 : 0);
-            std::fflush(stdout);
+            serve_print("BADM %d %d\n", slot, cont ? 1 : 0);
             std::fprintf(stderr, "lamina batch: slot %d takes a prompt of %zu tokens = %zu reused + %lld read in %.0f ms (%.1f "
                          "tok/s)%s\n", slot, ids.size(), reuse, (long long) fresh, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, cont ? "" : ", done at once");
@@ -3561,8 +3554,7 @@ struct Serve {
                 nx = sample(lg, smp, hist, rng);
             }
             auto emit = [&](int t) {   // false: the answer ends here
-                std::printf("T %d\n", t);
-                std::fflush(stdout);
+                serve_print("T %d\n", t);
                 ++produced;
                 hist.push_back(t);
                 if (is_eos(t)) { finish = "stop"; return false; }
@@ -3599,9 +3591,8 @@ struct Serve {
         }
         E.sess[(size_t) E.cur].pos = E.pos;
         const double decode_ms = ms_since(d0);
-        std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
+        serve_print("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
                     decode_ms, finish, accepted, offered, reuse, (long long) fresh);
-        std::fflush(stdout);
         std::fprintf(stderr, "lamina serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
                      "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld (%s)\n", s, ids.size(), reuse,
                      (long long) fresh, prompt_ms, prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced,
@@ -3609,12 +3600,12 @@ struct Serve {
     }
 
     int run() {
-        if (E.n_sess > 1) std::printf("INFO batch_slots=%d slot_cache=1\n", E.n_sess);
-        std::printf("READY %d stop\n", E.ctx);
-        std::fflush(stdout);
+        if (E.n_sess > 1) serve_print("INFO batch_slots=%d slot_cache=1\n", E.n_sess);
+        serve_print("READY %d stop\n", E.ctx);
+        const strata::program::ServeIo& io = strata::program::serve_io();
         std::thread reader([&] {
             std::string l;
-            while (std::getline(std::cin, l)) {
+            while (io.read_line(l)) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
                 if (l == "STOP") { stop.store(true); continue; }
                 std::lock_guard<std::mutex> lk(mu);
@@ -3625,7 +3616,19 @@ struct Serve {
             eof = true;
             cv.notify_one();
         });
-        reader.detach();
+        // in-process the reader holds this loop's state: its input ends and it is joined before that state goes
+        struct ReaderEnd {
+            std::thread& t;
+            const strata::program::ServeIo& io;
+            ~ReaderEnd() {
+                if (!io.in_process) {   // stdin's reader ends with the process
+                    t.detach();
+                    return;
+                }
+                if (io.end_input) io.end_input();
+                t.join();
+            }
+        } reader_end{reader, io};
         for (;;) {
             std::string line;
             bool have = false;
@@ -3650,8 +3653,7 @@ struct Serve {
             } else if (line.rfind("GEN", 0) == 0 || line.rfind("BGEN", 0) == 0) {
                 request(line);
             } else {
-                std::printf("ERR expected: GEN <max_new> [key=value ...] <id,id,...>\n");
-                std::fflush(stdout);
+                serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...>\n");
             }
             if (n_active > 0) window();
         }
@@ -3831,10 +3833,9 @@ int strata::qwen35::run(int argc, char** argv) {
                 nx = E.greedy();
             }
             const double tg_ms = ms_since(t1);
-            std::printf("bench %d: pp%d %.1f tok/s, tg%d %.1f tok/s\n", rep, (int) toks.size(),
+            serve_print("bench %d: pp%d %.1f tok/s, tg%d %.1f tok/s\n", rep, (int) toks.size(),
                         (double) toks.size() / (pp_ms / 1000.0), bench_tg,
                         bench_tg > 0 ? (double) bench_tg / (tg_ms / 1000.0) : 0.0);
-            std::fflush(stdout);
         }
         return 0;
     }
@@ -3873,9 +3874,9 @@ int strata::qwen35::run(int argc, char** argv) {
             nx = picks[a];
         }
         gen.resize((size_t) n_gen);
-        std::printf("gen:");
-        for (int t : gen) std::printf(" %d", t);
-        std::printf("\n");
+        serve_print("gen:");
+        for (int t : gen) serve_print(" %d", t);
+        serve_print("\n");
         std::fprintf(stderr, "strata-q36: prompt %zu tokens in %.1f ms, %zu generated in %.1f ms (%.1f tok/s), MTP %d drafts: "
                      "%lld of %lld accepted (%.0f%%)\n", prompt.size(), pp_ms, gen.size(), ms_since(t1),
                      gen.size() / (ms_since(t1) / 1000.0), E.mtp_d, accepted, offered,
@@ -3894,9 +3895,9 @@ int strata::qwen35::run(int argc, char** argv) {
         E.process(&nx, 1, [](int64_t) {});
     }
     if (ff) std::fclose(ff);
-    std::printf("gen:");
-    for (int t : gen) std::printf(" %d", t);
-    std::printf("\n");
+    serve_print("gen:");
+    for (int t : gen) serve_print(" %d", t);
+    serve_print("\n");
     std::fprintf(stderr, "strata-q36: prompt %zu tokens in %.1f ms (%.1f tok/s), %zu generated in %.1f ms (%.1f tok/s)\n",
                  prompt.size(), pp_ms, prompt.size() / (pp_ms / 1000.0), gen.size(), ms_since(t1),
                  gen.size() / (ms_since(t1) / 1000.0));

@@ -8,6 +8,8 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/qwen35/engine.hpp"
 #endif
+#include "strata/program/engine.hpp"
+#include "strata/program/serve_io.hpp"
 #include "strata/core/adaptive_tier.hpp"
 #include "strata/core/expert_cache.hpp"
 #include "strata/core/gpu_select.hpp"
@@ -63,11 +65,14 @@
 #include <functional>
 #include <memory>
 #include <new>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <set>
 #include <vector>
 #include <array>
+
+using strata::program::serve_print;   // the --serve protocol's replies (serve_io.hpp)
 
 namespace {
 
@@ -469,7 +474,6 @@ bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) 
 /// context for the whole process, and the destructors run on it can hang until the server's watchdog.
 void exit_on_cuda_fault() {
     if (cudaPeekAtLastError() == cudaSuccess) return;
-    std::fflush(stdout);
     std::fflush(stderr);
     std::_Exit(1);
 }
@@ -1027,11 +1031,7 @@ int qwen35_switch(int argc, char** argv) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
-    // **UNBUFFERED, BECAUSE THE INTERESTING OUTPUT IS THE OUTPUT BEFORE A CRASH.**  `stdout` redirected to a
-    // pipe or a file is block-buffered, so a program that dies loses every line it had already printed - which
-    // turns "it crashed at step 7" into "it crashed somewhere", and the difference is a debugging session.
-    std::setvbuf(stdout, nullptr, _IONBF, 0);
+int strata::program::run(int argc, char** argv) {
     // device ordinals in nvidia-smi's order, not CUDA's fastest-first guess (before the first CUDA call)
     if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
 #if defined(_WIN32)
@@ -2988,9 +2988,10 @@ int main(int argc, char** argv) {
         std::condition_variable in_cv;
         std::deque<std::string> in_lines;
         bool in_eof = false;
-        std::thread([&] {
+        const strata::program::ServeIo& io = strata::program::serve_io();
+        std::thread in_reader([&] {
             std::string l;
-            while (std::getline(std::cin, l)) {
+            while (io.read_line(l)) {
                 if (!l.empty() && l.back() == '\r') l.pop_back();
                 if (l == "STOP") { stop_req.store(true); continue; }
                 std::lock_guard<std::mutex> lk(in_mu);
@@ -3000,15 +3001,30 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> lk(in_mu);
             in_eof = true;
             in_cv.notify_one();
-        }).detach();
-        // Ctrl+C in the console (the server's, which runs the engine) ends the engine as QUIT does, before any request
-        // queued: the running one stops at its next chunk or window, then the exit work runs (the learned profile)
-        const strata::platform::ConsoleQuit console_quit([&] {
-            stop_req.store(true);
-            std::lock_guard<std::mutex> lk(in_mu);
-            in_lines.push_front("QUIT");
-            in_cv.notify_one();
         });
+        // in-process the reader holds this loop's state: its input ends and it is joined before that state goes
+        struct ReaderEnd {
+            std::thread& t;
+            const strata::program::ServeIo& io;
+            ~ReaderEnd() {
+                if (!io.in_process) {   // stdin's reader ends with the process
+                    t.detach();
+                    return;
+                }
+                if (io.end_input) io.end_input();
+                t.join();
+            }
+        } reader_end{in_reader, io};
+        // Ctrl+C in the console ends the engine as QUIT does, before any request queued: the running one stops at its
+        // next chunk or window, then the exit work runs (the learned profile).  In-process the host handles it.
+        std::optional<strata::platform::ConsoleQuit> console_quit;
+        if (!io.in_process)
+            console_quit.emplace([&] {
+                stop_req.store(true);
+                std::lock_guard<std::mutex> lk(in_mu);
+                in_lines.push_front("QUIT");
+                in_cv.notify_one();
+            });
         // --arena-place: after a request, the arena's swaps for the residency the tiers left, a slice at a time while
         // no request waits (the GPUs' copies from the arena are done first: nothing reads it meanwhile)
         const char* replace_env = std::getenv("STRATA_ARENA_REPLACE");   // =0: the A/B arm without it
@@ -3079,9 +3095,8 @@ int main(int argc, char** argv) {
         auto pp_line = [&](int64_t done) {
             if (pp_total <= 0) return;
             const double ms = std::chrono::duration<double, std::milli>(Clock::now() - pp_t0).count();
-            std::printf("PP %lld %lld %.0f %.1f\n", (long long) (done - pp_from), (long long) pp_total, ms,
+            serve_print("PP %lld %lld %.0f %.1f\n", (long long) (done - pp_from), (long long) pp_total, ms,
                         ms > 0 ? 1000.0 * (double) (done - pp_from) / ms : 0.0);
-            std::fflush(stdout);
         };
         prefill.should_stop = [&] {
             pp_line(pp_at + prefill.processed());
@@ -3127,7 +3142,7 @@ int main(int argc, char** argv) {
             // what the server's Monitor tab shows
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
-            std::printf("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
+            serve_print("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=0 arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom\n",
                         (long long) o.max_context, o.kv.c_str(), (long long) xcache.slots(),
@@ -3146,8 +3161,7 @@ int main(int argc, char** argv) {
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count(),
                          ple_table.ram_ready() ? "in RAM" : "its rows stay on the SSD");
         }
-        std::printf("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
-        std::fflush(stdout);
+        serve_print("READY %lld stop\n", (long long) o.max_context);   // "stop": this engine honours STOP
         std::string line;
         int64_t rounds = 0;
         const int S = o.spec, W = o.max_window();   // the draft layer's windows; with prompt lookup's
@@ -3194,7 +3208,7 @@ int main(int argc, char** argv) {
             err.clear();             // and so is a stopped request's "cancelled"
             const bool geni = line.rfind("GENI ", 0) == 0;
             if (!geni && line.rfind("GEN ", 0) != 0) {
-                std::printf("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
+                serve_print("ERR expected: GEN <max_new> <id,id,...> or GENI <max_new> <file> <id,id,...>\n");
                 continue;
             }
             char* endp = nullptr;
@@ -3265,12 +3279,12 @@ int main(int argc, char** argv) {
             std::vector<int64_t> ids;
             std::string pe;
             if (max_new < 1 || endp == nullptr || (geni && emb_path.empty()) || !parse_i64_list(endp, ids, pe)) {
-                std::printf("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
+                serve_print("ERR bad request: %s\n", pe.empty() ? "max_new" : pe.c_str());
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
             req_imgs.clear();
-            if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
+            if (geni && !o.vision) { serve_print("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
                 // positions for every cell this request can reach; the identity again for a text request
                 std::string ve;
@@ -3344,21 +3358,20 @@ int main(int argc, char** argv) {
                     for (int64_t c = 0; c < cells; ++c) put(c, c, c, c);
                     mrope_upload();
                     mrope_identity = true;
-                    std::printf("ERR %s\n", ve.c_str());
-                    std::fflush(stdout);
+                    serve_print("ERR %s\n", ve.c_str());
                     continue;
                 }
                 mrope_identity = !geni;
             }
             prefill.embd_rows = geni ? row_ptr.data() : nullptr;
             if (n + max_new + 8 > o.max_context) {
-                std::printf("ERR prompt (%lld tokens) + max_new (%lld) exceeds the context (%lld)\n", (long long) n,
+                serve_print("ERR prompt (%lld tokens) + max_new (%lld) exceeds the context (%lld)\n", (long long) n,
                             (long long) max_new, (long long) o.max_context);
                 continue;
             }
             bool bad = false;
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
-            if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
+            if (bad) { serve_print("ERR a token id is outside the vocabulary\n"); continue; }
             // the elastic K/V: room for this prompt before the prompt cache restores or the prompt path writes a cell
             // (the decode grows it further).  A K/V far longer than the request is given back only after two such
             // requests in a row: an agent's short side requests (a title, a summary) between the turns of a long
@@ -3367,16 +3380,14 @@ int main(int argc, char** argv) {
                 if (n + 256 > kvg.cells) {
                     kv_short = 0;
                     if (!kvg_ensure(n + 256)) {   // the tier may be half-changed: stop, as for a CUDA failure
-                        std::printf("ERR the K/V cannot grow to this prompt: no VRAM is left\n");
-                        std::fflush(stdout);
+                        serve_print("ERR the K/V cannot grow to this prompt: no VRAM is left\n");
                         return 1;
                     }
                 } else if (kvg.cells >= std::max<int64_t>(kvg.step, (n + 256 + kvg.step - 1) / kvg.step * kvg.step) +
                                            2 * kvg.step) {
                     // never below the live sequence: the prompt cache may stash all of its cells next
                     if (++kv_short >= 2 && !kvg_trim(std::max<int64_t>(n, pcache.live_cells()) + 256)) {
-                        std::printf("ERR the K/V could not give its VRAM back to the expert cache\n");
-                        std::fflush(stdout);
+                        serve_print("ERR the K/V could not give its VRAM back to the expert cache\n");
                         return 1;
                     }
                 } else {
@@ -3402,7 +3413,7 @@ int main(int argc, char** argv) {
             const Clock::time_point r0 = Clock::now();
             auto report = [&](const std::string& e) {   // a failed request: the engine exits after it
                 std::fprintf(stderr, "lamina serve: %s\n", e.c_str());
-                std::printf("ERR %s\n", e.c_str());
+                serve_print("ERR %s\n", e.c_str());
                 exit_on_cuda_fault();
             };
             // ---- the prompt cache: continue from the longest prefix it holds (or start from an empty sequence).
@@ -3705,13 +3716,13 @@ int main(int argc, char** argv) {
                 // the row cannot be read: the request fails, the engine goes on)
                 if (first_window && !req_score.empty()) {
                     std::vector<float> lp(req_score.size());
-                    std::printf("LP");
+                    serve_print("LP");
                     if (ver.candidate_logprobs(req_score.data(), (int) req_score.size(), lp.data(), err))
                         for (size_t i = 0; i < req_score.size(); ++i)
-                            std::printf(" %d:%.6g", (int) req_score[i], lp[i]);
+                            serve_print(" %d:%.6g", (int) req_score[i], lp[i]);
                     else
                         std::fprintf(stderr, "lamina serve: score=: %s\n", err.c_str());
-                    std::printf("\n");
+                    serve_print("\n");
                     ver.set_logits_wanted(false);
                 }
                 const bool fw = first_window;
@@ -3732,12 +3743,11 @@ int main(int argc, char** argv) {
                 first_window = false;
                 bool eos = false;
                 for (int i = fw ? a : 0; i <= a && produced_n < max_new && !eos; ++i) {
-                    std::printf("T %d\n", (int) outv[(size_t) i]);
+                    serve_print("T %d\n", (int) outv[(size_t) i]);
                     if (o.spec_lookup > 0) lookup.append(outv[(size_t) i]);
                     ++produced_n;
                     eos = std::find(o.eos_ids.begin(), o.eos_ids.end(), (int64_t) outv[(size_t) i]) != o.eos_ids.end();
                 }
-                std::fflush(stdout);
                 ++rounds;
                 // the next window's drafts: the lookup's when they are more than the draft layer's chain allows (the
                 // chain stops at its first draft then)
@@ -3811,15 +3821,14 @@ int main(int argc, char** argv) {
                 field("prefetched", b.prefetched - a.prefetched);
                 field("prefetch_used", b.prefetch_used - a.prefetch_used);
             }
-            std::printf("TIERS main_swaps=%lld main_fills=%lld main_dropped=%lld%s deterministic_adapt=%d\n",
+            serve_print("TIERS main_swaps=%lld main_fills=%lld main_dropped=%lld%s deterministic_adapt=%d\n",
                         (long long) (t1.main_swaps - t0.main_swaps), (long long) (t1.main_fills - t0.main_fills),
                         (long long) (t1.main_dropped - t0.main_dropped), per_tier.c_str(), o.deterministic_adapt ? 1 : 0);
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused>
             // <expert-cache hits> <lookups>
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld\n", (long long) produced_n, (long long) n,
+            serve_print("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld\n", (long long) produced_n, (long long) n,
                         prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) reuse, (long long) (hits1 - hits0), (long long) (look1 - look0));
-            std::fflush(stdout);
             const int64_t fresh = n - reuse;
             std::fprintf(stderr, "lamina serve: %lld prompt tokens (%lld cached) in %.0f ms (%.1f tok/s), %lld generated "
                                  "in %.0f ms (%.1f tok/s)\n", (long long) n, (long long) reuse, prompt_ms,
@@ -4194,51 +4203,51 @@ int main(int argc, char** argv) {
         }
         if (hashes != nullptr) std::fclose(hashes);
         if (wlog != nullptr) std::fclose(wlog);
-        std::printf("%-24s %lld rounds of %d, drafts accepted %lld of %lld (%.3f), %.2f tokens per round\n",
+        serve_print("%-24s %lld rounds of %d, drafts accepted %lld of %lld (%.3f), %.2f tokens per round\n",
                     "speculation", (long long) rounds, o.spec, (long long) drafts_ok, (long long) drafts_total,
                     drafts_total > 0 ? (double) drafts_ok / (double) drafts_total : 0.0,
                     rounds > 0 ? (double) (drafts_ok + rounds) / (double) rounds : 0.0);
         if (!follow.empty())
-            std::printf("%-24s %lld of %lld emitted tokens differ from the argmax\n", "follow",
+            serve_print("%-24s %lld of %lld emitted tokens differ from the argmax\n", "follow",
                         (long long) follow_differ, (long long) follow_emitted);
         if (o.spec_min_p > 0.0) {
-            std::printf("%-24s", "window sizes");
-            for (size_t i = 1; i < window_hist.size(); ++i) std::printf(" T%zu:%lld", i, (long long) window_hist[i]);
-            std::printf("  (min draft probability %.2f)\n", o.spec_min_p);
+            serve_print("%-24s", "window sizes");
+            for (size_t i = 1; i < window_hist.size(); ++i) serve_print(" T%zu:%lld", i, (long long) window_hist[i]);
+            serve_print("  (min draft probability %.2f)\n", o.spec_min_p);
         }
-        std::printf("%-24s", "accepted per round");
-        for (size_t i = 0; i < accepted_hist.size(); ++i) std::printf(" %zu:%lld", i, (long long) accepted_hist[i]);
-        std::printf("\n");
+        serve_print("%-24s", "accepted per round");
+        for (size_t i = 0; i < accepted_hist.size(); ++i) serve_print(" %zu:%lld", i, (long long) accepted_hist[i]);
+        serve_print("\n");
         if (o.spec_lookup > 0)
-            std::printf("%-24s %lld windows of its drafts, %lld of %lld accepted\n", "prompt lookup",
+            serve_print("%-24s %lld windows of its drafts, %lld of %lld accepted\n", "prompt lookup",
                         (long long) lookup_rounds, (long long) lookup_ok, (long long) lookup_drafts);
         if (rounds > 0)
-            std::printf("%-24s wait for rings %.3f  pool %.3f  host %.3f  commit %.3f ms/round; CPU experts %.2f "
+            serve_print("%-24s wait for rings %.3f  pool %.3f  host %.3f  commit %.3f ms/round; CPU experts %.2f "
                         "distinct / %.2f routed per layer\n",
                         "verify window", ver.ms_wait / rounds, ver.ms_pool / rounds, ver.ms_host / rounds,
                         ver.ms_commit / rounds,
                         (double) (drive.d.multi_misses - misses0) / (double) (rounds * g.n_layers),
                         (double) (drive.d.multi_entries - entries0) / (double) (rounds * g.n_layers));
         if (rounds > 0)
-            std::printf("%-24s gate/up %.3f  quantize %.3f  down %.3f ms/round; %.1f GB/s over the rows phases; "
+            serve_print("%-24s gate/up %.3f  quantize %.3f  down %.3f ms/round; %.1f GB/s over the rows phases; "
                         "CPU pool call %.3f ms/round; %u worker sleeps; %lld thread moves\n", "pool multi",
                         pool.ms_multi_gu / rounds, pool.ms_multi_q / rounds, pool.ms_multi_down / rounds,
                         (double) pool.multi_bytes / 1e6 / std::max(1e-9, pool.ms_multi_gu + pool.ms_multi_down),
                         (drive.cpu_ms - pool_ms0) / rounds, pool.sleeps() - sleeps0, (long long) placement.moves);
         if (rounds > 0)
-            std::printf("%-24s plan %.3f  activation quantize %.3f  jobs %.3f  run %.3f ms/round\n", "dispatch",
+            serve_print("%-24s plan %.3f  activation quantize %.3f  jobs %.3f  run %.3f ms/round\n", "dispatch",
                         drive.d.ms_plan / rounds, drive.d.ms_actq / rounds, drive.d.ms_jobs / rounds,
                         drive.d.ms_run / rounds);
         ver.print_profile();
         if (rounds > 0 && !drive.d.usage.empty())
-            std::printf("%-24s %lld experts swapped in and %lld into empty slots (every %d rounds, %.3f ms/round), "
+            serve_print("%-24s %lld experts swapped in and %lld into empty slots (every %d rounds, %.3f ms/round), "
                         "%lld moves dropped; %.1f MB/round copied\n", "adaptive tier", (long long) tier.swaps,
                         (long long) tier.fills, o.adapt_every, tier.ms / rounds, (long long) tier.dropped,
                         (double) tier.sent_bytes / 1e6 / (double) rounds);
         for (int t = 0; rounds > 0 && t < n_tiers; ++t) {   // the layers left to the CPU and the predictions: all tiers'
             const strata::core::SecondGpu& gp = tiers[(size_t) t].gpu;
             const strata::core::AdaptiveTier& ad = tiers[(size_t) t].adapt;
-            std::printf("%-24s %.2f routed entries and %.2f experts per round in %.2f layers (%.2f left to the CPU), "
+            serve_print("%-24s %.2f routed entries and %.2f experts per round in %.2f layers (%.2f left to the CPU), "
                         "its rows after the CPU's in %.2f layers, %.3f ms/round; %lld experts swapped in and %lld into "
                         "empty slots (%lld still empty, %lld moves dropped; its copies between windows, %.2f ms, at "
                         "%.1f GB/s); %.2f experts per round prefetched, %.2f of them used (%.3f ms/round of host "
@@ -4258,22 +4267,22 @@ int main(int argc, char** argv) {
             std::sort(c.begin(), c.end(), std::greater<uint32_t>());
             double total = 0;
             for (uint32_t v : c) total += v;
-            std::printf("%-24s", "routing concentration");
+            serve_print("%-24s", "routing concentration");
             double acc = 0;
             size_t at = 0;
             for (size_t n : {1000, 2000, 4000, 6000, 8000, 10000, 12000, 16000, 20000}) {
                 for (; at < n && at < c.size(); ++at) acc += c[at];
-                std::printf(" %zu:%.3f", n, total > 0 ? acc / total : 0.0);
+                serve_print(" %zu:%.3f", n, total > 0 ? acc / total : 0.0);
             }
-            std::printf("  (top-N experts' share of %.0f routed entries)\n", total);
+            serve_print("  (top-N experts' share of %.0f routed entries)\n", total);
         }
         if (rounds > 0 && drive.d.pcie_num > 0)
-            std::printf("%-24s %.2f distinct experts per layer read over PCIe (share %d/256 of the misses)\n",
+            serve_print("%-24s %.2f distinct experts per layer read over PCIe (share %d/256 of the misses)\n",
                         "pcie experts", (double) (drive.d.pcie_experts - pcie0) / (double) (rounds * g.n_layers),
                         drive.d.pcie_num);
         (void) pool_ms0;
         if (use_mtp && rounds > 0)
-            std::printf("%-24s %.3f ms/round drafting (%lld rounds), %.0f MiB of VRAM\n", "mtp",
+            serve_print("%-24s %.3f ms/round drafting (%lld rounds), %.0f MiB of VRAM\n", "mtp",
                         mtp.ms_draft / (double) mtp.rounds, (long long) mtp.rounds, (double) mtp.vram_bytes() / 1048576.0);
         drive.d.host_res = host_res.data();   // the verifier's snapshot goes with it
     }
@@ -4281,34 +4290,34 @@ int main(int argc, char** argv) {
     if (routing != nullptr) {
         std::fclose(routing);
         drive.routing = nullptr;
-        std::printf("%-24s %s (%lld records of layer, k, ids, weights)\n", "routing dumped",
+        serve_print("%-24s %s (%lld records of layer, k, ids, weights)\n", "routing dumped",
                     o.dump_routing.c_str(), (long long) drive.records);
     }
 
     const int64_t decoded = (int64_t) produced.size();
-    std::printf("prompt  :");
-    for (int64_t t : o.tokens) std::printf(" %lld", (long long) t);
-    std::printf("\noutput  :");
-    for (int64_t t : produced) std::printf(" %lld", (long long) t);
-    std::printf("\n");
+    serve_print("prompt  :");
+    for (int64_t t : o.tokens) serve_print(" %lld", (long long) t);
+    serve_print("\noutput  :");
+    for (int64_t t : produced) serve_print(" %lld", (long long) t);
+    serve_print("\n");
     const double decode_ms = decoded > 0 ? total_ms / (double) decoded : 0.0;
-    std::printf("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s\n", "decode", (long long) decoded, total_ms,
+    serve_print("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s\n", "decode", (long long) decoded, total_ms,
                 decode_ms > 0.0 ? 1000.0 / decode_ms : 0.0);
     if (n_prompt > 1)
-        std::printf("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s  (time to first token %.1f ms)\n", "prefill",
+        serve_print("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s  (time to first token %.1f ms)\n", "prefill",
                     (long long) (n_prompt - 1), prefill_ms,
                     prefill_ms > 0 ? 1000.0 * (double) (n_prompt - 1) / prefill_ms : 0.0, ttft_ms);
 
     if (o.stats) {
-        std::printf("%-24s %.3f ms/token (wall clock)\n", "  per token", decode_ms);
-        if (const std::string io = ple_table.io_report(); !io.empty()) std::printf("  %s\n", io.c_str());
+        serve_print("%-24s %.3f ms/token (wall clock)\n", "  per token", decode_ms);
+        if (const std::string io = ple_table.io_report(); !io.empty()) serve_print("  %s\n", io.c_str());
         // **THE DENOMINATOR IS THE POSITIONS THE POOL ACTUALLY RAN ON, NOT THE DECODED TOKENS (A6).**
         // `drive_pool` is called once per layer per position and PREFILL runs the loop too, so accumulating
         // `cpu_ms` over prefill and then dividing by `decoded` inflates this figure.  `drive.calls / n_layers`
         // is the number of positions - the same correction the ring counters below already received, which is
         // why they print "of 192" rather than "240 of 192".
         const double pool_positions = g.n_layers > 0 ? (double) drive.calls / (double) g.n_layers : 0.0;
-        std::printf("%-24s %.3f ms/token over %lld layers (%.0f positions, %lld dispatches)\n",
+        serve_print("%-24s %.3f ms/token over %lld layers (%.0f positions, %lld dispatches)\n",
                     "  the CPU expert pool", pool_positions > 0.0 ? drive.cpu_ms / pool_positions : 0.0,
                     (long long) g.n_layers, pool_positions, (long long) drive.calls);
         // **AND WHERE INSIDE `run()` IT WENT.**  They were one number, which cannot tell a pool that is slow at
@@ -4318,16 +4327,16 @@ int main(int argc, char** argv) {
             double dr = 0, cl = 0;
             pool.phase_ms(dr, cl);
             const double per = pool_positions;
-            std::printf("%-24s   drain %.3f  close %.3f  ms/token\n", "  pool phases", dr / per, cl / per);
+            serve_print("%-24s   drain %.3f  close %.3f  ms/token\n", "  pool phases", dr / per, cl / per);
         }
-        std::printf("%-24s %lld blobs read\n", "  expert blobs", (long long) srcp->reads());
+        serve_print("%-24s %lld blobs read\n", "  expert blobs", (long long) srcp->reads());
         // ---- **R4's DISPATCH MEASUREMENT: h, ON THE ENGINE'S OWN ROUTING.**  No offline trace, no corpus
         // question, no k-fold - these are the ids the router actually produced on this run.  Reported as
         // hits/lookups so it can be read directly as the h the cache would deliver, and alongside `refused`
         // so a full cache is visible rather than silently capping the rate.
         if (o.expert_cache > 0) {
             const int64_t look = drive.d.cache_hits + drive.d.cache_refused;
-            std::printf("%-24s %lld of %lld = %.4f\n", "  expert-cache hits", (long long) drive.d.cache_hits,
+            serve_print("%-24s %lld of %lld = %.4f\n", "  expert-cache hits", (long long) drive.d.cache_hits,
                         (long long) look, look > 0 ? (double) drive.d.cache_hits / (double) look : 0.0);
         }
     }

@@ -196,9 +196,15 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(strata_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(strata_prefill PUBLIC strata_engine CUDA::cublas CUDA::cudart)
 
-  add_executable(lamina src/program/generate.cpp)
-  target_include_directories(lamina PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(lamina PRIVATE strata_engine strata_prefill strata_spec CUDA::cudart)
+  # the engine as a library: the lamina binary's main (src/program/main.cpp) and lamina-server's engine thread, which
+  # speaks the --serve protocol through in-process channels (serve_io.hpp)
+  add_library(strata_serve_io STATIC src/program/serve_io.cpp)
+  target_include_directories(strata_serve_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_library(strata_program STATIC src/program/generate.cpp)
+  target_include_directories(strata_program PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(strata_program PUBLIC strata_engine strata_prefill strata_spec strata_serve_io CUDA::cudart)
+  add_executable(lamina src/program/main.cpp)
+  target_link_libraries(lamina PRIVATE strata_program)
   # the hyper-connection read's fused up projection + mix against cuBLAS + gr_mix_r at every sub-chunk size (--bench)
   add_executable(gr_upmix_parity src/prefill/gr_upmix_parity.cu)
   target_link_libraries(gr_upmix_parity PRIVATE strata_prefill CUDA::cudart)
@@ -457,6 +463,20 @@ if(STRATA_NATIVE_EXPERTS)
     endif()
     add_subdirectory(${strata_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   endif()
+  # lamina-server's parts from the same checkout (its root skips the ggml added above): libllama for the tokenizer
+  # (the vocabulary of the model's GGUF, loaded without its tensors), llama-common for the Jinja chat templates,
+  # and the vendored cpp-httplib, nlohmann/json, stb and sheredom/subprocess
+  if(STRATA_GGML_DIR)
+    set(_strata_llama_root ${STRATA_GGML_DIR})
+  else()
+    set(_strata_llama_root ${strata_llamacpp_SOURCE_DIR})
+  endif()
+  set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
+  foreach(_o LLAMA_BUILD_TESTS LLAMA_BUILD_TOOLS LLAMA_BUILD_EXAMPLES LLAMA_BUILD_SERVER LLAMA_BUILD_APP
+             LLAMA_ALL_WARNINGS LLAMA_TOOLS_INSTALL LLAMA_TESTS_INSTALL)
+    set(${_o} OFF CACHE BOOL "" FORCE)
+  endforeach()
+  add_subdirectory(${_strata_llama_root} ${CMAKE_BINARY_DIR}/llama EXCLUDE_FROM_ALL)
   # part of strata_kernels_cpu (the pool calls these and they call its CPU probe: one library, so GNU ld's
   # one-pass static linking has no cycle to resolve)
   target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
@@ -575,12 +595,12 @@ if(STRATA_NATIVE_EXPERTS)
     target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_kernels_cpu strata_warnings
-                          CUDA::cudart)
+                          strata_serve_io CUDA::cudart)
     target_compile_definitions(strata_qwen35 PRIVATE STRATA_Q36_CPU_POOL=1)
     add_executable(strata-q36 src/qwen35/q36_main.cpp)
     target_link_libraries(strata-q36 PRIVATE strata_qwen35 CUDA::cudart)
-    target_link_libraries(lamina PRIVATE strata_qwen35)
-    target_compile_definitions(lamina PRIVATE STRATA_HAVE_QWEN35=1)
+    target_link_libraries(strata_program PUBLIC strata_qwen35)
+    target_compile_definitions(strata_program PRIVATE STRATA_HAVE_QWEN35=1)
     add_executable(strata-q36ref src/qwen35/q36ref.cu)
     target_include_directories(strata-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings CUDA::cudart)
@@ -611,4 +631,36 @@ endif()
 
 if(STRATA_BUILD_TESTS)
   enable_testing()
+endif()
+
+# ---- lamina-server ----------------------------------------------------------
+# The HTTP server: the OpenAI, Anthropic and Responses APIs and the web app, with the engine on a thread of its own
+# (strata_program through in-process channels). lamina_text is its text layer (no GPU): the tokenizer, the chat
+# template (Jinja, vendored from llama.cpp's common/jinja), the request conversions and the output parser;
+# lamina-check runs it on JSON-lines cases (scratch/lamina/p6_check.py compares them with the Python server's).
+if(TARGET cpp-httplib AND TARGET ggml-base)
+  file(GLOB _lamina_jinja CONFIGURE_DEPENDS src/server/vendor/jinja/*.cpp)
+  add_library(lamina_jinja STATIC ${_lamina_jinja} src/server/vendor/common/json.cpp
+                                  src/server/vendor/common/unicode.cpp)
+  target_include_directories(lamina_jinja SYSTEM PUBLIC src/server/vendor PRIVATE src/server/vendor/common)
+  target_link_libraries(lamina_jinja PUBLIC nlohmann ggml-base)
+  if(MSVC)
+    target_compile_options(lamina_jinja PRIVATE /w /utf-8 /bigobj)
+  else()
+    target_compile_options(lamina_jinja PRIVATE -w)
+  endif()
+  # llama.cpp's pre-tokenizer split (the qwen35 pattern has a custom implementation there)
+  add_library(lamina_unicode STATIC ${_strata_llama_root}/src/unicode.cpp ${_strata_llama_root}/src/unicode-data.cpp)
+  target_include_directories(lamina_unicode PUBLIC ${_strata_llama_root})
+  if(MSVC)
+    target_compile_options(lamina_unicode PRIVATE /w /utf-8)
+  else()
+    target_compile_options(lamina_unicode PRIVATE -w)
+  endif()
+  add_library(lamina_text STATIC src/server/json.cpp src/server/log.cpp src/server/tokenizer.cpp
+                                 src/server/frontend.cpp)
+  target_include_directories(lamina_text PUBLIC src/server)
+  target_link_libraries(lamina_text PUBLIC lamina_jinja lamina_unicode nlohmann ggml-base strata_warnings)
+  add_executable(lamina-check src/server/check.cpp)
+  target_link_libraries(lamina-check PRIVATE lamina_text)
 endif()
