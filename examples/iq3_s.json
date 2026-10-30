@@ -52,7 +52,7 @@
   "lib_dirs": [],
   "vision": {
     "exe": "./build-vision/bin/lamina-vision.exe",
-    "mmproj": "../Lamina-data/packs/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
+    "mmproj": "../Lamina-data/models/mmproj/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
     "model": "../Lamina-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
     "gpu": false,
     "threads": 16,

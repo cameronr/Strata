@@ -100,7 +100,7 @@ QWEN38_27B_MMPROJ = File("qwen38_27b", "mmproj-F16.gguf", "models/qwen38-27b-UD-
 # Qwen3.8-Flash-Next's image projector (the same for every quant). The CPU encoder reads it as Q8_0 (tools/mmproj_q8.py).
 FLASH_MMPROJ = File("ista", "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "models/mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
                     907543008, "b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0")
-FLASH_MMPROJ_Q8 = "packs/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
+FLASH_MMPROJ_Q8 = "models/mmproj/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
 # The MTP draft layer of both Flash-Next quants (the repository's README describes it)
 DRAFT = [
     File("draft", name, f"mtp/rt-distilled/{name}", size, sha)
