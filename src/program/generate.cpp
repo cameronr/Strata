@@ -3266,7 +3266,7 @@ int strata::program::run(int argc, char** argv) {
             cudaMemGetInfo(&free_b, &total_b);
             serve_print("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
-                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom\n",
+                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=lamina\n",
                         (long long) o.max_context, o.kv.c_str(), (long long) xcache.slots(),
                         (long long) (xcache.bytes() >> 20), o.spec, o.spec, o.spec_lookup, (long long) (free_b >> 20),
                         (long long) (strata::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
