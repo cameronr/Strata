@@ -95,7 +95,6 @@ def replica_cfg(cfg: dict, i: int, gpus: list[int]) -> dict:
     entry = spec[i] if isinstance(spec, list) and isinstance(spec[i], dict) else {}
     c.pop("replicas", None)
     c["gpu"] = gpus if len(gpus) > 1 else gpus[0]
-    c.pop("hip_ordinal", None)                 # a one-card config's Windows ordinal: not for a group
     c["log"] = _suffixed(cfg.get("log"), i)
     if cfg.get("expert_profile_save"):
         c["expert_profile_save"] = _suffixed(cfg["expert_profile_save"], i)

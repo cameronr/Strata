@@ -97,8 +97,8 @@ class Command(unittest.TestCase):
         env = images_api.image_env({"backend": "cuda", "gpu": 1, "env": {"X": 2}}, {"PATH": "p"})
         self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["CUDA_DEVICE_ORDER"], env["X"]), ("1", "PCI_BUS_ID", "2"))
         with tempfile.TemporaryDirectory() as d:
-            env = images_api.image_env({"backend": "hip", "gpu": 0, "lib_dirs": [d, d + "-missing"]}, {})
-            self.assertEqual(env["HIP_VISIBLE_DEVICES"], "0")
+            env = images_api.image_env({"backend": "cuda", "gpu": 0, "lib_dirs": [d, d + "-missing"]}, {})
+            self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0")
             self.assertEqual(env["PATH" if os.name == "nt" else "LD_LIBRARY_PATH"], d)
         self.assertEqual(images_api.image_env({"backend": "vulkan", "gpu": 2}, {})["GGML_VK_VISIBLE_DEVICES"], "2")
 

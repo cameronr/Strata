@@ -18,7 +18,7 @@ The config's "images" section (written by setup --images, tools/image/install.py
    "llm": "...Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "quant": "Q8_0", "args": ["--diffusion-fa"],
    "gpu_policy": "auto", "reload": "lazy"|"eager", "max_n": 4, "max_side": 2048, "timeout_s": 3600,
    "lib_dirs": [...], "uma": false, "need_mib": null, "out_dir": null, "keep_files": 64,
-   "native": false}   (native: Strata's own DiT runner, tools/image/sdcpp_native; CUDA / HIP builds)
+   "native": false}   (native: Strata's own DiT runner, tools/image/sdcpp_native; CUDA builds)
 """
 from __future__ import annotations
 
@@ -120,7 +120,7 @@ def sd_cli_args(cfg: dict, job: dict, out_pattern: str) -> list[str]:
         cmd += ["-b", str(job["n"])]
     cmd += ["-o", out_pattern]
     cmd += [str(a) for a in (cfg.get("args") or [])]
-    if cfg.get("native") is True:                   # Strata's DiT runner inside sd-cli (CUDA / HIP builds)
+    if cfg.get("native") is True:                   # Strata's DiT runner inside sd-cli (CUDA builds)
         cmd += ["--model-args", "qwen_image_2_1_native=1"]
     return cmd
 
@@ -135,8 +135,7 @@ def image_env(cfg: dict, base: dict | None = None) -> dict:
         env[var] = os.pathsep.join(dirs + ([env[var]] if env.get(var) else []))
     gpu = cfg.get("gpu")
     if gpu is not None:
-        var = {"cuda": "CUDA_VISIBLE_DEVICES", "hip": "HIP_VISIBLE_DEVICES",
-               "vulkan": "GGML_VK_VISIBLE_DEVICES"}.get(cfg.get("backend"))
+        var = {"cuda": "CUDA_VISIBLE_DEVICES", "vulkan": "GGML_VK_VISIBLE_DEVICES"}.get(cfg.get("backend"))
         if var:
             env[var] = str(gpu)
             if var == "CUDA_VISIBLE_DEVICES":

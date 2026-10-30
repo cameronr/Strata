@@ -33,7 +33,7 @@ class Config(unittest.TestCase):
                 gpu_groups(cfg)
 
     def test_replica_cfg(self):
-        cfg = {"gpu": [0, 1, 2, 3], "args": ["--x"], "log": "/l/strata.log", "hip_ordinal": 1, "env": {"A": "1"},
+        cfg = {"gpu": [0, 1, 2, 3], "args": ["--x"], "log": "/l/strata.log", "env": {"A": "1"},
                "expert_profile_save": "/p/prof.bin",
                "replicas": [{"gpus": [0, 1], "env": {"B": 2}}, {"gpus": [2, 3], "args": ["--y"]}]}
         a, b = replica_cfg(cfg, 0, [0, 1]), replica_cfg(cfg, 1, [2, 3])
@@ -42,7 +42,6 @@ class Config(unittest.TestCase):
         self.assertEqual(a["env"], {"A": "1", "B": "2"})
         self.assertEqual(b["args"], ["--x", "--y"])
         self.assertNotIn("replicas", a)
-        self.assertNotIn("hip_ordinal", a)
         self.assertEqual(a["expert_profile_save"], "/p/prof.r0.bin")
         self.assertEqual(cfg["args"], ["--x"])                       # the original is untouched
         self.assertEqual(replica_cfg({"gpu": [0, 1], "args": []}, 0, [3])["gpu"], 3)

@@ -544,32 +544,15 @@ def start_exit_note(rc: int | None, exe=None) -> str:
     return note
 
 
-def start_log_marks(log: str | None, offset: int) -> list:
-    """The GPU runtime failure texts (TRANSIENT_START_MARKS) this start wrote to the log: what lets a retry notice say the
-    GPU runtime failed.  [] when none, or no log."""
-    if not log:
-        return []
-    try:
-        with open(log, "rb") as f:
-            f.seek(offset)
-            text = f.read(64 * 1024).decode("utf-8", "replace")
-    except (OSError, ValueError):
-        return []
-    return [m for m in TRANSIENT_START_MARKS if m in text]
-
-
-# A start that ends at once with the GPU runtime's own failure and none of the engine's lines: on ROCm, a start right
-# after the previous engine exited can fail inside the runtime's device/queue set-up while the old process's queues are
-# still being torn down ("terminate called after throwing an instance of 'rocr::AMD::hsa_exception'", or an exit with
-# nothing in the log).  Such a start is tried again after a short wait (STRATA_START_RETRIES, default 3; 0: never).
-TRANSIENT_START_MARKS = ("hsa_exception", "HSA_STATUS_ERROR", "hsaKmt")
+# A start that ends at once with none of the engine's lines (an exit with nothing in the log) is tried again after a
+# short wait (STRATA_START_RETRIES, default 3; 0: never).
 START_RETRIES = max(0, int(os.environ.get("STRATA_START_RETRIES", "3") or 0))
 
 
 def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: int | None = None) -> bool:
     """True when the start that wrote the log from `offset` failed the transient way above: within 30 s, and its lines
-    are only the launcher's own "engine started" line plus (optionally) a GPU runtime failure.  An exit with no line
-    at all counts only when it was not the engine's own error exit (1: it said why on stdout)."""
+    are only the launcher's own "engine started" line.  It counts only when it was not the engine's own error exit
+    (1: it said why on stdout)."""
     if not log or elapsed_s > 30.0:
         return False
     try:
@@ -580,9 +563,6 @@ def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: 
         return False
     lines = [x.strip() for x in text.splitlines() if x.strip()]
     engine_lines = [x for x in lines if not x.startswith("[lamina]")]
-    if any(m in text for m in TRANSIENT_START_MARKS):
-        return all(x.startswith("terminate called") or x.startswith("what()") or
-                   any(m in x for m in TRANSIENT_START_MARKS) for x in engine_lines)
     # it exited without writing a single line of its own - but not when the system ended it (an illegal instruction, a
     # bad memory access, the OOM killer, a missing DLL): that is a crash a second try repeats, and the retry notice
     # must not call it a GPU runtime start (#2324: an old CPU's illegal instruction was retried 3 times as "GPU
@@ -921,16 +901,10 @@ class StrataEngine:
                     transient_start_failure(log, log_start, time.monotonic() - spawned_at, self.proc.returncode):
                 wait_s = 2.0 * (2 ** _attempt)              # 2, 4, 8 s: the previous process's GPU queues go away
                 exit_words = engine_exit_words(self.proc.returncode)
-                if start_log_marks(log, log_start):         # the runtime said so itself (hsa_exception ...)
-                    print(f"[lamina] the engine stopped while the GPU runtime was starting (most often right after "
-                          f"another engine exited, whose GPU queues were still being released"
-                          f"{'; ' + exit_words if exit_words else ''}): starting it again in {wait_s:.0f} s "
-                          f"(try {_attempt + 2} of {START_RETRIES + 1})", flush=True)
-                else:                                       # an exit with nothing in the log: say only what is known
-                    print(f"[lamina] the engine exited before it wrote anything to its log"
-                          f"{' (' + exit_words + ')' if exit_words else ''}; it may be a GPU runtime that was not "
-                          f"ready yet: starting it again in {wait_s:.0f} s (try {_attempt + 2} of {START_RETRIES + 1})",
-                          flush=True)
+                print(f"[lamina] the engine exited before it wrote anything to its log"
+                      f"{' (' + exit_words + ')' if exit_words else ''}; it may be a GPU runtime that was not "
+                      f"ready yet: starting it again in {wait_s:.0f} s (try {_attempt + 2} of {START_RETRIES + 1})",
+                      flush=True)
                 time.sleep(wait_s)
                 StrataEngine.__init__(self, exe, args, cwd, log, env, lazy, cpus, _attempt + 1)
                 return
@@ -1107,7 +1081,7 @@ class StrataEngine:
     def restart(self, tries: int = 3):
         """Start the engine again (the same command) after it died; the new process has its own line queue.
         close() ends and waits for the old process first (EngineStuck when it cannot be ended).  A start that still
-        exits before READY - a dead engine's VRAM can take a while to come back, notably on ROCm - is retried
+        exits before READY - a dead engine's VRAM can take a while to come back - is retried
         (PR #637)."""
         info = dict(self.info)
         self.starting = True                     # prepare() answers 503 "starting" meanwhile (#344)
@@ -2592,16 +2566,7 @@ def engine_gpus(cfg: dict, gpus: list[dict] | None = None) -> list[int]:
 
 
 def engine_binary(exe: str, cfg: dict | None = None) -> str:
-    """The file that holds the engine's own option strings, for a feature check that reads it.  The Intel launcher
-    (sycl/serve/strata-sycl.sh) is a shell script that runs its repo's STRATA_SYCL_BIN (default build-sycl-aot/strata)
-    in a container, so the check reads that binary, not the script.  Any other `exe` is the engine itself."""
-    p = Path(exe)
-    if p.name == "strata-sycl.sh":
-        rel = ((cfg or {}).get("env") or {}).get("STRATA_SYCL_BIN") or os.environ.get("STRATA_SYCL_BIN") \
-            or "build-sycl-aot/strata"
-        b = p.resolve().parents[2] / rel
-        if b.is_file():
-            return str(b)
+    """The file that holds the engine's own option strings, for a feature check that reads it: the engine itself."""
     return exe
 
 
@@ -2723,32 +2688,14 @@ def learned_profile_args(cfg: dict, args: list[str]) -> list[str]:
     return args
 
 
-def hip_visible(cfg: dict) -> list[int]:
-    """AMD: the devices the engine should see, as the HIP runtime numbers them (HIP_VISIBLE_DEVICES).
-
-    On Linux setup's KFD order is HIP's order, so the config's "gpu" is it.  On Windows setup finds the cards in the
-    display-adapter order, and an integrated Radeon that HIP also enumerates takes ordinal 0 and pushes the discrete
-    card to 1 (#325): setup records the ordinal `strata-device --list-devices` gave the card as "hip_ordinal", which
-    wins for a one-card config.  Without it (a config from before), the config's "gpu"."""
-    ordinal = cfg.get("hip_ordinal")
-    if ordinal is not None and str(ordinal).strip() != "" and len(gpu_list(cfg)) <= 1:
-        try:
-            return [int(str(ordinal).strip())]
-        except ValueError:
-            pass
-    return gpu_list(cfg)
-
-
 def child_env(cfg: dict, *, offline: bool = False) -> dict:
     """The engine's environment: the CUDA libraries setup installed (pip's nvidia packages, or the toolkit that
     compiled it) first on the library search path."""
     env = dict(os.environ)
-    if hip_visible(cfg) and cfg.get("backend") == "hip":   # AMD: numbered as HIP numbers them (hip_visible)
-        env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in hip_visible(cfg))
-    elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
+    if gpu_list(cfg):                                # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
         env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
-    for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
+    for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries
         env[str(k)] = str(v)
     # Strict offline reaches children through the environment, because a tool subprocess or a model
     # loader is code this server does not own. Applied last so a profile's own `env` cannot remove
@@ -2759,50 +2706,7 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
     if dirs:
         var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
         env[var] = os.pathsep.join(dirs + ([env[var]] if env.get(var) else []))
-    if cfg.get("backend") == "hip":
-        hip_env_guard(env, cfg)
     return env
-
-
-def _dir_writable(p: str) -> bool:
-    try:
-        with tempfile.TemporaryFile(dir=p):
-            return True
-    except OSError:
-        return False
-
-
-def hip_env_guard(env: dict, cfg: dict) -> list[str]:
-    """#654: two things in an AMD user's environment that crash the HIP runtime before it prints a line.  (1) HIP_PATH,
-    HIP_DEVICE_LIB_PATH or LLVM_PATH naming a folder that is gone (a ROCm build that was deleted): the bundled runtime
-    follows them.  They are dropped, and only when the folder does not exist.  (2) A TEMP / TMP / TMPDIR the engine cannot
-    create a file in: the runtime's comgr JIT builds its blit kernels through temporary files and the first call
-    crashes in amdhip64 (0xC0000005).  A writable folder next to the engine's log takes its place.  Returns what it
-    changed (said once, on stderr); a healthy environment is left exactly as it was."""
-    said: list[str] = []
-    for k in ("HIP_PATH", "HIP_DEVICE_LIB_PATH", "LLVM_PATH"):
-        v = env.get(k)
-        if v and not Path(v).exists():
-            del env[k]
-            said.append(f"{k}={v} does not exist: not passed to the engine")
-    bad = [k for k in ("TEMP", "TMP", "TMPDIR") if env.get(k) and not _dir_writable(env[k])]
-    if bad:
-        base = Path(cfg.get("log") or cfg.get("cwd") or ROOT).resolve()
-        for d in (base.parent / "tmp", ROOT / "tmp"):
-            try:
-                d.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                continue
-            if _dir_writable(str(d)):
-                for k in bad:
-                    said.append(f"{k}={env[k]} is not writable: using {d}")
-                    env[k] = str(d)
-                break
-        else:
-            said.append(f"{', '.join(bad)} not writable (AMD's runtime needs a writable temporary folder)")
-    for line in said:
-        print(f"strata serve: AMD: {line}", file=sys.stderr, flush=True)
-    return said
 
 
 def vision_env(cfg: dict, env: dict) -> dict:
@@ -2813,11 +2717,8 @@ def vision_env(cfg: dict, env: dict) -> dict:
     if dev is None:
         return env
     env = dict(env)
-    if cfg.get("backend") == "hip":
-        env["HIP_VISIBLE_DEVICES"] = str(dev)
-    else:
-        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env["CUDA_VISIBLE_DEVICES"] = str(dev)
+    env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    env["CUDA_VISIBLE_DEVICES"] = str(dev)
     return env
 
 
@@ -3189,11 +3090,10 @@ class Service:
         return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
 
     def free_vram_mib(self) -> int | None:
-        """Free VRAM on the engine's (first) GPU, from the backend's reader - NVML, the amdgpu sysfs files (#301) or
-        IOKit on macOS (Metal backend); None when it can't be read (then nothing is refused)."""
+        """Free VRAM on the engine's (first) GPU, from NVML; None when it can't be read (then nothing is refused)."""
         try:
             from serve.telemetry import gpu_reader
-            g = gpu_reader(int(getattr(self, "gpu_index", 0) or 0), amd=getattr(self, "backend", None) == "hip")
+            g = gpu_reader(int(getattr(self, "gpu_index", 0) or 0))
             if not g.ok():
                 return None
             r = g.read()
@@ -3418,8 +3318,7 @@ class Service:
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean(),
                                                     "prefill_tok_s_mean": self._prefill_tok_s_mean()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
-                                       gpu_indices=getattr(self, "gpu_indices", None),
-                                       amd=getattr(self, "backend", None) == "hip")
+                                       gpu_indices=getattr(self, "gpu_indices", None))
             if getattr(self, "engine", None) is not None and hasattr(self.engine, "gpu_busy"):
                 # #1317: the quick frozen-engine check does not end an engine whose GPU is busy (a long prompt chunk on a
                 # slow card keeps the GPU at work while the host thread sleeps)
@@ -6238,34 +6137,6 @@ def warn_budget_over_ram(args) -> str | None:
     return msg
 
 
-DESKTOP_FREE_MIB = 2048          # #560 #516: below this, an AMD card that also drives a Linux desktop can run out
-DESKTOP_RESERVE_MIB = 3072       # what kept KDE/Wayland alive beside a full expert cache in both reports
-
-
-def linux_desktop(env=None) -> bool:
-    """A graphical session on Linux (Wayland or X): its compositor, browser and apps take VRAM after the model has."""
-    env = os.environ if env is None else env
-    return os.name != "nt" and sys.platform != "darwin" and bool(env.get("WAYLAND_DISPLAY") or env.get("DISPLAY"))
-
-
-def desktop_vram_note(backend, vram_free_mib, args: list, desktop: bool) -> str:
-    """#560 #516: on Linux, when the desktop needs VRAM the AMD card does not have, amdgpu moves GPU memory (the expert
-    cache, ~24 GB) to system RAM, which the experts already fill - the OOM killer then ends the compositor.  The
-    default reserve (700 MiB) is sized for a card without a desktop.  A recommendation, nothing changes: "" when it
-    does not apply."""
-    if backend != "hip" or not desktop or not isinstance(vram_free_mib, int) or vram_free_mib >= DESKTOP_FREE_MIB:
-        return ""
-    try:
-        reserve = int(args[args.index("--vram-reserve-mib") + 1]) if "--vram-reserve-mib" in args else 700
-    except (ValueError, IndexError):
-        reserve = 700
-    if reserve >= DESKTOP_RESERVE_MIB:
-        return ""
-    return (f"[lamina] note: {vram_free_mib} MiB of VRAM free with the model loaded. If this AMD card also drives your "
-            "desktop and the desktop or apps crash after the start (the driver moves the expert cache to RAM and "
-            "the OOM killer ends the session), keep more VRAM free: ./setup.sh --vram-reserve-mib "
-            f"{DESKTOP_RESERVE_MIB} (remembered; the expert cache gets "
-            f"{(DESKTOP_RESERVE_MIB - reserve) / 1024:.1f} GB less, a few % of speed)")
 
 
 def lan_addresses() -> list[str]:
@@ -7008,10 +6879,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                                   env=env, lazy=lazy)
         engine.silence_s = silence                      # an attribute of its own: restart() keeps it
         warn_tight_ram(engine.info.get("arena_mib"))
-        note = desktop_vram_note(cfg.get("backend"), engine.info.get("vram_free_mib"), engine.spawn[1],
-                                 linux_desktop()) if not groups else None
-        if note:                                        # #560 #516: before --open starts a browser on that card
-            print(note, flush=True)
     else:
         effort_end = None
         engine, vision, sampling_defaults = MockEngine(tok, a.script or [
@@ -7151,7 +7018,7 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         svc.gpu_indices = [c for g in groups for c in g]
         svc.gpu_index = svc.gpu_indices[0]
         svc.replica_gpu_groups = groups
-    svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+    svc.backend = cfg.get("backend")
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
