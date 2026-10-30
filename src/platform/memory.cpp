@@ -151,12 +151,6 @@ bool gpu_shared_memory_budget(const void* luid, uint64_t& budget, uint64_t& usag
     return ok;
 }
 
-uint64_t total_physical_memory() {
-    MEMORYSTATUSEX ms{};
-    ms.dwLength = sizeof ms;
-    return GlobalMemoryStatusEx(&ms) ? (uint64_t) ms.ullTotalPhys : 0;
-}
-
 bool read_ahead_enabled() { return false; }
 void advise_willneed(const void*, uint64_t) {}
 void advise_willneed(int, uint64_t, uint64_t) {}
@@ -193,11 +187,6 @@ bool gpu_shared_memory_budget(const void*, uint64_t& budget, uint64_t& usage, st
     return false;
 }
 
-uint64_t total_physical_memory() {
-    const long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGE_SIZE);
-    return pages > 0 && page > 0 ? (uint64_t) pages * (uint64_t) page : 0;
-}
-
 namespace {
 constexpr uint64_t kAdviseStep = 128ull << 10;
 }
@@ -224,30 +213,5 @@ void advise_willneed(int fd, uint64_t offset, uint64_t bytes) {
         (void) posix_fadvise(fd, (off_t) (offset + at), (off_t) std::min(kAdviseStep, bytes - at), POSIX_FADV_WILLNEED);
 }
 #endif
-
-ProcIo proc_io_sample() {
-    ProcIo r;
-#if defined(__linux__)
-    if (std::FILE* f = std::fopen("/proc/self/io", "r")) {
-        char key[64];
-        unsigned long long v;
-        while (std::fscanf(f, "%63[^:]: %llu\n", key, &v) == 2)
-            if (std::strcmp(key, "read_bytes") == 0) { r.read_bytes = v; r.valid = true; }
-        std::fclose(f);
-    }
-    if (std::FILE* f = std::fopen("/proc/self/stat", "r")) {
-        char buf[1024];
-        const size_t n = std::fread(buf, 1, sizeof buf - 1, f);
-        buf[n] = 0;
-        std::fclose(f);
-        if (const char* p = std::strrchr(buf, ')')) {   // fields after the command: state ppid ... minflt cminflt majflt
-            unsigned long long minflt = 0, cminflt = 0, majflt = 0;
-            if (std::sscanf(p + 2, "%*c %*d %*d %*d %*d %*d %*u %llu %llu %llu", &minflt, &cminflt, &majflt) == 3)
-                r.major_faults = majflt;
-        }
-    }
-#endif
-    return r;
-}
 
 }  // namespace strata::platform

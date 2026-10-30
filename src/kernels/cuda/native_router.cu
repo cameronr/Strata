@@ -35,7 +35,6 @@
 
 namespace strata::kernels {
 namespace {
-std::atomic<bool> enabled{false};
 __device__ __forceinline__ float warp_sum(float value) {
 #pragma unroll
     for (int mask = 16; mask; mask >>= 1) value += __shfl_xor_sync(0xffffffffu, value, mask, 32);
@@ -351,7 +350,6 @@ bool overlap(const void* a, size_t an, const void* b, size_t bn) {
     return ap < bp + bn && bp < ap + an;
 }
 }
-void native_router_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_router_topk_supported(int n_expert, int k) { return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8); }
 void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream) {
     if (n_expert == 512 && k == 10) {   // Flash-Next's kernels, unchanged
@@ -368,7 +366,6 @@ void native_router_topk(const float* logits, int32_t* ids, float* weights, int n
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-bool native_router_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_router_top10(const float* logits, int32_t* ids, float* weights, void* stream) {
     if (!stream || !valid(logits, 512 * 4) || !valid(ids, 10 * 4) || !valid(weights, 10 * 4)
         || overlap(logits, 512 * 4, ids, 10 * 4) || overlap(logits, 512 * 4, weights, 10 * 4)

@@ -52,13 +52,6 @@ __global__ void scale_kernel(float* __restrict__ x, int64_t n, float s) {
     if (i < n) x[i] *= s;
 }
 
-// `dst[i] += src[i]`.  See the header: this is what lets R4's GPU half and CPU half run at the same
-// time and still add up to one `parts` buffer.
-__global__ void add_kernel(float* __restrict__ dst, const float* __restrict__ src, long long n) {
-    const long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) dst[i] += src[i];
-}
-
 __global__ void to_f16_kernel(const float* __restrict__ x, uint16_t* __restrict__ y, int64_t n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) y[i] = f16_from_f32(x[i]);
@@ -155,13 +148,6 @@ void scale_inplace(float* x, int64_t n, float s, void* stream) {
     sync_if_needed(stream, "scale_inplace");
 }
 
-void add_inplace(float* dst, const float* src, int64_t n, void* stream) {
-    if (n <= 0) return;
-    add_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(dst, src, n);
-    check_launch("add_inplace");
-    sync_if_needed(stream, "add_inplace");
-}
-
 void f32_to_f16_bulk(const float* x, uint16_t* y, int64_t n, void* stream) {
     if (n <= 0) return;
     to_f16_kernel<<<grid_for(n), THREADS, 0, (cudaStream_t) stream>>>(x, y, n);
@@ -183,46 +169,6 @@ void silu_inplace(float* x, int64_t n, void* stream) {
     sync_if_needed(stream, "silu_inplace");
 }
 
-/// THE DOORBELL.  One thread, one INCREMENT - the cost is the launch, and inside a graph that is paid once.
-///
-/// **IT INCREMENTS THE MEMORY, AND IT DOES NOT TAKE THE VALUE AS AN ARGUMENT.**  The first version did -
-/// doorbell_ring(d_seq, *(h_seq) + 1u) - and that is a CLONED LITERAL: the expression is evaluated on the HOST
-/// at CAPTURE time, so the graph rings 1 on every replay and a host waiting for a change waits forever.  It
-/// would have looked like a working doorbell on the first token, which is the worst way for it to be wrong.
-/// **THE FENCE IS NOT DECORATION, AND ITS ABSENCE WAS COSTING ~10 ms PER TOKEN ON THE HOST SIDE.**
-///
-/// The ring PUBLISHES three buffers the host is about to read - `h_x_f`, `h_ids`, `h_weights` - so the increment
-/// must be ordered after their writes, or the host can observe the ring and then read a payload that has not
-/// landed.  `__threadfence_system()` is what orders them, and it covers the HOST as well as the device, which is
-/// the whole point: the reader is the CPU.
-///
-/// Without it the host loop was compensating with a driver call.  `session_loop` polled with `cudaEventQuery`
-/// on EVERY spin iteration, because round 195 had measured that a memory-only spin never saw the datum flip -
-/// and that measurement was right about the symptom and wrong about the cause.  The cause is this missing fence:
-/// the write was not ordered into host-visible memory, so no amount of reading it would show it, and the driver
-/// call was flushing the whole pipeline enough to make it appear.  A 10-22 us driver call per iteration is a
-/// very expensive substitute for one fence instruction.
-///
-/// **THE STORE IS VOLATILE**, like `doorbell_publish_kernel`'s.  On RDNA4 (gfx1201) a plain store to mapped pinned
-/// memory stays in the GPU's L2 until the stream is synchronized - the host never saw the ring (upstream's tests/hip/handoff:
-/// 0 of 100 rings seen without a sync; volatile, a system-scope atomic store or a fence after the store: 100 of 100).
-__global__ void doorbell_ring_kernel(uint32_t* seq) {
-    __threadfence_system();
-    *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;
-}
-
-__global__ void doorbell_wait_kernel(const volatile uint32_t* flag, const volatile uint32_t* seq) {
-    const uint32_t want = *seq;
-    while (*flag != want) strata_spin_pause();
-    __threadfence_system();
-}
-
-void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream) {
-    if (d_flag == nullptr || d_seq == nullptr) return;
-    doorbell_wait_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(d_flag, d_seq);
-    check_launch("doorbell_wait");
-}
-
 __global__ void copy_from_mapped_kernel(float4* __restrict__ dst, const volatile float4* src, int64_t n4) {
     for (int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (int64_t) gridDim.x * blockDim.x) {
         const float4 v = const_cast<const float4*>(src)[i];
@@ -230,37 +176,6 @@ __global__ void copy_from_mapped_kernel(float4* __restrict__ dst, const volatile
     }
 }
 
-// the CPU rows of a verify window, skipping the rows the GPU plan computes itself (the
-// pool writes +0.0 into those, so this writes +0.0 too): block = row, the plan's hit rows `dst[0, *count)`.
-__global__ void copy_rows_from_mapped_kernel(float4* __restrict__ dst, const volatile float4* src, int64_t row4,
-                                             const int32_t* __restrict__ hit_rows, const int32_t* __restrict__ count) {
-    const int row = blockIdx.x;
-    __shared__ int hit;
-    if (threadIdx.x == 0) {
-        int h = 0;
-        const int c = *count;
-        for (int i = 0; i < c; ++i) h |= hit_rows[i] == row;
-        hit = h;
-    }
-    __syncthreads();
-    float4* d = dst + (int64_t) row * row4;
-    if (hit) {
-        for (int64_t i = threadIdx.x; i < row4; i += blockDim.x) d[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    } else {
-        const volatile float4* sr = src + (int64_t) row * row4;
-        for (int64_t i = threadIdx.x; i < row4; i += blockDim.x) d[i] = const_cast<const float4*>(sr)[i];
-    }
-}
-void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t width, const int32_t* hit_rows,
-                           const int32_t* count, void* stream) {
-    if (rows <= 0) return;
-    if ((width & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
-        std::fprintf(stderr, "copy_rows_from_mapped: width must be a multiple of 4 and both pointers 16-byte aligned\n");
-        std::exit(1);
-    }
-    copy_rows_from_mapped_kernel<<<(unsigned) rows, 128, 0, (cudaStream_t) stream>>>((float4*) dst, (const volatile float4*) src,
-                                                                                  width / 4, hit_rows, count);
-}
 void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream) {
     if (n <= 0) return;
     if ((n & 3) != 0 || ((uintptr_t) dst & 15) != 0 || ((uintptr_t) src & 15) != 0) {
@@ -333,13 +248,6 @@ void copy_i32_from_mapped(int32_t* dst, const int32_t* src, int64_t n, void* str
     if (n <= 0) return;
     copy_i32_from_mapped_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(dst, (const volatile int32_t*) src, (int) n);
     check_launch("copy_i32_from_mapped");
-}
-
-void doorbell_ring(uint32_t* d_seq, void* stream) {
-    if (d_seq == nullptr) return;
-    doorbell_ring_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(d_seq);
-    check_launch("doorbell_ring");
-    sync_if_needed(stream, "doorbell_ring");
 }
 
 void rms_norm_weighted(float* x, const float* w, int64_t rows, int64_t cols, float eps, void* stream) {

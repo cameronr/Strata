@@ -57,37 +57,6 @@ __global__ void copy1_kernel(const uint8_t* __restrict__ a, int64_t na, const ui
     else if (i < na + nb + nc) c_dst[i - na - nb] = c[i - na - nb];
 }
 
-// Strata blob: gate/up codes [1280][640 B], down codes [2560][160 B], gate/up scales [1280][40] f16, down scales
-// [2560][10] f16 (the layout of prefill/kernels.cu's blob_dequant_kernel).  A GGUF Q2_0 block is {f16 d; 16 code
-// bytes} with the same 2-bit codes in the same order, so a block is a scale and a 16-byte run of codes.
-__global__ void strata_q2_kernel(const uint8_t* __restrict__ blob, uint16_t* __restrict__ gu, uint16_t* __restrict__ dn) {
-    constexpr size_t O_D_CODES = (size_t) 1280 * 640, O_GU_SC = O_D_CODES + (size_t) 2560 * 160,
-                     O_D_SC = O_GU_SC + (size_t) 1280 * 40 * 2;
-    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;   // one GGUF block
-    const int64_t n_gu = 1280LL * 40, n_d = 2560LL * 10;
-    const uint8_t* codes;
-    const uint16_t* scale;
-    uint16_t* out;
-    if (i < n_gu) {
-        const int64_t row = i / 40, b = i % 40;
-        codes = blob + row * 640 + b * 16;
-        scale = (const uint16_t*) (blob + O_GU_SC) + row * 40 + b;
-        out = gu + i * 9;
-    } else if (i < n_gu + n_d) {
-        const int64_t j = i - n_gu, row = j / 10, b = j % 10;
-        codes = blob + O_D_CODES + row * 160 + b * 16;
-        scale = (const uint16_t*) (blob + O_D_SC) + row * 10 + b;
-        out = dn + j * 9;
-    } else {
-        return;
-    }
-    const uint4 q = *(const uint4*) codes;
-    const uint16_t* qh = (const uint16_t*) &q;
-    out[0] = *scale;
-#pragma unroll
-    for (int k = 0; k < 8; ++k) out[1 + k] = qh[k];
-}
-
 __global__ void swiglu_kernel(const float* __restrict__ gu, float* __restrict__ h, int64_t rows, int64_t n_ff,
                               bool interleaved) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -496,12 +465,6 @@ bool gather_native_group(const uint8_t* const* blob, int n, size_t up_off, size_
                                                                                                   (uint4*) d_dst);
     ck(cudaGetLastError(), "gather_native_group");
     return true;
-}
-
-void gather_strata_q2(const uint8_t* blob, void* gu_dst, void* d_dst, void* stream) {
-    strata_q2_kernel<<<blocks(1280LL * 40 + 2560LL * 10), 256, 0, (cudaStream_t) stream>>>(blob, (uint16_t*) gu_dst,
-                                                                                         (uint16_t*) d_dst);
-    ck(cudaGetLastError(), "gather_strata_q2");
 }
 
 void swiglu(const float* gu, float* h, int64_t rows, int64_t n_ff, bool interleaved, void* stream) {

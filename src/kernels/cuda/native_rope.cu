@@ -34,7 +34,6 @@
 
 namespace strata::kernels {
 namespace {
-std::atomic<bool> enabled{false};
 bool overlaps(const void* a, size_t an, const void* b, size_t bn) {
     auto x = reinterpret_cast<uintptr_t>(a), y = reinterpret_cast<uintptr_t>(b);
     return x <= y ? y - x < an : x - y < bn;
@@ -98,17 +97,11 @@ bool rope_table_enabled() {
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling) {
     rope_tab[mrope_dev()] = RopeReg{RopeTab{cos_tab, sin_tab, max_pos}, scaling};
 }
-void rope_table_release(const float* cos_tab) {
-    for (RopeReg& r : rope_tab)
-        if (cos_tab != nullptr && r.tab.cos == cos_tab) r = RopeReg{};
-}
 RopeTab rope_table_for(const RopeScaling& scaling) {
     if (!rope_table_enabled()) return {};
     const RopeReg& r = rope_tab[mrope_dev()];
     return r.tab.cos != nullptr && same_scaling(r.scaling, scaling) ? r.tab : RopeTab{};
 }
-void native_rope_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
-bool native_rope_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_rope_apply(const float* x, float* out, int rows, int head_dim,
                        int n_rot, const RopeScaling& scaling, const int* positions, void* stream) {
     native_rope_apply_tokens(x, out, rows, head_dim, n_rot, scaling, positions, rows, rows, stream);

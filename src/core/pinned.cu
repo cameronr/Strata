@@ -264,37 +264,5 @@ LoadStats load_experts_ranges(const std::string& path, const std::vector<uint8_t
     return st;
 }
 
-StreamStats stream_bandwidth(const uint8_t* src, uint64_t bytes, uint64_t chunk, int iters) {
-    StreamStats st;
-    st.bytes = bytes * (uint64_t) iters;
-    st.chunk = chunk;
-    uint8_t* dst = nullptr;
-    cudaStream_t s{};
-    if (cudaMalloc(&dst, (size_t) chunk) != cudaSuccess) {
-        std::fprintf(stderr, "stream_bandwidth: cudaMalloc failed for %llu B\n", (unsigned long long) chunk);
-        st.seconds = -1.0;
-        return st;
-    }
-    cudaStreamCreate(&s);
-
-    // one untimed pass so the first transfer's page-fault and setup cost is not in the measurement
-    for (uint64_t off = 0; off + chunk <= bytes; off += chunk) {
-        cudaMemcpyAsync(dst, src + off, (size_t) chunk, cudaMemcpyHostToDevice, s);
-    }
-    cudaStreamSynchronize(s);
-
-    const auto t0 = std::chrono::steady_clock::now();
-    for (int it = 0; it < iters; ++it) {
-        for (uint64_t off = 0; off + chunk <= bytes; off += chunk) {
-            cudaMemcpyAsync(dst, src + off, (size_t) chunk, cudaMemcpyHostToDevice, s);
-        }
-    }
-    cudaStreamSynchronize(s);
-    st.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
-    cudaStreamDestroy(s);
-    cudaFree(dst);
-    return st;
-}
 
 }  // namespace strata::core

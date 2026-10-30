@@ -87,7 +87,7 @@ __global__ void quantize_q8_0_kernel(const float* __restrict__ x, uint8_t* __res
 ///     chunks whose SCALE differs : 80 of 80, max rel 4.761e-04     <- 2^-11: fp32 vs the block's fp16
 ///
 /// The scale is the difference that matters: `ActQ::scale` is `float` and the CPU kernel multiplies by it
-/// (`expert.cpp:92`), while `row_dot_s2_q8` read `f16_at(xb)` out of the `block_q8_0`.  So this variant
+/// (`expert.cpp:92`), while a GPU row dot reads the `block_q8_0`'s fp16 `d`.  So this variant
 /// writes the SAME 34-byte blocks (the kernel's indexing is unchanged) **and** a parallel fp32 scale array
 /// carrying `d32` unrounded.
 ///

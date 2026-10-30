@@ -80,8 +80,6 @@ void verify_hit_plan(const int32_t* ids, int n, int k, const int32_t* res, int n
 // ---- the MTP draft layer (src/core/mtp.cpp)
 /// R[t][c][:] = h[t][c][:] + e[t][:]  (the embedding branch added to every stream).
 void add_streams_broadcast(const float* h, const float* e, float* R, int64_t n_embd, int hc, int n_tok, void* stream);
-/// Every routed expert is resident (slot = expert id): slot[i] = ids[i], dst[i] = i, *count = n.
-void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream);
 /// The draft chain's next input: R_dst[:] = R_src[row], tok_dst[0] = ids[row], out[j] = ids[row], with
 /// row = *row_dev (device memory).  `out` may be mapped host memory.
 void mtp_select(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst,
@@ -115,8 +113,6 @@ void join_rows(float* dst, int64_t n, const float* a, int64_t na, const float* b
 uint64_t row_top_prob_scratch_bytes(int n_rows);
 void row_top_prob_split(const float* logits, int n_rows, int n_vocab, const int32_t* ids, float* probs, void* scratch,
                         void* stream);
-/// Dense-attention step records for `n` cells: [cell, cell+1, (cell+1)/4, cell+1] from cells[i] (device memory).
-void dense_steps(const int32_t* cells, int n, int32_t* steps, void* stream);
 /// A sliding attention window: for `n` step records (kStepCount ints each, n_kv at [1]) the selection becomes the
 /// last `window` cells: ids[q * ids_stride + j] = max(0, n_kv - window) + j and the record's width = the count.
 void window_ids(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_stride, void* stream);

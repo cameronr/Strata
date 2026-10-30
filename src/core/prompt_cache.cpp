@@ -319,12 +319,6 @@ void PromptCache::checkpoint(int64_t pos) {
     live_.ckpts.push_back({pos, h, ++clock_});
 }
 
-void PromptCache::forget() {
-    release(live_, 0);
-    live_.tokens.clear();
-    live_.imgs.clear();
-}
-
 void PromptCache::clear() {
     release(live_, -1);
     live_.tokens.clear();

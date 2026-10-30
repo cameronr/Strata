@@ -36,7 +36,6 @@ namespace {
 
 constexpr int THREADS = 256;
 bool native_bf16 = false;
-bool native_postops = false;
 
 bool overlap(const void* a, size_t a_bytes, const void* b, size_t b_bytes) {
     if (a == nullptr || b == nullptr || a_bytes == 0 || b_bytes == 0) return false;
@@ -191,9 +190,6 @@ void ck(cudaError_t e, const char* what) {
 }  // namespace
 
 void ple_set_native_bf16(bool enabled) { native_bf16 = enabled; }
-bool ple_native_bf16() { return native_bf16; }
-void ple_set_native_postops(bool enabled) { native_postops = enabled; }
-bool ple_native_postops_enabled() { return native_postops; }
 
 void ple_history_advance(float* hist, const float* normalized, void* stream) {
     if (hist == nullptr || normalized == nullptr)
@@ -306,10 +302,8 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
         quantize_q8_0(emb, d_act, n_embd, st);
         s2_gemv_q8(d_act, w.key_codes, w.key_scales, d_key, n_embd, hc_dim, 8, st);
     }
-    if (!native_postops) {
-        gnorm_kernel<<<hc, THREADS, 0, st>>>(d_key, w.norm_key, d_key, n_embd, NG_RMS_EPS);
-        gnorm_kernel<<<hc, THREADS, 0, st>>>(hidden, w.norm_query, d_query, n_embd, NG_RMS_EPS);
-    }
+    gnorm_kernel<<<hc, THREADS, 0, st>>>(d_key, w.norm_key, d_key, n_embd, NG_RMS_EPS);
+    gnorm_kernel<<<hc, THREADS, 0, st>>>(hidden, w.norm_query, d_query, n_embd, NG_RMS_EPS);
 
     // The value projection's independent option leaves the nonlinear PLE operations unchanged.
     if (native_bf16) {
@@ -320,28 +314,17 @@ void ple_block(const float* emb, const float* hidden, const float* hist_rows, co
                                                                               n_embd, n_embd);
     }
 
-    const float* normalized_key = d_key;
-    if (native_postops) {
-        // The key norm has a distinct destination; temporary query storage can
-        // be reused for normalized gated values after the gate consumes it.
-        NativePlePostopsBuffers buffers{d_query,d_norm,d_gate,d_gated,d_norm,d_conv,out.result};
-        native_ple_postops(d_key,hidden,d_value,hist_rows,w,buffers,stream);
-        normalized_key = d_query;
-    } else {
-        gate_kernel<<<hc, THREADS, 0, st>>>(d_key, d_query, d_gate, n_embd, 1.0f / sqrtf((float) n_embd));
-        bcast_kernel<<<(hc_dim + THREADS - 1) / THREADS, THREADS, 0, st>>>(d_value, d_gate, d_gated, n_embd, hc);
-        gnorm_kernel<<<hc, THREADS, 0, st>>>(d_gated, w.norm_conv, d_norm, n_embd, NG_RMS_EPS);
-        conv_kernel<<<(hc_dim + THREADS - 1) / THREADS, THREADS, 0, st>>>(hist_rows, d_norm, w.conv1d_f16, d_conv,
-                                                                         hc_dim, PLE_CONV_KERNEL, NGRAM_SIZE,
-                                                                         NG_HIST);
-        add3_kernel<<<(hc_dim + THREADS - 1) / THREADS, THREADS, 0, st>>>(hidden, d_gated, d_conv, out.result,
-                                                                         hc_dim);
-    }
+    gate_kernel<<<hc, THREADS, 0, st>>>(d_key, d_query, d_gate, n_embd, 1.0f / sqrtf((float) n_embd));
+    bcast_kernel<<<(hc_dim + THREADS - 1) / THREADS, THREADS, 0, st>>>(d_value, d_gate, d_gated, n_embd, hc);
+    gnorm_kernel<<<hc, THREADS, 0, st>>>(d_gated, w.norm_conv, d_norm, n_embd, NG_RMS_EPS);
+    conv_kernel<<<(hc_dim + THREADS - 1) / THREADS, THREADS, 0, st>>>(hist_rows, d_norm, w.conv1d_f16, d_conv, hc_dim,
+                                                                     PLE_CONV_KERNEL, NGRAM_SIZE, NG_HIST);
+    add3_kernel<<<(hc_dim + THREADS - 1) / THREADS, THREADS, 0, st>>>(hidden, d_gated, d_conv, out.result, hc_dim);
 
     // ---- the intermediates the oracle comparison needs.  `key` is the NORMALISED key, because the source's
     //      `cb(key, ...)` capture is after `gnorm`; `value` is the projection before the gate.  Each stage the
     //      oracle records is reproduced here so a mismatch can be attributed instead of guessed at.
-    if (out.key) ck(cudaMemcpyAsync(out.key, normalized_key, hc_dim * sizeof(float), cudaMemcpyDeviceToDevice, st), "key");
+    if (out.key) ck(cudaMemcpyAsync(out.key, d_key, hc_dim * sizeof(float), cudaMemcpyDeviceToDevice, st), "key");
     if (out.value)
         ck(cudaMemcpyAsync(out.value, d_value, n_embd * sizeof(float), cudaMemcpyDeviceToDevice, st), "value");
     if (out.gate) ck(cudaMemcpyAsync(out.gate, d_gate, hc * sizeof(float), cudaMemcpyDeviceToDevice, st), "gate");

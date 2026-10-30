@@ -176,8 +176,4 @@ void NativeEmbed::gather_dev(const int32_t* tokens, int64_t n_tok, float* out, v
     strata::kernels::iq_embed_rows(type_, dev_, row_, tokens, n_tok, n_embd_, out, stream);
 }
 
-void NativeEmbed::gather_one(int64_t token, float* out, void* stream) const {
-    strata::kernels::iq_dequant_f32(type_, (const uint8_t*) dev_ + (size_t) token * row_, n_embd_, out, stream);
-}
-
 }  // namespace strata::core

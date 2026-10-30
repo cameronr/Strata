@@ -115,8 +115,6 @@ public:
     /// it.  The pool reads this one (`ExpertDispatch::host_res`), so it leaves exactly the GPU's rows to the GPU.
     const int32_t* residency() const { return h_res_; }
 
-    /// Token t's residual after the last layer, (hc, n_embd) on the device, valid until the next `run`.
-    const float* final_R(int t) const;
     const float* final_R_all() const { return R_; }
     /// With `set_host_rows(true)` (before the first `run`), the same rows in host memory once `run` returns: the
     /// graph writes them there itself, so reading them waits for no copy engine.
@@ -265,9 +263,8 @@ private:
     bool pcie_share_ = true;
     int groups_[9] = {};
     float* h_ymiss_ = nullptr;   float* m_ymiss_ = nullptr;     // T * k * n_embd
-    // the FFN input as the router kernel writes it (quant_router_): Q8_K rows `xk_stride_` bytes apart for the layers
-    // the pool takes them (xk_layer_), q8_1 rows for the GPU tiers
-    bool quant_router_ = false;
+    // the FFN input as the router kernel writes it: Q8_K rows `xk_stride_` bytes apart for the layers the pool takes
+    // them (xk_layer_), q8_1 rows for the GPU tiers
     std::vector<uint8_t> xk_layer_;
     int64_t xk_stride_ = 0;
     uint8_t* h_xk_ = nullptr;    uint8_t* m_xk_ = nullptr;      // T rows

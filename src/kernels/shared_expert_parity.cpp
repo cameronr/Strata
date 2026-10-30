@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
         // would coincide with the weighted one and the fixture could not see reading A.
         double wsum = 0;
         for (auto& v : w) { v = std::fabs(g2(rng2)) + 0.05f; wsum += v; }
-        for (auto& v : w) v = (float) (v / wsum);            // already renormalised, as router_top10 emits
+        for (auto& v : w) v = (float) (v / wsum);            // already renormalised, as the router emits
         for (auto& v : shared) v = g2(rng2) * 3.0f;
 
         auto ref = [&](bool weight_routed, bool weight_shared) {

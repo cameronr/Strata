@@ -20,8 +20,6 @@
 //   - `sampler_kernel` (`STRATA_OLD_SAMPLER=1`), the kernel of engine 0.1.20, kept as the reference.
 // The two new ones share `sampled_tail_warp` (top_p / min_p / temperature / draw on one warp).
 #include "strata/kernels/sampler.hpp"
-#include "strata/core/coupled_draft.hpp"
-#include "strata/core/spec_prob.hpp"
 #include "strata/core/emulate.hpp"
 
 #include <cuda_runtime.h>
@@ -68,7 +66,7 @@ __device__ __forceinline__ float philox_uniform(uint64_t seed, uint64_t counter)
 // equivalent to argmax(log p_i + Gumbel_i), so it is an exact sample of p.  Unlike the inverse-CDF pick over a
 // probability-sorted list, the noise a token gets does not depend on which other tokens survived the cut, so a
 // drafter whose candidate set differs from the target's still agrees with it on the tokens they share ("support
-// invariant").  The MTP drafter keys on the draft's token id (via sub_to_id), the target on its row's token id.
+// invariant").  The target keys on its row's token id.
 __device__ __forceinline__ double gumbel_exp(uint64_t seed, uint64_t counter, uint32_t token) {
     uint64_t z = seed ^ (counter * 0x9E3779B97F4A7C15ull) ^ ((uint64_t) token * 0xD1B54A32D192ED03ull);
     z += 0x9E3779B97F4A7C15ull;
@@ -474,12 +472,8 @@ __device__ __forceinline__ void warp_first(float& bv, int& bi) {
 /// the same argument, the sums in the same order, `cum += e / sum` with the same correctly rounded quotient - so
 /// the cut, the survivors and the pick are the same.  (`n_keep == 0`, reachable only with min_p > 1, which the
 /// callers clamp, read `sel_ids[-1]` in the old tail; it reads `sel_ids[0]` here.)
-/// kProb (the coupled draft only): lane 0 also writes the pick's probability under the final distribution to
-/// `*prob_out`.  The sampler's own calls take kProb = false, whose code is the tail above, unchanged.
-template <bool kProb = false>
 __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, int k, const SamplerParams& p, int t,
-                                  int* __restrict__ out, double* ex, float* prob_out = nullptr,
-                                  const int32_t* __restrict__ sub_to_id = nullptr) {
+                                  int* __restrict__ out, double* ex) {
     const int lane = (int) (threadIdx.x & 31);
     const float inv_t = p.temperature > 0.0f ? 1.0f / p.temperature : 0.0f;
     int n_keep = k;
@@ -527,25 +521,22 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
     for (int i = lane; i < n_keep; i += 32) ex[i] = ex[i] / sum;
     __syncwarp();
     if (lane == 0) {
-        int pi = n_keep > 0 ? n_keep - 1 : 0;
-        int pick = sel_ids[pi];
+        int pick = sel_ids[n_keep > 0 ? n_keep - 1 : 0];
         if (p.gumbel) {
             double best = -1.0;
             for (int i = 0; i < n_keep; ++i) {
-                const int id = sub_to_id != nullptr ? sub_to_id[sel_ids[i]] : sel_ids[i];
-                const double r = ex[i] / gumbel_exp(p.seed, p.counter + (uint64_t) t, (uint32_t) id);
-                if (r > best) { best = r; pick = sel_ids[i]; pi = i; }
+                const double r = ex[i] / gumbel_exp(p.seed, p.counter + (uint64_t) t, (uint32_t) sel_ids[i]);
+                if (r > best) { best = r; pick = sel_ids[i]; }
             }
         } else {
             const float u = philox_uniform(p.seed, p.counter + (uint64_t) t);
             double cum = 0.0;
             for (int i = 0; i < n_keep; ++i) {
                 cum += ex[i];
-                if ((double) u < cum) { pick = sel_ids[i]; pi = i; break; }
+                if ((double) u < cum) { pick = sel_ids[i]; break; }
             }
         }
         out[t] = pick;
-        if constexpr (kProb) *prob_out = n_keep > 0 ? (float) ex[pi] : 1.0f;
     }
 }
 
@@ -793,310 +784,6 @@ sampler_split_merge_kernel(const int2* __restrict__ cand, int n_blocks, int n_vo
     sampled_tail_warp(sel_ids, sel_logit, k, p, t, out, ex);
 }
 
-// ---- COUPLED DRAFT SAMPLING (include/strata/core/coupled_draft.hpp): the MTP draft layer samples its draft with the
-// target's chain and the target's Philox draw.  Everything that varies per request or per round - the chain's
-// parameters, the seed, the counter (from the cell's step record), the penalty history - is read from DEVICE memory:
-// these kernels are captured into the drafter's round/step graphs.  One row, `nv` logits: the draft head's
-// vocabulary subset (rt/draft_vocab.bin) or the whole vocabulary; `sub_to_id` maps a subset index to its token id.
-
-/// The round's inputs: the request's SamplerParams and the history base (the last h slots before `cap`), from
-/// mapped host memory into the device copies the chain's kernels read.
-__global__ void coupled_stage_kernel(const SamplerParams* __restrict__ mp, const int* __restrict__ mh,
-                                     SamplerParams* __restrict__ dp, int* __restrict__ ring, int cap, int gumbel) {
-    const volatile int* s = (const volatile int*) mp;
-    int* d = (int*) dp;
-    for (int i = threadIdx.x; i < (int) (sizeof(SamplerParams) / sizeof(int)); i += blockDim.x) d[i] = s[i];
-    __syncthreads();                                   // the word holding `gumbel` was just copied
-    if (threadIdx.x == 0) dp->gumbel = gumbel != 0;
-    const int h = strata::core::coupled_hist_len(((const volatile SamplerParams*) mp)->penalty_last_n, cap);
-    const volatile int* vh = (const volatile int*) mh;
-    for (int i = cap - h + (int) threadIdx.x; i < cap; i += blockDim.x) ring[i] = vh[i];
-}
-
-/// The penalties, applied in place to the draft logits before the selection - the target applies the same
-/// `apply_penalties` to the same token with the same count over the same window before its own.  Draft j's window
-/// is the ring's [cap + j - h, cap + j): the base plus drafts 0 .. j-1.  A history token outside the draft head's
-/// subset has no logit here.  Each distinct token is penalised once: the entry whose `atomicOr` sets its bit does it.
-__global__ void coupled_penalize_kernel(float* __restrict__ logits, int nv, const int* __restrict__ id_to_sub,
-                                        int id_vocab, const SamplerParams* __restrict__ dp, const int* __restrict__ ring,
-                                        int cap, int j) {
-    const SamplerParams p = *dp;
-    const int h = strata::core::coupled_hist_len(p.penalty_last_n, cap);
-    if (h <= 0) return;
-    const int* hrow = ring + strata::core::coupled_hist_start(cap, j, h);
-    extern __shared__ unsigned int seen[];
-    const int words = (nv + 31) / 32;
-    for (int w = threadIdx.x; w < words; w += blockDim.x) seen[w] = 0u;
-    __syncthreads();
-    for (int i = threadIdx.x; i < h; i += blockDim.x) {
-        const int v = hrow[i];
-        if (v < 0 || v >= id_vocab) continue;
-        const int s = id_to_sub != nullptr ? id_to_sub[v] : v;
-        if (s < 0 || s >= nv) continue;
-        const unsigned bit = 1u << (s & 31);
-        if (atomicOr(&seen[s >> 5], bit) & bit) continue;
-        logits[s] = apply_penalties(logits[s], history_count(hrow, h, v), p);
-    }
-}
-
-/// The merge of `sampler_split_merge_kernel` (lists of `kpart` entries, the request's top_k taken from them), then
-/// `sampled_tail_warp` with the counter of the row that will verify this draft.  Lane 0 maps the pick to its token
-/// id, writes it and its probability, and appends it to the ring for the next draft's penalty window.
-__global__ void __launch_bounds__(32)
-coupled_merge_kernel(const int2* __restrict__ cand, int n_blocks, int nv, int kpart,
-                     const SamplerParams* __restrict__ dp, const int* __restrict__ step_rec,
-                     const int* __restrict__ sub_to_id, int* __restrict__ ring, int cap, int j, int* __restrict__ out_id,
-                     float* __restrict__ out_prob) {
-    const int lane = (int) threadIdx.x;
-    SamplerParams p = *dp;
-    p.counter = strata::core::coupled_draft_counter((int64_t) step_rec[0]);
-    const int k = sampled_k(p.top_k, nv);    // <= kpart: the first k of a union lie in the first k of each list
-    __shared__ int2 lists[kSplitMaxBlocks * kSelMax];
-    __shared__ int sel_ids[kSelMax];
-    __shared__ float sel_logit[kSelMax];
-    __shared__ double ex[kSelMax];
-    __shared__ int pick[1];
-    __shared__ float prob[1];
-    for (int e = lane; e < n_blocks * kpart; e += 32) lists[e] = cand[e];
-    __syncwarp();
-    warp_merge_lists(lists, n_blocks, kpart, k, nv, [&](int i, float v, int id) {
-        if (lane == 0) { sel_ids[i] = id < nv ? id : 0; sel_logit[i] = v; }
-    });
-    __syncwarp();
-    if (p.greedy || p.temperature <= 0.0f) {   // never launched for greedy requests; the argmax, defensively
-        if (lane == 0) { pick[0] = sel_ids[0]; prob[0] = 1.0f; }
-    } else {
-        sampled_tail_warp<true>(sel_ids, sel_logit, k, p, 0, pick, ex, prob, sub_to_id);
-    }
-    __syncwarp();
-    if (lane == 0) {
-        const int s = pick[0];
-        const int id = sub_to_id != nullptr ? sub_to_id[s] : s;
-        *out_id = id;
-        *out_prob = prob[0];
-        ring[cap + j] = id;
-    }
-}
-
-// ---- PROBABILISTIC DRAFT ACCEPTANCE (include/strata/core/spec_prob.hpp, STRATA_SPEC_PROB=1) ----
-//
-// `sampled_probs_warp` is `sampled_tail_warp`'s chain without the pick: the same arithmetic instruction for
-// instruction (top_p's cut in double over the top_k list, min_p's threshold in logit space, temperature, the two
-// ordered sums), leaving the row's probabilities in `ex[0 .. n_keep)` and returning n_keep in every lane.  It is a
-// copy, not a refactor, so the sampler's own kernels keep their SASS.
-__device__ int sampled_probs_warp(const float* sel_logit, int k, const SamplerParams& p, double* ex) {
-    const int lane = (int) (threadIdx.x & 31);
-    const float inv_t = p.temperature > 0.0f ? 1.0f / p.temperature : 0.0f;
-    int n_keep = k;
-    float mx = sel_logit[0];
-    for (int i = 1; i < k; ++i) mx = fmaxf(mx, sel_logit[i]);
-    if (p.top_p < 1.0f) {
-        for (int i = lane; i < k; i += 32) ex[i] = exp((double) sel_logit[i] - (double) mx);
-        __syncwarp();
-        double sum = 0.0;
-        if (lane == 0)
-            for (int i = 0; i < k; ++i) sum += ex[i];
-        sum = __shfl_sync(kFullMask, sum, 0);
-        __syncwarp();
-        for (int i = lane; i < k; i += 32) ex[i] = ex[i] / sum;
-        __syncwarp();
-        int cut = k;
-        if (lane == 0) {
-            double cum = 0.0;
-            for (int i = 0; i < k; ++i) {
-                cum += ex[i];
-                if (cum >= (double) p.top_p) { cut = i + 1; break; }
-            }
-        }
-        cut = __shfl_sync(kFullMask, cut, 0);
-        if (cut < p.min_keep) cut = p.min_keep < k ? p.min_keep : k;
-        n_keep = cut;
-        __syncwarp();
-    }
-    if (p.min_p > 0.0f) {
-        const float thresh = sel_logit[0] + logf(p.min_p);
-        for (int i = 0; i < n_keep; ++i)
-            if (sel_logit[i] < thresh) { n_keep = i; break; }
-    }
-    float smx = sel_logit[0] * inv_t;
-    for (int i = 1; i < n_keep; ++i) smx = fmaxf(smx, sel_logit[i] * inv_t);
-    for (int i = lane; i < n_keep; i += 32) ex[i] = exp((double) (sel_logit[i] * inv_t) - (double) smx);
-    __syncwarp();
-    double sum = 0.0;
-    if (lane == 0)
-        for (int i = 0; i < n_keep; ++i) sum += ex[i];
-    sum = __shfl_sync(kFullMask, sum, 0);
-    __syncwarp();
-    for (int i = lane; i < n_keep; i += 32) ex[i] = ex[i] / sum;
-    __syncwarp();
-    return n_keep;
-}
-
-/// The drafter's last kernel in probabilistic mode (replaces `coupled_merge_kernel`): the merge of the draft head's
-/// block lists, the chain's distribution q over them, ONE draw from q with the drafter's own Philox stream
-/// (counter = the verifying row's position | kSpecCtrDraft - not the verifier's uniform), and q itself - the
-/// (token id, probability) list - into `qrow` (kSpecQStride int32: ids, -1 terminated, then float bits).  The draft's
-/// id goes to *out_id and the ring, its probability under q to *out_prob (`--spec-min-p` gates on it).
-__global__ void __launch_bounds__(32)
-spec_draft_merge_kernel(const int2* __restrict__ cand, int n_blocks, int nv, int kpart,
-                        const SamplerParams* __restrict__ dp, const int* __restrict__ step_rec,
-                        const int* __restrict__ sub_to_id, int* __restrict__ ring, int cap, int j,
-                        int* __restrict__ out_id, float* __restrict__ out_prob, int* __restrict__ qrow, int gate_pick, float tscale) {
-    const int lane = (int) threadIdx.x;
-    SamplerParams p = *dp;
-    p.temperature *= tscale;   // 1 unless STRATA_SPEC_PROB_DT: any q is valid, a sharper one may be kept more often
-    const int k = sampled_k(p.top_k, nv);
-    __shared__ int2 lists[kSplitMaxBlocks * kSelMax];
-    __shared__ int sel_ids[kSelMax];
-    __shared__ float sel_logit[kSelMax];
-    __shared__ double ex[kSelMax];
-    __shared__ int pick[1];
-    __shared__ float prob[1];
-    for (int e = lane; e < n_blocks * kpart; e += 32) lists[e] = cand[e];
-    __syncwarp();
-    warp_merge_lists(lists, n_blocks, kpart, k, nv, [&](int i, float v, int id) {
-        if (lane == 0) { sel_ids[i] = id < nv ? id : 0; sel_logit[i] = v; }
-    });
-    __syncwarp();
-    int n_keep = 1;
-    if (p.greedy || p.temperature <= 0.0f) {   // never launched for greedy requests; the argmax as a point mass
-        if (lane == 0) { pick[0] = 0; prob[0] = 1.0f; ex[0] = 1.0; }
-        __syncwarp();
-    } else {
-        n_keep = sampled_probs_warp(sel_logit, k, p, ex);
-        if (lane == 0) {
-            const float u = philox_uniform(p.seed, strata::core::coupled_draft_counter((int64_t) step_rec[0]) |
-                                                       strata::core::kSpecCtrDraft);
-            double cum = 0.0;
-            int pi = n_keep > 0 ? n_keep - 1 : 0;
-            for (int i = 0; i < n_keep; ++i) {
-                cum += ex[i];
-                if ((double) u < cum) { pi = i; break; }
-            }
-            pick[0] = pi;
-            // the gate for --spec-min-p: q's top probability (how sure the draft head is), or the drawn token's own
-            prob[0] = n_keep > 0 ? (float) ex[gate_pick ? pi : 0] : 1.0f;
-        }
-        __syncwarp();
-    }
-    // q's list in token ids (the subset's index mapped back), -1 after the last entry
-    for (int i = lane; i < strata::core::kSpecQEntries; i += 32) {
-        if (i < n_keep) {
-            const int s = sel_ids[i];
-            qrow[i] = sub_to_id != nullptr ? sub_to_id[s] : s;
-            ((float*) qrow)[strata::core::kSpecQEntries + i] = (float) ex[i];
-        } else {
-            qrow[i] = -1;
-            ((float*) qrow)[strata::core::kSpecQEntries + i] = 0.0f;
-        }
-    }
-    __syncwarp();
-    if (lane == 0) {
-        const int s = sel_ids[pick[0]];
-        const int id = sub_to_id != nullptr ? sub_to_id[s] : s;
-        *out_id = id;
-        *out_prob = prob[0];
-        ring[cap + j] = id;
-    }
-}
-
-/// THE VERIFIER (one warp per window row): the row's post-chain distribution p from the split sampler's block lists,
-/// then spec_prob.hpp's rule - accept the row's draft d with min(1, p(d)/q(d)) (q from the drafter's list for rows
-/// < n_q, a point mass otherwise), and write out[t] = d on an accept, the residual sample on a reject (never d), the
-/// plain sample on the window's last row.  The host's `while (window[a+1] == out[a]) ++a` is unchanged.  Rows are
-/// independent: each draws its own uniforms from its position (p.counter + t).  `dtok` holds the T-1 drafts.
-__global__ void __launch_bounds__(32)
-spec_verify_merge_kernel(const int2* __restrict__ cand, int n_blocks, int n_vocab, const SamplerParams p, int k, int T,
-                         const int32_t* __restrict__ dtok, const int32_t* __restrict__ qbuf, int n_q,
-                         int* __restrict__ out) {
-    const int t = blockIdx.x;
-    const int lane = (int) threadIdx.x;
-    __shared__ int2 lists[kSplitMaxBlocks * kSelMax];
-    __shared__ int sel_ids[kSelMax];
-    __shared__ float sel_logit[kSelMax];
-    __shared__ double ex[kSelMax];
-    __shared__ double rw[kSelMax];
-    const int2* src = cand + (size_t) t * n_blocks * k;
-    for (int e = lane; e < n_blocks * k; e += 32) lists[e] = src[e];
-    __syncwarp();
-    warp_merge_lists(lists, n_blocks, k, k, n_vocab, [&](int i, float v, int id) {
-        if (lane == 0) { sel_ids[i] = id < n_vocab ? id : 0; sel_logit[i] = v; }
-    });
-    __syncwarp();
-    const int n_keep = sampled_probs_warp(sel_logit, k, p, ex);
-    const uint64_t pos = p.counter + (uint64_t) t;
-    const int d = t < T - 1 ? dtok[t] : -1;
-    const int32_t* qid = qbuf + (size_t) t * strata::core::kSpecQStride;
-    const float* qpr = (const float*) (qid + strata::core::kSpecQEntries);
-    const bool has_q = t < n_q;
-    // lane 0: p(d), q(d) and the accept decision.  dec: 0 plain sample, 1 accept, 2 reject; point: no usable q(d)
-    int dec = 0, point = 1;
-    if (lane == 0 && d >= 0) {
-        double pd = 0.0;
-        for (int i = 0; i < n_keep; ++i)
-            if (sel_ids[i] == d) { pd = ex[i]; break; }
-        double qd = -1.0;
-        if (has_q)
-            for (int i = 0; i < strata::core::kSpecQEntries && qid[i] >= 0; ++i)
-                if (qid[i] == d) { qd = (double) qpr[i]; break; }
-        point = qd > 0.0 ? 0 : 1;
-        const float u = philox_uniform(p.seed, pos | strata::core::kSpecCtrAccept);
-        dec = (pd > 0.0 && (point ? (double) u < pd : (double) u * qd < pd)) ? 1 : 2;
-    }
-    dec = __shfl_sync(kFullMask, dec, 0);
-    point = __shfl_sync(kFullMask, point, 0);
-    if (dec == 2) {   // the residual weights over p's support: max(0, p - q), or p without d for a point mass
-        for (int i = lane; i < n_keep; i += 32) {
-            double wi;
-            if (point) {
-                wi = sel_ids[i] == d ? 0.0 : ex[i];
-            } else {
-                double qi = 0.0;
-                for (int j = 0; j < strata::core::kSpecQEntries && qid[j] >= 0; ++j)
-                    if (qid[j] == sel_ids[i]) { qi = (double) qpr[j]; break; }
-                wi = ex[i] - qi;
-                if (wi < 0.0) wi = 0.0;
-            }
-            rw[i] = wi;
-        }
-        __syncwarp();
-    }
-    if (lane == 0) {
-        int tok;
-        if (dec == 0) {   // no draft on this row: the plain sample, the exact-match sampler's own draw
-            const float u = philox_uniform(p.seed, pos);
-            double cum = 0.0;
-            tok = sel_ids[n_keep > 0 ? n_keep - 1 : 0];
-            for (int i = 0; i < n_keep; ++i) {
-                cum += ex[i];
-                if ((double) u < cum) { tok = sel_ids[i]; break; }
-            }
-        } else if (dec == 1) {
-            tok = d;
-        } else {
-            double sum = 0.0;
-            for (int i = 0; i < n_keep; ++i) sum += rw[i];
-            if (!(sum > 0.0)) {
-                tok = d;   // p and q agree everywhere (rounding): the draft is as likely as it can be
-            } else {
-                const float u = philox_uniform(p.seed, pos | strata::core::kSpecCtrResid);
-                double cum = 0.0;
-                int last = -1;
-                tok = sel_ids[0];
-                bool done = false;
-                for (int i = 0; i < n_keep; ++i) {
-                    if (!(rw[i] > 0.0)) continue;
-                    last = i;
-                    cum += rw[i] / sum;
-                    if ((double) u < cum) { tok = sel_ids[i]; done = true; break; }
-                }
-                if (!done && last >= 0) tok = sel_ids[last];
-            }
-        }
-        out[t] = tok;
-    }
-}
-
 // Which sampled path runs, read once: `STRATA_OLD_SAMPLER=1` is `sampler_kernel` (engine 0.1.20),
 // `STRATA_SAMPLER_ONE_BLOCK=1` the one-block kernel; by default the split top_k wherever it applies.
 enum class SampledPath { Split, OneBlock, Old };
@@ -1291,96 +978,6 @@ void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* hi
 }
 
 namespace {
-int coupled_blocks(int nv) { return (nv + kSplitBlockSpan - 1) / kSplitBlockSpan; }
-int coupled_kpart(int nv) { return nv < kSelMax ? nv : kSelMax; }
-void coupled_check(const char* what) {
-    const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "%s launch: %s\n", what, cudaGetErrorString(e));
-        std::exit(1);
-    }
-}
 }  // namespace
-
-size_t coupled_draft_scratch_bytes(int nv) {
-    if (nv <= 0 || coupled_blocks(nv) > kSplitMaxBlocks) return 0;
-    return (size_t) coupled_blocks(nv) * (size_t) kSelMax * sizeof(int2);
-}
-
-void coupled_draft_stage(const SamplerParams* mapped_params, const int32_t* mapped_hist, SamplerParams* params,
-                         int32_t* ring, int cap, void* stream) {
-    coupled_stage_kernel<<<1, 256, 0, (cudaStream_t) stream>>>(mapped_params, mapped_hist, params, ring, cap,
-                                                               gumbel_env() ? 1 : 0);
-    coupled_check("coupled_draft_stage");
-}
-
-void coupled_draft_sample(float* logits, int nv, const int32_t* sub_to_id, const int32_t* id_to_sub, int id_vocab,
-                          const SamplerParams* params, int32_t* ring, int cap, int j, const int32_t* step_rec,
-                          void* scratch, int32_t* out_id, float* out_prob, void* stream) {
-    const cudaStream_t s = (cudaStream_t) stream;
-    const int n_blocks = coupled_blocks(nv), kpart = coupled_kpart(nv);
-    if (nv <= 0 || n_blocks > kSplitMaxBlocks || scratch == nullptr) {
-        std::fprintf(stderr, "coupled_draft_sample: %d logits need scratch and at most %d blocks\n", nv, kSplitMaxBlocks);
-        std::exit(1);
-    }
-    coupled_penalize_kernel<<<1, 1024, (unsigned) ((nv + 31) / 32) * sizeof(unsigned), s>>>(logits, nv, id_to_sub,
-                                                                                           id_vocab, params, ring, cap, j);
-    coupled_check("coupled_penalize");
-    // the selection of the split sampler, unchanged: every 4,096-logit block's first `kpart` (the widest list,
-    // since the request's top_k is only known on the device), penalties already applied above
-    sampler_split_part_kernel<<<dim3((unsigned) n_blocks, 1u), kSplitWarps * 32, 0, s>>>(
-        logits, nv, nullptr, 0, SamplerParams{}, kpart, n_blocks, (int2*) scratch);
-    coupled_check("coupled_draft split part");
-    coupled_merge_kernel<<<1, 32, 0, s>>>((const int2*) scratch, n_blocks, nv, kpart, params, step_rec, sub_to_id, ring,
-                                          cap, j, out_id, out_prob);
-    coupled_check("coupled_draft merge");
-}
-
-
-bool sample_tokens_spec(const float* logits, int n_tokens, int n_vocab, const int* history, int history_len,
-                        const SamplerParams& p, const int32_t* dtok, const int32_t* qbuf, int n_q, int* out,
-                        void* stream) {
-    if (n_tokens <= 0 || n_vocab <= 0 || p.greedy || p.temperature <= 0.0f) return false;
-    if (p.penalty_last_n > 0 && (history == nullptr || history_len <= 0)) return false;
-    const int k = sampled_k(p.top_k, n_vocab);
-    const int n_blocks = (n_vocab + kSplitBlockSpan - 1) / kSplitBlockSpan;
-    if (sampled_path() != SampledPath::Split || n_blocks > kSplitMaxBlocks || n_tokens > kSplitMaxRows ||
-        stream_capturing(stream))
-        return false;
-    int2* scratch = split_scratch(stream, (size_t) (n_tokens > 16 ? n_tokens : 16) * n_blocks * kSelMax);
-    if (scratch == nullptr) return false;
-    sampler_split_part_kernel<<<dim3((unsigned) n_blocks, (unsigned) n_tokens), kSplitWarps * 32, 0,
-                                (cudaStream_t) stream>>>(logits, n_vocab, history, history_len, p, k, n_blocks, scratch);
-    spec_verify_merge_kernel<<<(unsigned) n_tokens, 32, 0, (cudaStream_t) stream>>>(scratch, n_blocks, n_vocab, p, k,
-                                                                                    n_tokens, dtok, qbuf, n_q, out);
-    const cudaError_t e = cudaGetLastError();
-    if (e != cudaSuccess) {
-        std::fprintf(stderr, "sample_tokens_spec launch: %s\n", cudaGetErrorString(e));
-        std::exit(1);
-    }
-    if (stream == nullptr) cudaDeviceSynchronize();
-    return true;
-}
-
-void spec_draft_sample(float* logits, int nv, const int32_t* sub_to_id, const int32_t* id_to_sub, int id_vocab,
-                       const SamplerParams* params, int32_t* ring, int cap, int j, const int32_t* step_rec,
-                       void* scratch, int32_t* out_id, float* out_prob, int32_t* qrows, int gate_pick, float tscale, void* stream) {
-    const cudaStream_t s = (cudaStream_t) stream;
-    const int n_blocks = coupled_blocks(nv), kpart = coupled_kpart(nv);
-    if (nv <= 0 || n_blocks > kSplitMaxBlocks || scratch == nullptr) {
-        std::fprintf(stderr, "spec_draft_sample: %d logits need scratch and at most %d blocks\n", nv, kSplitMaxBlocks);
-        std::exit(1);
-    }
-    coupled_penalize_kernel<<<1, 1024, (unsigned) ((nv + 31) / 32) * sizeof(unsigned), s>>>(logits, nv, id_to_sub,
-                                                                                           id_vocab, params, ring, cap, j);
-    coupled_check("spec_penalize");
-    sampler_split_part_kernel<<<dim3((unsigned) n_blocks, 1u), kSplitWarps * 32, 0, s>>>(
-        logits, nv, nullptr, 0, SamplerParams{}, kpart, n_blocks, (int2*) scratch);
-    coupled_check("spec_draft split part");
-    spec_draft_merge_kernel<<<1, 32, 0, s>>>((const int2*) scratch, n_blocks, nv, kpart, params, step_rec, sub_to_id,
-                                             ring, cap, j, out_id, out_prob,
-                                             qrows + (size_t) j * strata::core::kSpecQStride, gate_pick, tscale);
-    coupled_check("spec_draft merge");
-}
 
 }  // namespace strata::kernels

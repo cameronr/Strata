@@ -34,60 +34,6 @@ namespace strata::kernels {
 /// on the token path is forbidden by P2.T10 and illegal during stream capture, and this is called from both.
 uint64_t moe_hit_grouped_scratch_bytes(int64_t n_hits, int64_t n_embd, int64_t n_ff);
 
-/// **ONE GROUPED EXPERT EVALUATION.**  For each hit `h` in `[0, n_hits)`, evaluates the expert held in
-/// `blob_base + slot_index[h] * blob_bytes` against `x_q8_0` and writes `n_embd` floats to
-/// `out + dst_index[h] * n_embd`.
-///
-/// * `blob_base`    the device slot arena; slot `s` starts at `blob_base + s * blob_bytes`
-/// * `slot_index`   `n_hits` `int32_t` slot indices on the DEVICE, so the caller can change which experts are
-///                  resident without recapturing anything
-/// * **`dst_index`   where each hit's answer goes, also on the device and also `n_hits` long.**
-///
-///                  **THIS IS NOT A CONVENIENCE - IT IS WHAT LETS THE TWO HALVES MEET.**  A layer routes ten
-///                  experts and only some are resident, so the CPU produces the misses at their ROUTED indices
-///                  (the router's order is what `moe_combine` weights against) and the GPU produces the hits in
-///                  whatever order the cache happens to hold them.  Writing the hits sequentially would land
-///                  them on the misses' rows; `dst_index` puts hit `h`'s answer on the row its expert was routed
-///                  to, so the CPU can zero the hit rows, the GPU can fill them, and `moe_combine` needs no
-///                  change at all.
-/// * `x_q8_0`       `(n_embd/32)` `block_q8_0`, 34 bytes each, from `quantize_q8_0`
-/// * `scratch`      `moe_hit_grouped_scratch_bytes(n_hits, n_embd, n_ff)`, caller-owned
-/// * `out`          `(k, n_embd)` floats - the SAME buffer the misses were written into
-/// * **`x_scales`    R4.2h, OPTIONAL, and null keeps the previous behaviour exactly.**  When non-null it is
-///                  `n_embd/32` **fp32** activation scales from `quantize_q8_0_scaled`, and they REPLACE the
-///                  block's fp16 `d` as the activation multiplier - for the gate/up projection and for the
-///                  intermediate's own quantization in step 3.
-///
-///                  **THIS EXISTS BECAUSE A HIT AND A MISS MUST PRODUCE THE SAME NUMBER.**  The CPU pool
-///                  multiplies by the fp32 `ActQ::scale` (`cpu/expert.cpp:92`); this kernel read fp16 `d` out
-///                  of the `block_q8_0`.  `bench/micro/act_quant_parity.cu` measured the gap with both real
-///                  implementations linked: **80 of 80 chunks differ, max relative 4.761e-04** - 2^-11, pure
-///                  fp16 rounding - which is why enabling the cache changed the generated tokens.  Pass null
-///                  and this is bit-for-bit the kernel `moe_hit_parity` has always checked at 6.279e-08.
-///
-/// **THE BLOB LAYOUT IS `expert.hpp`'s AND IS NOT RESTATED HERE.**  Gate/up codes are interleaved by row
-/// (`2r` = gate, `2r+1` = up), the down codes follow, and each plane's scales are fp16 - which is the ONE
-/// difference from `s_gemv_q8`'s S-forms, whose scales are fp32.  That difference is why this is a separate
-/// kernel rather than a call into the dense path.
-void moe_hit_grouped_s2(const uint8_t* blob_base, const int32_t* slot_index, const int32_t* dst_index,
-                        int64_t n_hits, int64_t blob_bytes, const uint8_t* x_q8_0, void* scratch, float* out,
-                        void* stream, const float* x_scales = nullptr);
-
-/// Experimental CPU-order implementation. Eight CUDA lanes reproduce the CPU VNNI accumulator lanes,
-/// fused multiply-add order, separate correction, and final horizontal reduction. The input must use
-/// the CPU quantization contract and fp32 scales. SiLU uses accurate CUDA expf, which can differ from
-/// the CPU math library by last bits. End-to-end correctness must be checked against the C1 oracle.
-/// Validate both intermediate quantization and final outputs.
-/// Optional gate_up_trace receives [all gates | all ups] before SiLU, for parity diagnostics only.
-/// Plan v0.3 P4 token graph: the hit path with NO host step.  `moe_hit_select` builds this layer's hit list
-/// from the routed `ids` and the static residency row (`res_row[e]` = slot or -1) into `slot`/`dst`/`count`
-/// (device); `moe_hit_grouped_s2_dev` is `moe_hit_grouped_s2` sized for `cap` hits that reads the real count
-/// from `d_count`; `moe_hit_add` adds each hit's row of `hit_out` into `parts` (rows the CPU left at zero).
-void moe_hit_select(const int32_t* ids, const int32_t* res_row, int k, int n_expert, int32_t* slot, int32_t* dst,
-                    int32_t* count, void* stream);
-void moe_hit_grouped_s2_dev(const uint8_t* blob_base, const int32_t* slot_index, const int32_t* dst_index,
-                            const int32_t* d_count, int64_t cap, int64_t blob_bytes, const uint8_t* x_q8_0,
-                            void* scratch, float* out, void* stream, const float* x_scales);
 void moe_hit_add(float* parts, const float* hit_out, const int32_t* dst, const int32_t* count, int64_t cap,
                  int64_t n_embd, void* stream);
 /// Plan v0.3 P6 verify window: `moe_hit_select` over `n` <= 128 routed entries (T tokens x k, flattened), and the
@@ -105,27 +51,5 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
 void moe_group_resident(const int32_t* ids, int n, int k_per_tok, const uint8_t* base, int64_t blob,
                         unsigned long long* grp_ptr, int32_t* grp_start, int32_t* counts, int32_t* ent_dst,
                         int32_t* ent_tok, void* stream);
-void moe_hit_select_multi(const int32_t* ids, const int32_t* res_row, int n, int n_expert, int32_t* slot, int32_t* dst,
-                          int32_t* count, void* stream);
-void moe_hit_grouped_s2_multi(const uint8_t* blob_base, const int32_t* slot_index, const int32_t* dst_index,
-                              const int32_t* d_count, int64_t cap, int64_t blob_bytes, const uint8_t* x_q8_0,
-                              const float* x_scales, int k_per_token, void* scratch, float* out, void* stream);
-/// The per-hit kernels (`moe_hit_grouped_s2`, `_dev`, `_multi`) and the grouped ones (`moe_grouped_s2`)
-/// were rewritten with bitwise-identical outputs: conflict-free staged activations, `hx` once per chunk, wide loads,
-/// two rows per warp.  The previous kernels stay for A/B: `STRATA_OLD_GROUPED=1` in the environment selects them,
-/// and so does `moe_grouped_select_old(1)`; `0` forces the new ones, `-1` returns to the environment.  The environment
-/// variable is read once, on first use; the kernel choice is made at each launch (so a captured graph keeps the
-/// kernels chosen at capture).  Use `moe_grouped_select_old` to switch at runtime.  `STRATA_GROUPED_PAIR_MIN_HITS=N`
-/// (read once too) keeps the previous per-hit kernels below N hits of capacity; a forced choice overrides it.  The
-/// new kernels also need 4-byte aligned activations and scratch, and the per-hit ones an 8-byte aligned arena and
-/// slot size; otherwise the previous kernels run.
-void moe_grouped_select_old(int old);
-/// Which kernels the last call of the entry points above launched: 1 = new, 0 = previous, -1 = none since the
-/// previous query (the query clears it).  For the parity test, which must know the path it compared was taken.
-int moe_grouped_last_path();
-void moe_hit_grouped_s2_cpu_order(const uint8_t* blob_base, const int32_t* slot_index,
-                                 const int32_t* dst_index, int64_t n_hits, int64_t blob_bytes,
-                                 const uint8_t* x_q8_0, void* scratch, float* out, void* stream,
-                                 const float* x_scales, float* gate_up_trace = nullptr);
 
 }  // namespace strata::kernels

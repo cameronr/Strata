@@ -28,14 +28,6 @@
 
 namespace strata::kernels {
 
-namespace {
-/// The A/B arm.  Host-token-path only, so it needs no atomics; see the note on `ple_prefetch_enable`.
-bool g_ple_prefetch = true;
-}  // namespace
-
-void ple_prefetch_enable(bool on) { g_ple_prefetch = on; }
-bool ple_prefetch_enabled() { return g_ple_prefetch; }
-
 PleConsts ple_artifact_consts() {
     // docs/gguf-dump-shard1.txt, verbatim.  Written once here rather than derived, because `head_offsets` is
     // ALSO in the metadata as its own array - and deriving one from the other would hide a mismatch between
@@ -396,7 +388,7 @@ bool PleTable::issue(const uint32_t* rows16) {
         return true;
     }
 #if defined(_WIN32)
-    if (impl_->data != nullptr && g_ple_prefetch) {
+    if (impl_->data != nullptr) {
         WIN32_MEMORY_RANGE_ENTRY ranges[PLE_N_HEADS];
         ULONG_PTR n = 0;
         for (int h = 0; h < PLE_N_HEADS; ++h) {
@@ -446,7 +438,7 @@ bool PleTable::gather_batch(const uint32_t* rows, size_t n_tokens, float* out, s
     // token), with only layer 0 to hide a prompt's first chunk behind: the next window's pages are asked for in one
     // go while this window is read (upstream 62497bff; a hint, an unfetched page is faulted by the read).
     constexpr size_t kWin = 4096;   // rows a window
-    const bool mapped = impl_->data != nullptr && !impl_->from_ram() && g_ple_prefetch;
+    const bool mapped = impl_->data != nullptr && !impl_->from_ram();
     auto hint = [&](size_t a, size_t b) {
         if (!mapped) return;
 #if defined(_WIN32)
@@ -560,7 +552,7 @@ void PleTable::gather(const uint32_t* rows16, float* out2560) const {
     // and cannot change the answer - a range it does not fetch is simply faulted in by the read that follows -
     // so the only risk is that it does nothing.
 #if defined(_WIN32)
-    if (impl_->data != nullptr && g_ple_prefetch) {
+    if (impl_->data != nullptr) {
         WIN32_MEMORY_RANGE_ENTRY ranges[PLE_N_HEADS];
         ULONG_PTR n = 0;
         for (int h = 0; h < PLE_N_HEADS; ++h) {

@@ -535,12 +535,6 @@ void s_gemv_split(const uint16_t* x, const uint8_t* codes, const float* scales, 
     s_gemv_split_impl(x, codes, scales, offset, y, n_in, n_out, form, threads_per_row, (cudaStream_t) 0, true);
 }
 
-void s_gemv_split_async(const uint16_t* x, const uint8_t* codes, const float* scales, const float* offset,
-                        float* y, int64_t n_in, int64_t n_out, const SForm& form, int threads_per_row,
-                        void* stream) {
-    s_gemv_split_impl(x, codes, scales, offset, y, n_in, n_out, form, threads_per_row, (cudaStream_t) stream,
-                      false);
-}
 
 // ---- the Q8_K entry points -----------------------------------------------------------------------------
 

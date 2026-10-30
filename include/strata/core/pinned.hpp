@@ -76,26 +76,6 @@ LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::
 // comparison - the same reason the Phase 1 tools report the first differing element.
 uint64_t fnv1a64(const uint8_t* p, uint64_t n, uint64_t seed = 1469598103934665603ull);
 
-// ---- the expert stream -----------------------------------------------------
-//
-// THIS IS THE NUMBER THE OBJECTIVE DEPENDS ON.  With one expert per stream, the design's own arithmetic is:
-//
-//     per token: E = 663.6 MB of expert weights, of which only the MISSES cross the bus
-//     miss fraction (1 - h) x 663.6 MB / measured bandwidth = milliseconds per token
-//
-// So `h` (the VRAM hit rate, ~0.167 by design) is only worth anything if a per-expert transfer can actually
-// reach the bus's bandwidth.  A 1,382,400-byte copy is SMALL, and if small copies run at a fraction of large
-// ones then the architecture's central constant is wrong and no kernel optimisation can fix it.  That is what
-// this measures: the same total bytes at several granularities, so the difference is visible.
-struct StreamStats {
-    double seconds = 0.0;
-    uint64_t bytes = 0;
-    uint64_t chunk = 0;
-    double gib_per_second() const { return seconds > 0 ? (double) bytes / (1024.0 * 1024 * 1024) / seconds : 0.0; }
-};
 
-// Copy `bytes` from pinned host memory at `src` to a device buffer of `chunk` bytes, in `chunk`-sized
-// transfers, `iters` times.  The destination is REUSED, so this measures the bus and not allocation.
-StreamStats stream_bandwidth(const uint8_t* src, uint64_t bytes, uint64_t chunk, int iters);
 
 }  // namespace strata::core

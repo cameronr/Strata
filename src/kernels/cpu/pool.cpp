@@ -414,7 +414,7 @@ void ExpertPool::run_phase(int mode, int n_tasks, void (*first)(void*), void* ct
 
 void ExpertPool::run_split(ExpertJob* jobs, int n) {
     if (n <= 0) return;
-    if (n > kMaxSplit || n_ == 1 || expert_oracle_q8_0_enabled()) { run(jobs, n); return; }
+    if (n > kMaxSplit || n_ == 1) { run(jobs, n); return; }
     const auto t0 = std::chrono::steady_clock::now();
     jobs_ = jobs;
     const int threads = n_ + (host_works_ ? 1 : 0);
@@ -430,8 +430,8 @@ void ExpertPool::run_split(ExpertJob* jobs, int n) {
 
 void ExpertPool::run_split_multi(ExpertJobMulti* jobs, int n) {
     if (n <= 0) return;
-    if (n > kMaxSplitMulti || expert_oracle_q8_0_enabled()) {
-        // one token at a time through the single-token path (the oracle contract has no multi kernel)
+    if (n > kMaxSplitMulti) {
+        // one token at a time through the single-token path
         std::vector<ExpertJob> single;
         for (int e = 0; e < n; ++e)
             for (int t = 0; t < jobs[e].nt; ++t) {

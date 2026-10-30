@@ -18,7 +18,6 @@
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/rope.hpp"
-#include "strata/kernels/router_top10.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
 #include "strata/kernels/sampler.hpp"
 #include "strata/kernels/shared_expert.hpp"
@@ -400,8 +399,7 @@ void MtpDrafter::norm_rope(float* data, const float* gamma, int rows, int cols, 
     using namespace strata::kernels;
     const QsaShapes s = shapes_of(*g_);
     native_qsa_rms_norm_weighted(data, gamma, data, cols, rows, EPS, cs);
-    if (native_rope_enabled()) native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), p, cs);
-    else rope_neox_apply(data, data, rows, cols, (int) s.n_rot, st_.cos_tab, st_.sin_tab, p, cs);
+    native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), p, cs);
 }
 
 bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
@@ -468,26 +466,15 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
                           N, g.n_ff, 32, side_, mixed_ + t * N, &nsw);
         }
         if (cudaEventRecord(sh_join_, side_) != cudaSuccess) { err = "mtp: the shared expert's branch"; return false; }
-        bool xq1 = false;   // the router kernel wrote the native experts' q8_1 rows
-        if (native_router_enabled()) {
-            VerifyRouterArgs ra;
-            ra.x = mixed_; ra.w = bf16("mlp.gate.weight"); ra.logits = logits_; ra.ids = ids_; ra.weights = w_;
-            ra.xq1 = nat_.gu_type >= 0 ? nat_xq_ : nullptr;
-            ra.seq = rseq_; ra.counter = rcount_;
-            ra.n_tok = T; ra.n_embd = (int) N; ra.n_expert = (int) g.n_expert;
-            verify_router(ra, cs);
-            xq1 = ra.xq1 != nullptr;
-        } else {
-            for (int t = 0; t < T; ++t) {
-                bf16_gemv_fp32_mmvf(mixed_ + t * N, bf16("mlp.gate.weight"), logits_ + t * g.n_expert, (int) N,
-                                    (int) g.n_expert, cs);
-                router_top10(logits_ + t * g.n_expert, 1, (int) g.n_expert, (int) K, ids_ + t * K, w_ + t * K, cs);
-            }
-        }
+        VerifyRouterArgs ra;
+        ra.x = mixed_; ra.w = bf16("mlp.gate.weight"); ra.logits = logits_; ra.ids = ids_; ra.weights = w_;
+        ra.xq1 = nat_.gu_type >= 0 ? nat_xq_ : nullptr;   // the native experts' q8_1 rows
+        ra.seq = rseq_; ra.counter = rcount_;
+        ra.n_tok = T; ra.n_embd = (int) N; ra.n_expert = (int) g.n_expert;
+        verify_router(ra, cs);
         moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) blob_, grp_ptr_, grp_start_, grp_counts_,
                            hit_dst_, hit_slot_, cs);
         if (nat_.gu_type >= 0) {
-            if (!xq1) quantize_q8_1_rows(mixed_, T, N, nat_xq_, cs);
             native_expert_grouped(nat_, grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_, (int64_t) T * K,
                                   (int64_t) T * K, nat_xq_, (int64_t) (N / 32) * 36, hit_scratch_, parts_, cs);
         } else {
@@ -497,10 +484,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         }
         if (cudaStreamWaitEvent(cs, sh_join_, 0) != cudaSuccess) { err = "mtp: the shared expert's join"; return false; }
         for (int t = 0; t < T; ++t) {
-            if (native_moe_combine_enabled())
-                native_moe_combine(parts_ + (size_t) t * K * N, w_ + t * K, shared_ + t * N, y_ + t * N, N, K, cs);
-            else
-                moe_combine(parts_ + (size_t) t * K * N, w_ + t * K, shared_ + t * N, y_ + t * N, N, K, cs);
+            native_moe_combine(parts_ + (size_t) t * K * N, w_ + t * K, shared_ + t * N, y_ + t * N, N, K, cs);
             gr_write(R_ + (size_t) t * HC * N, y_ + t * N, inj2_ + t * HC, gs, R_ + (size_t) t * HC * N, cs);
         }
         // ---- the final mixer and the main model's head

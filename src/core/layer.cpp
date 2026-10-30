@@ -12,19 +12,15 @@
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/rope.hpp"
-#include "strata/kernels/router_top10.hpp"
 #include "strata/kernels/s2_gemv_q8.hpp"
 #include "strata/kernels/s_gemv.hpp"
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_moe.hpp"
-#include "strata/kernels/native_gdn.hpp"
-#include "strata/kernels/native_gdn_preprocess.hpp"
 #include "strata/kernels/native_router.hpp"
 #include "strata/kernels/native_qsa.hpp"
 #include "strata/kernels/native_qsa_indexer.hpp"
 #include "strata/kernels/native_rope.hpp"
-#include "strata/kernels/native_flash_attn.hpp"
 #include "strata/kernels/fused_gr.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/fused_gdn.hpp"
@@ -54,48 +50,6 @@ namespace { KvFormat g_kv_format = KvFormat::F16; }
 void qsa_set_kv_format(KvFormat f) { g_kv_format = f; }
 KvFormat qsa_kv_format() { return g_kv_format; }
 KvFormat qsa_draft_kv_format() { return g_kv_format == KvFormat::F16 ? KvFormat::F16 : KvFormat::Int8; }
-uint64_t moe_buffers_bytes(const ModelGeometry& g, int64_t k) {
-    const uint64_t parts[] = {(uint64_t) g.n_expert * 4, (uint64_t) k * 4, (uint64_t) k * 4};   // logits, ids, weights
-    uint64_t total = 0;
-    for (uint64_t v : parts) total += (v + 15) & ~(uint64_t) 15;
-    return total;
-}
-uint64_t moe_buffers_init(const ModelGeometry& g, int64_t k, void* base, MoEBuffers& b) {
-    uint8_t* p = (uint8_t*) base;
-    auto take = [&](uint64_t bytes) {
-        uint8_t* r = p;
-        p += (bytes + 15) & ~(uint64_t) 15;
-        return r;
-    };
-    b.logits = (float*) take((uint64_t) g.n_expert * 4);
-    b.ids = (int*) take((uint64_t) k * 4);
-    b.weights = (float*) take((uint64_t) k * 4);
-    return (uint64_t) (p - (uint8_t*) base);
-}
-bool moe_route(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t k, const MoEBuffers& b,
-               const float* x, void* stream, std::string& err) {
-    using namespace strata::kernels;
-    const LayerView v(tables, layer);
-    const WeightRef* w_router = v.get("ffn_gate_inp.weight");
-    if (w_router == nullptr) {
-        err = v.name("ffn_gate_inp.weight") + " is missing";
-        return false;
-    }
-    if (g.n_expert != 512 || k != 10) {
-        err = v.name("router") + ": the router kernel takes 512 experts and k = 10";
-        return false;
-    }
-    // the logits (the BF16 weight against the FP32 activation), then the softmax over all experts, the top 10 and
-    // their weights renormalised
-    bf16_gemv_fp32_mmvf(x, (const uint16_t*) w_router->data, b.logits, g.n_embd, g.n_expert, stream);
-    try {
-        native_router_top10(b.logits, b.ids, b.weights, stream);
-    } catch (const std::exception& error) {
-        err = v.name("router") + ": " + error.what();
-        return false;
-    }
-    return true;
-}
 // ================================ the QSA layers' state ================================
 namespace {
 using strata::kernels::QsaIndexerBuffers;
@@ -557,14 +511,6 @@ uint64_t qsa_state_prompt_init(const ModelGeometry& g, int64_t max_cells, int64_
 // graph), so this is gated on the `--no-capture` path where the layers are ordinary launches.
 constexpr int STAGE_SLOTS = 20;
 
-
-
-
-
-
-
-
-
 // ================================ THE TWO ENDS OF A TOKEN ================================
 namespace {
 // The pack's S2/S4/S8 embedding table, checked against its planes; null with `err` when it cannot be read.
@@ -625,14 +571,9 @@ bool embed_rows(const WeightTable& tables, const ModelGeometry& g, const int32_t
     return true;
 }
 
-
-
-
-
 uint64_t ple_run_scratch_bytes() {
     // Internal workspace followed by a disjoint normalized export used for the next history row.
     return strata::kernels::ple_block_scratch_bytes() + strata::kernels::NG_HC_DIM * sizeof(float);
 }
 
-}
-// namespace strata::core
+}  // namespace strata::core

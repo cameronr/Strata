@@ -67,19 +67,6 @@ __global__ void __launch_bounds__(32) kv_append_q4_kernel(uint8_t* __restrict__ 
     }
 }
 
-__global__ void __launch_bounds__(128) fwht256_rows_kernel(float* __restrict__ x, int64_t n_rows) {
-    const int64_t r = (int64_t) blockIdx.x * 4 + (threadIdx.x >> 5);
-    if (r >= n_rows) return;
-    const int lane = threadIdx.x & 31;
-    float* row = x + r * 256;
-    float v[8];
-#pragma unroll
-    for (int i = 0; i < 8; ++i) v[i] = row[32 * i + lane];
-    fwht256_warp(v, lane);
-#pragma unroll
-    for (int i = 0; i < 8; ++i) row[32 * i + lane] = v[i];
-}
-
 }  // namespace
 
 void kv_append_q4_steps(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* v_q4s, const int32_t* page_table,
@@ -109,12 +96,6 @@ void kv_append_q4_rows(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* 
             (int) s.n_head_kv, (int) s.page_size);
     }
     check("kv_append_q4_rows launch");
-}
-
-void fwht256_rows(float* x, int64_t n_rows, void* stream) {
-    if (n_rows <= 0) return;
-    fwht256_rows_kernel<<<(unsigned) ((n_rows + 3) / 4), 128, 0, (cudaStream_t) stream>>>(x, n_rows);
-    check("fwht256_rows launch");
 }
 
 }  // namespace strata::kernels

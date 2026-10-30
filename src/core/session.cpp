@@ -1,6 +1,5 @@
 // src/core/session.cpp - the sequence state: its layout, its zeroing and the prompt cache's checkpoints of it.
 #include "strata/core/session.hpp"
-#include "strata/core/progress.hpp"
 
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/elementwise.hpp"
@@ -42,13 +41,12 @@ static uint64_t ple_hist_bytes() {
     return (uint64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM * sizeof(float);
 }
 
-uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k) {
+uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells) {
     uint64_t n = 0;
     n += (uint64_t) g.n_gdn_layers() * gdn_state_floats(g) * 4;
     // One QSA state carries the RoPE table; the others borrow it (P7: 64 MiB per layer at 262K).
     if (g.n_qsa_layers() > 0)
         n += qsa_state_bytes(g, max_cells, true) + (uint64_t) (g.n_qsa_layers() - 1) * qsa_state_bytes(g, max_cells, false);
-    n += moe_buffers_bytes(g, k);
     n += align_up((uint64_t) g.hc * g.n_embd * 4, SESSION_STATE_ALIGN);   // R
     n += ple_hist_bytes();                       // the PLE's NG_HIST normalized history rows
     return align_up(n, SESSION_STATE_ALIGN) + 4096;
@@ -83,8 +81,6 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
                            i == 0 ? nullptr : &s.qsa_states[0]) == 0)
             return 0;
 
-    s.moe_arena = take(moe_buffers_bytes(g, k));
-    moe_buffers_init(g, k, s.moe_arena, s.moe);
     s.R = (float*) take((uint64_t) g.hc * g.n_embd * 4);
     // THE PLE HISTORY: NG_HIST rows of hc_dim floats, row-fastest.  Sequence state, carved here and zeroed by
     // `session_zero`; it survives every token, which is the whole point of a conv history.

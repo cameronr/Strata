@@ -171,9 +171,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         err = "verify: geometry differs from the artifact's";
         return false;
     }
-    if (ss.ple.ready() && (!strata::kernels::ple_native_postops_enabled() || !strata::kernels::ple_native_bf16() ||
-                           (ss.ple.w.key_bf16 == nullptr && ss.ple.w.key_native_data == nullptr))) {
-        err = "verify: the PLE block needs the native postops and value and a BF16 or native key";
+    if (ss.ple.ready() && ss.ple.w.key_bf16 == nullptr && ss.ple.w.key_native_data == nullptr) {
+        err = "verify: the PLE block needs a BF16 or native key";
         return false;
     }
     const WeightRef* wo = wt.find("output.weight");
@@ -203,9 +202,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     const unsigned portable = cudaHostAllocMapped | cudaHostAllocPortable;
     list2_stride_ = (4 + (int64_t) (T * K) + 3) & ~3ll;
     const auto& lay = strata::kernels::cpu::expert_layout();
-    quant_router_ = strata::kernels::native_router_enabled() && lay.native;
     xk_layer_.assign((size_t) g.n_layers, 0);
-    for (int64_t l = 0; quant_router_ && l < g.n_layers; ++l)
+    for (int64_t l = 0; l < g.n_layers; ++l)
         xk_layer_[(size_t) l] = pool_takes_q8k(lay.fmt[(size_t) l]);
     xk_stride_ = ((int64_t) (N / 256) * 292 + 15) & ~15ll;
     bool ok = mapped(T * 4, (void**) &h_tok_, (void**) &m_tok_) &&
@@ -406,8 +404,6 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     return true;
 }
 
-const float* Verifier::final_R(int t) const { return R_ + (size_t) t * (size_t) (g_->hc * g_->n_embd); }
-
 // ================================ THE WINDOW, AS CAPTURED ================================
 //
 // Plan v0.3 P6 (split window): with `groups_ == 2` the window's tokens are cut into two groups A = [0, T/2 up) and
@@ -443,10 +439,6 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             gpu_stamp(stamps_ + ((size_t) T * (size_t) (g.n_layers + 1) + (size_t) row) * kStamps + i, st);
     };
     stamp(g.n_layers, 0, cs);
-    if (n_tiers_ > 0 && !quant_router_) {
-        err = "verify: the GPU tiers take the native router's q8_1 rows (a native pack)";
-        return false;
-    }
     // the layer's short branches: `fork` starts stream `to` from the main stream's work so far, `mark` records what
     // `from` has queued, `wait` makes the main stream wait for a mark
     auto fork = [&](cudaStream_t to, cudaEvent_t ev) {
@@ -522,7 +514,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
     // router runs on it with that layer's logit bias.  When learning, the FFN read of a layer the previous one
     // predicts keeps its gates' average, and the layer corrects its bias by its own logits on that branch.
     auto predicts = [&](int64_t l) {
-        return predict_ != nullptr && G == 1 && l + 1 < g.n_layers && native_router_enabled();
+        return predict_ != nullptr && G == 1 && l + 1 < g.n_layers;
     };
     auto corrects = [&](int64_t l) { return learn_ && l > 0 && predicts(l - 1); };
     auto branches = [&](int64_t l) { return predicts(l) || corrects(l); };
@@ -781,16 +773,6 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                       wn1 != nullptr ? (const float*) wn1->data : nullptr,
                       wn1 != nullptr ? gate_ema_ + (size_t) (l + 1) * HC * N : nullptr);
         stamp(l, 3, cs);
-        // the routed experts' activations: from the router kernel, else beside it (joined before the experts)
-        if (!quant_router_) {
-            if (!fork(side_, bfork_)) return false;
-            if (strata::kernels::cpu::expert_layout().native)
-                quantize_q8_1_rows(xm, n, N, nat_xq_ + (size_t) tb * (N / 32) * 36, side_);
-            else
-                quantize_q8_0_scaled(xm, hit_xq_ + (size_t) tb * (N / 32) * 34, hit_xs_ + (size_t) tb * (N / 32),
-                                     (int64_t) n * N, side_);
-            if (!mark(side_, bjoin_)) return false;
-        }
         // the branches that need only the FFN read fork here; they are recorded after the router, whose blocks are
         // then dispatched first, and run beside its routing, the ring and the hit plan
         if (beside && cudaEventRecord(efork_, cs) != cudaSuccess) {
@@ -804,40 +786,28 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             return false;
         }
         int32_t* hit_plan = dplan_ + (size_t) grp * (size_t) plan_stride_;
-        if (native_router_enabled()) {             // one kernel: logits, top 10, ring, hit plan
-            const WeightRef* wr = need(v, "ffn_gate_inp.weight", err);
-            if (!wr) return false;
-            VerifyRouterArgs ra;
-            ra.x = xm; ra.w = (const uint16_t*) wr->data; ra.logits = logits_ + tb * NE;
-            ra.ids = ids_ + tb * K; ra.weights = w_ + tb * K;
-            ra.x_out = xk_layer_[(size_t) l] ? nullptr : m_x_ + tb * N;
-            ra.ids_out = m_ids_ + tb * K; ra.w_out = m_w_ + tb * K; ra.seq = m_seq_;
-            if (quant_router_) {   // the q8_1 rows for both GPUs' experts, the Q8_K rows for the CPU's
-                ra.xq1 = nat_xq_ + (size_t) tb * (N / 32) * 36;
-                ra.xq1_out = n_tiers_ > 0 ? m_xq1_ + (size_t) tb * (N / 32) * 36 : nullptr;
-                ra.xk_out = xk_layer_[(size_t) l] ? m_xk_ + (size_t) tb * (size_t) xk_stride_ : nullptr;
-                ra.xk_stride = (int) xk_stride_;
-            }
-            ra.ring = (uint32_t) (l * G + grp + 1);   // the rings so far (the host waits for this one)
-            ra.res = res_ + (size_t) l * NE; ra.slot_ptr = slot_ptr_; ra.plan = hit_plan;
-            ra.cap = (int) (MT * K); ra.ptr_off = (int) plan_ptr_off_;
-            ra.counter = ring_count_; ra.n_tok = n; ra.n_embd = (int) N; ra.n_expert = (int) NE;
-            try {
-                verify_router(ra, cs);
-            } catch (const std::exception& e) {
-                err = "verify layer " + std::to_string(l) + " router: " + e.what();
-                return false;
-            }
-        } else {
-            for (int t = tb; t < te; ++t) {
-                MoEBuffers mb = ss.moe;
-                mb.logits = logits_ + t * NE; mb.ids = ids_ + t * K; mb.weights = w_ + t * K;
-                if (!moe_route(wt, g, l, K, mb, mixed_ + t * N, cs, err)) return false;
-            }
-            doorbell_publish(xm, ids_ + tb * K, w_ + tb * K, (int64_t) n * N, (int64_t) n * K, m_x_ + tb * N,
-                             m_ids_ + tb * K, m_w_ + tb * K, m_seq_, cs);
-            verify_hit_plan(ids_ + tb * K, (int) (n * K), (int) K, res_ + (size_t) l * NE, (int) NE, slot_ptr_, hit_plan,
-                            MT * K, plan_ptr_off_, cs);
+        // one kernel: logits, top 10, ring, hit plan
+        const WeightRef* wr = need(v, "ffn_gate_inp.weight", err);
+        if (!wr) return false;
+        VerifyRouterArgs ra;
+        ra.x = xm; ra.w = (const uint16_t*) wr->data; ra.logits = logits_ + tb * NE;
+        ra.ids = ids_ + tb * K; ra.weights = w_ + tb * K;
+        ra.x_out = xk_layer_[(size_t) l] ? nullptr : m_x_ + tb * N;
+        ra.ids_out = m_ids_ + tb * K; ra.w_out = m_w_ + tb * K; ra.seq = m_seq_;
+        // the q8_1 rows for both GPUs' experts, the Q8_K rows for the CPU's
+        ra.xq1 = nat_xq_ + (size_t) tb * (N / 32) * 36;
+        ra.xq1_out = n_tiers_ > 0 ? m_xq1_ + (size_t) tb * (N / 32) * 36 : nullptr;
+        ra.xk_out = xk_layer_[(size_t) l] ? m_xk_ + (size_t) tb * (size_t) xk_stride_ : nullptr;
+        ra.xk_stride = (int) xk_stride_;
+        ra.ring = (uint32_t) (l * G + grp + 1);   // the rings so far (the host waits for this one)
+        ra.res = res_ + (size_t) l * NE; ra.slot_ptr = slot_ptr_; ra.plan = hit_plan;
+        ra.cap = (int) (MT * K); ra.ptr_off = (int) plan_ptr_off_;
+        ra.counter = ring_count_; ra.n_tok = n; ra.n_embd = (int) N; ra.n_expert = (int) NE;
+        try {
+            verify_router(ra, cs);
+        } catch (const std::exception& e) {
+            err = "verify layer " + std::to_string(l) + " router: " + e.what();
+            return false;
         }
         stamp(l, 4, cs);
         // after the doorbell: each GPU tier's rows of this token group, taken into VRAM once its flag rises, and the
@@ -875,15 +845,15 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             const WeightRef* wr1 = need(LayerView(wt, l + 1), "ffn_gate_inp.weight", err);
             if (!wr1) return false;
             const size_t half = (size_t) ((l + 1) & 1) * (size_t) (MT * K);
-            VerifyRouterArgs ra;
-            ra.x = pmixed_; ra.w = (const uint16_t*) wr1->data;
-            ra.logits = plogits_ + (size_t) ((l + 1) & 1) * MT * NE; ra.ids = pids_; ra.weights = pw_;
-            ra.ids_out = m_pids_ + half; ra.w_out = m_pw_ + half; ra.seq = m_pseq_;
-            ra.ring = (uint32_t) (l + 1);              // the predictions published so far
-            ra.counter = ring_count_ + 1; ra.n_tok = n; ra.n_embd = (int) N; ra.n_expert = (int) NE;
-            if (learn_) ra.bias = pbias_ + (size_t) (l + 1) * NE;
+            VerifyRouterArgs pa;
+            pa.x = pmixed_; pa.w = (const uint16_t*) wr1->data;
+            pa.logits = plogits_ + (size_t) ((l + 1) & 1) * MT * NE; pa.ids = pids_; pa.weights = pw_;
+            pa.ids_out = m_pids_ + half; pa.w_out = m_pw_ + half; pa.seq = m_pseq_;
+            pa.ring = (uint32_t) (l + 1);              // the predictions published so far
+            pa.counter = ring_count_ + 1; pa.n_tok = n; pa.n_embd = (int) N; pa.n_expert = (int) NE;
+            if (learn_) pa.bias = pbias_ + (size_t) (l + 1) * NE;
             try {
-                verify_router(ra, side_);
+                verify_router(pa, side_);
             } catch (const std::exception& e) {
                 err = "verify layer " + std::to_string(l) + " prediction: " + e.what();
                 return false;
@@ -906,7 +876,6 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             err = "verify: the prediction branch could not join";
             return false;
         }
-        if (!quant_router_ && !wait(bjoin_)) return false;
         stamp(l, 5, cs);
         return beside || shared(l, grp);
     };
@@ -1346,7 +1315,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
         if (tail_ != nullptr && k + 1 == g.n_layers * G) tail_(tail_user_);
         // the next layer's prediction, published during this layer's pool, else microseconds later (its branch is
         // joined before the next layer): waited for, so the experts the GPU tiers take never depend on timing
-        if (predict_ != nullptr && G == 1 && l + 1 < g.n_layers && native_router_enabled()) {
+        if (predict_ != nullptr && G == 1 && l + 1 < g.n_layers) {
             const Clock::time_point c = Clock::now();
             if (*(volatile uint32_t*) h_pseq_ < (uint32_t) (l + 1)) {
                 ++predict_late;

@@ -2,11 +2,6 @@
 #include <cstdint>
 
 namespace strata::kernels {
-// Configure before session capture. Existing graphs retain their selected kernels.
-// This experiment is off by default and does not modify the legacy router.
-void native_router_set_enabled(bool enabled);
-bool native_router_enabled();
-
 // Pinned CUDA topk-moe contract for ONE token, 512 experts, top 10, softmax,
 // no selection bias, lower normalization clamp 2^-14, and scale 1.
 // Reads 512 finite F32 logits; writes 10 I32 IDs and 10 F32 weights. Equal

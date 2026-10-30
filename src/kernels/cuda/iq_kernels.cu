@@ -873,14 +873,6 @@ __global__ void dequant_flat_kernel(int ty, const void* __restrict__ vx, dst_t* 
     const int64_t i = blockIdx.x;
     dq_dispatch<dst_t>(ty, vx, i, y + i * QK_K, threadIdx.x);
 }
-// gate/up: superblock i of a role matrix (n_embd/256 per row) -> interleaved row 2r + parity
-__global__ void dequant_gu_kernel(int ty, const void* __restrict__ gate, const void* __restrict__ up, int64_t per_row,
-                                  __half* __restrict__ y) {
-    const int64_t i = blockIdx.x;
-    const int parity = blockIdx.y;
-    const int64_t r = i / per_row, c = i % per_row;
-    dq_dispatch<__half>(ty, parity ? up : gate, i, y + ((2 * r + parity) * per_row + c) * QK_K, threadIdx.x);
-}
 
 // several experts at once, expert z's blob at blobs[z]: first its gate/up superblocks (as dequant_gu_kernel), then
 // its down superblocks (as dequant_flat_kernel)
@@ -1021,13 +1013,6 @@ void iq_dequant_f32(int t, const void* src, int64_t n, float* dst, void* stream)
     if (n % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_f32: bad arguments\n"); std::exit(1); }
     dequant_flat_kernel<float><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, dst);
     check("iq_dequant_f32");
-}
-
-void iq_dequant_gu_f16(int t, const void* gate, const void* up, int64_t n_ff, int64_t n_embd, uint16_t* dst, void* stream) {
-    const int64_t per_row = n_embd / 256;
-    dequant_gu_kernel<<<dim3((unsigned) (n_ff * per_row), 2), 32, 0, (cudaStream_t) stream>>>(t, gate, up, per_row,
-                                                                                           (__half*) dst);
-    check("iq_dequant_gu_f16");
 }
 
 void iq_dequant_experts_f16(int gu_type, int d_type, const uint8_t* const* blobs, int n, size_t up_off, size_t down_off,

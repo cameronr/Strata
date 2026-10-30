@@ -36,8 +36,6 @@ struct RopeTab {
 };
 /// Registers the table the session just built with `scaling` (the latest one of the device wins).
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling);
-/// Forgets the table `cos_tab` (on every device) - before the memory that holds it is freed (session_release).
-void rope_table_release(const float* cos_tab);
 /// The registered table when STRATA_ROPE_TABLE=1 and it was built with `scaling`; otherwise none (the default: the
 /// kernels compute the angle exactly as before).
 RopeTab rope_table_for(const RopeScaling& scaling);

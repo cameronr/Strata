@@ -27,13 +27,7 @@
 #include "strata/kernels/sampler.hpp"
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_gdn.hpp"
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/native_qsa.hpp"
-#include "strata/kernels/native_qsa_indexer.hpp"
-#include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_select.hpp"
@@ -1435,16 +1429,9 @@ int main(int argc, char** argv) {
                              "%.2f MiB\n", hc_q8.matrices(), hc_q8.stored_q8_0(), (double) hc_q8.bytes() / 1048576.0);
     }
 
-    // the native kernels (the parity tests switch some of them off to compare)
+    // the native GR write and shared expert (the parity tests switch them off to compare)
     strata::kernels::gr_set_native_mmvf(true);
-    strata::kernels::ple_set_native_bf16(true);
     strata::kernels::shared_expert_set_native_bf16(true);
-    strata::kernels::native_moe_combine_set_enabled(true);
-    strata::kernels::native_gdn_set_enabled(true);
-    strata::kernels::native_router_set_enabled(true);
-    strata::kernels::native_qsa_set_enabled(true);
-    strata::kernels::native_qsa_indexer_set_enabled(true);
-    strata::kernels::native_rope_set_enabled(true);
     // The vision path: every rope kernel reads a cell's (t, h, w) from this table (strata/kernels/mrope.hpp).  It is
     // the identity until an image request, and it is set here, before any CUDA graph captures a rope kernel.
     int32_t* d_mrope = nullptr;
@@ -1477,7 +1464,6 @@ int main(int argc, char** argv) {
         }
         strata::kernels::mrope_table_set(d_mrope);
     }
-    strata::kernels::ple_set_native_postops(true);
     const strata::core::ModelGeometry g;
     const int64_t K = 10;
     if (o.max_context < (int64_t) o.tokens.size() + o.max_new) {
@@ -1507,7 +1493,7 @@ int main(int argc, char** argv) {
     }
 
     void* sbuf = nullptr;
-    if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K)) != cudaSuccess) {
+    if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context)) != cudaSuccess) {
         std::fprintf(stderr, "strata generate: session state allocation failed\n");
         return 1;
     }

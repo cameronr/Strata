@@ -21,8 +21,6 @@ struct SessionState {
     QsaState* qsa_states = nullptr;      ///< one per QSA layer
     void* qsa_state_arena = nullptr;
 
-    MoEBuffers moe;
-    void* moe_arena = nullptr;
 
     float* R = nullptr;             ///< the residual streams, (hc, n_embd)
     int64_t k = 10;                 ///< experts per token
@@ -50,10 +48,9 @@ struct SessionState {
 
 /// The floats of one GDN layer's state, its recurrence and conv history (`gdn_state` holds one per GDN layer).
 uint64_t gdn_state_floats(const ModelGeometry& g);
-/// Bytes for a whole session at `max_cells` of context.  Every layer's state is sized at once, because P2.T10
-/// requires ZERO token-path allocations - a `cudaMalloc` that happened on the first token of a longer sequence
-/// would satisfy every test here and fail that one.
-uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells, int64_t k);
+/// Bytes for a whole session at `max_cells` of context: every layer's state at once, so nothing is allocated
+/// while a sequence runs.
+uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells);
 /// Carves `base` (DEVICE memory) into `s`.  Returns the bytes used.
 uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s);
 /// Zeroes every layer's state - the residual to `R_init`, everything else to zero, so a fresh sequence starts

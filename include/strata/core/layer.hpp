@@ -22,21 +22,9 @@ namespace strata::core {
 
 // ================================ the MoE block ================================
 
-/// The router's output, on every layer.
-struct MoEBuffers {
-    float* logits = nullptr;      ///< n_expert
-    int* ids = nullptr;           ///< k
-    float* weights = nullptr;     ///< k
-};
-
-uint64_t moe_buffers_bytes(const ModelGeometry& g, int64_t k);
-uint64_t moe_buffers_init(const ModelGeometry& g, int64_t k, void* base, MoEBuffers& b);
 
 
-/// The router: its BF16 weight against the FP32 activation `x`, then the top 10 of 512 into `b.ids` / `b.weights`
-/// (the verify windows run it per token row).
-bool moe_route(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t k, const MoEBuffers& b,
-               const float* x, void* stream, std::string& err);
+
 
 
 // ================================ the QSA mixer ================================

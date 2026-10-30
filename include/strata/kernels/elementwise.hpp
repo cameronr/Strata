@@ -41,15 +41,6 @@ void gdn_gate(const float* alpha, const float* dt, const float* ssm_a, float* ga
 
 /// `x[i] *= s`, in place.
 void scale_inplace(float* x, int64_t n, float s, void* stream);
-/// `dst[i] += src[i]`.  **ADDED FOR R4's HIT/MISS SPLIT, WHERE THE TWO HALVES COME FROM DIFFERENT
-/// ENGINES.**  The CPU writes the misses into `parts` and the GPU writes the resident experts into a
-/// buffer of their own, so that the GPU's work can run CONCURRENTLY with the CPU's instead of after it -
-/// and the two are summed here, on the stream, immediately before `moe_combine` reads the result.
-///
-/// The alternative - having the hit kernel write straight into `parts` - costs the whole overlap, because
-/// the copy of the misses into `parts` cannot happen until the pool has produced them, and the kernel is
-/// then ordered behind that copy.  Measured: the drain fell 18.2 -> 10.2 ms and the token did not move.
-void add_inplace(float* dst, const float* src, int64_t n, void* stream);
 
 /// `y[i] = f16(x[i])`, round-to-nearest-even, using the shared conversion in `f16_bits.hpp`.
 void f32_to_f16_bulk(const float* x, uint16_t* y, int64_t n, void* stream);
@@ -81,31 +72,10 @@ void silu_inplace(float* x, int64_t n, void* stream);
 /// which); this one does not, and the same `sqrt(cols)`-sized argument applies to getting it wrong.
 void rms_norm_weighted(float* x, const float* w, int64_t rows, int64_t cols, float eps, void* stream);
 
-/// *seq = v in MAPPED PINNED memory - THE DOORBELL.  A KERNEL and not cudaEventRecord, because round 199
-/// found that an event record inside a capture is SILENTLY DROPPED while a kernel is captured normally, and
-/// round 209 measured the host seeing this one's result 0.050 ms into a 39.8 ms graph.
-///
-/// It lives here because the caller that needs it - moe_layer - is a HOST translation unit, where
-/// __global__ and <<<>>> do not exist.
-/// *seq += 1 - AN INCREMENT, NOT A STORE OF A CALLER-SUPPLIED VALUE.  A value passed in is evaluated on the
-/// HOST at CAPTURE time, so a captured graph would ring the same number on every replay.  Reading and
-/// incrementing in memory is what makes the count advance under cudaGraphLaunch.
-void doorbell_ring(uint32_t* d_seq, void* stream);
-
-/// Plan v0.3 P3 token graph: one thread spins until the host-written `*d_flag` equals the ring value `*d_seq`
-/// (both mapped pinned memory), then fences so everything the host wrote before the flag is visible to the
-/// nodes that follow.  Captured once per layer between `pre[l]` and the parts copy; it is what lets one graph
-/// hold the whole token (bench/micro/device_wait.cu: 5.2 us per handoff, no driver call).
-void doorbell_wait(const uint32_t* d_flag, const uint32_t* d_seq, void* stream);
-
 /// Plan v0.3 P3 token graph: copy `n` floats from MAPPED pinned host memory (`src` is its device pointer) into
 /// device memory with a kernel, so the handoff stays on the compute queue (a memcpy node is a copy-engine
 /// operation, which WDDM submits separately and which measured 67 flushes per token).
 void copy_from_mapped(float* dst, const float* src, int64_t n, void* stream);
-/// `rows` rows of `width` floats from mapped memory, except the rows listed in hit_rows[0, *count) (device),
-/// which are written +0.0 instead (a verify window's GPU-computed entries: the pool leaves zeros there).
-void copy_rows_from_mapped(float* dst, const float* src, int64_t rows, int64_t width, const int32_t* hit_rows,
-                           const int32_t* count, void* stream);
 
 /// Plan v0.3 P3: the doorbell's payload and its ring in ONE kernel.  Copies `x` (n floats), `ids` and `weights`
 /// (k each) into the mapped host regions, fences, and increments the mapped sequence number - replacing three

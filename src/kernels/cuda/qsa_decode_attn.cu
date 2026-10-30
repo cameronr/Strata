@@ -1091,9 +1091,4 @@ uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s) {
     return (uint64_t) max_splits(cap) * (uint64_t) s.n_head * (HD + 2) + 64;
 }
 
-void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* step,
-                          int64_t cap, const QsaShapes& s, float* scratch, float* attn, void* stream) {
-    qsa_decode_attn_batch(q, pools, ids, step, cap, s, scratch, attn, 1, stream);
-}
-
 }  // namespace strata::kernels

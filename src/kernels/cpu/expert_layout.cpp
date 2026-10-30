@@ -73,40 +73,6 @@ bool cpu_avx512_ok() {
     return ok;
 }
 
-bool cpu_avx512bw_ok() {
-    static const bool ok = [] {
-        if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
-        unsigned r[4] = {0, 0, 0, 0};
-        auto cpuid = [&](unsigned leaf, unsigned sub) {
-#if defined(_MSC_VER)
-            int x[4];
-            __cpuidex(x, (int) leaf, (int) sub);
-            for (int i = 0; i < 4; ++i) r[i] = (unsigned) x[i];
-#else
-            __cpuid_count(leaf, sub, r[0], r[1], r[2], r[3]);
-#endif
-        };
-        cpuid(0, 0);
-        if (r[0] < 7) return false;
-        cpuid(1, 0);
-        if (!((r[2] >> 27) & 1u)) return false;             // OSXSAVE
-#if defined(_MSC_VER)
-        const unsigned long long xcr0 = _xgetbv(0);
-#else
-        unsigned lo = 0, hi = 0;
-#if !defined(__aarch64__)   // arm64: no XCR0; cpuid reads zero there, so this is never reached
-        __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
-#endif
-        const unsigned long long xcr0 = ((unsigned long long) hi << 32) | lo;
-#endif
-        if ((xcr0 & 0xE6) != 0xE6) return false;          // the OS saves the AVX-512 state
-        cpuid(7, 0);
-        const unsigned ebx = r[1];
-        return ((ebx >> 16) & 1u) && ((ebx >> 17) & 1u) && ((ebx >> 30) & 1u) && ((ebx >> 31) & 1u);
-    }();
-    return ok;
-}
-
 bool cpu_avx2_ok() {
     static const bool ok = [] {
         if (cpu_isa_cap() < 2) return false;
@@ -166,21 +132,6 @@ bool cpu_avx1_ok() {
         const unsigned long long xcr0 = ((unsigned long long) hi << 32) | lo;
 #endif
         return (xcr0 & 0x6) == 0x6;
-    }();
-    return ok;
-}
-
-bool cpu_sse42_ok() {
-    static const bool ok = [] {
-        unsigned r[4] = {0, 0, 0, 0};
-#if defined(_MSC_VER)
-        int x[4];
-        __cpuidex(x, 1, 0);
-        for (int i = 0; i < 4; ++i) r[i] = (unsigned) x[i];
-#else
-        __cpuid_count(1, 0, r[0], r[1], r[2], r[3]);
-#endif
-        return ((r[2] >> 20) & 1u) && ((r[2] >> 23) & 1u);   // SSE4.2, POPCNT
     }();
     return ok;
 }
@@ -295,19 +246,11 @@ std::string cpu_name() {
     return b0 == std::string::npos ? std::string("unknown") : name.substr(b0, b1 - b0 + 1);
 }
 
-// ---- the AVX-512 probe and the oracle flag (#795) ----
+// ---- the AVX-512 probe (#795) ----
 //
 // expert.cpp and iq_avx512.cpp are compiled for AVX-512, and a TU compiled that way may use AVX-512 in ANY of its
-// code.  The code that decides whether this CPU has AVX-512 - and the startup flag every CPU, AVX2-only ones
-// included, runs before that decision - therefore lives here, in a file compiled for the x86-64 baseline.
-namespace {
-std::atomic<bool> g_oracle_q8_0{false};
-}
-
-void expert_set_oracle_q8_0(bool enabled) { g_oracle_q8_0.store(enabled, std::memory_order_relaxed); }
-
-bool expert_oracle_q8_0_enabled() { return g_oracle_q8_0.load(std::memory_order_relaxed); }
-
+// code.  The code that decides whether this CPU has AVX-512 therefore lives here, in a file compiled for the
+// x86-64 baseline.
 const char* CpuFeatures::reason() const {
     if (usable()) return "ok";
     // Named individually: "AVX-512 not supported" sends a user looking for a new CPU when the machine may have
@@ -342,29 +285,11 @@ CpuFeatures cpu_features() {
     return f;
 }
 
-void cpu_require_expert_support() {
-    const CpuFeatures f = cpu_features();
-    if (f.usable()) return;
-    std::fprintf(stderr,
-                 "strata: this CPU cannot run the expert kernel: %s.\n"
-                 "        The engine needs AVX512-VNNI and AVX512-VBMI (Intel Ice Lake / AMD Zen 4 or newer).\n"
-                 "        The scalar fallback exists for tests only and is far too slow to decode with.\n",
-                 f.reason());
-    std::exit(1);
-}
-
 void q2_rows_any(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out,
                  int r0, int r1) {
     if (cpu_avx512_ok()) q2_0_gguf_rows_multi(w, row_bytes, nblocks, a, nt, out, r0, r1);
     else if (cpu_avx2_ok()) q2_0_gguf_rows_multi_avx2(w, row_bytes, nblocks, a, nt, out, r0, r1);
     else q2_0_gguf_rows_multi_avx1(w, row_bytes, nblocks, a, nt, out, r0, r1);   // issue #1699: the third rung
-}
-
-void q2_rows_any_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out,
-                        int r0, int r1) {
-    if (cpu_avx512_ok()) q2_0_gguf_rows_multi(w, row_bytes, nblocks, a, nt, out, r0, r1);
-    else if (cpu_avx2_ok()) q2_0_gguf_rows_multi_avx2_legacy(w, row_bytes, nblocks, a, nt, out, r0, r1);
-    else q2_0_gguf_rows_multi_avx1_legacy(w, row_bytes, nblocks, a, nt, out, r0, r1);
 }
 
 void act_quant_any(const float* x, int n, ActQ& a) {

@@ -311,18 +311,6 @@ void qsa_attend(const float* q, const uint16_t* k_scratch, const uint16_t* v_scr
 /// rather than two.  SIGMOID, not SiLU: this artifact's QSA gate is a sigmoid.
 void qsa_gate_apply(const float* attn, const float* q_full, const QsaShapes& s, uint16_t* out, void* stream);
 
-/// THE SAME MULTIPLY WITHOUT THE fp16 ROUND, for the caller whose weight wants Q8_K.
-///
-/// `attn_output` is a K-quant (Q4_K/Q5_K/Q6_K in every QSA layer of this artifact) and its `vec_dot_type` is
-/// **Q8_K, not fp16** - `docs/activation-contract.md` is explicit, and the measured cost of getting it wrong is
-/// 0.66-1.41% per GEMV against a 1e-3 tolerance, which is above what Gate C1 allows.  The fp16 form exists
-/// because that is what the engine did first; this one exists because that was a gap, and the caller quantizes
-/// to Q8_K between the two calls.
-///
-/// The arithmetic is IDENTICAL to `qsa_gate_apply`'s up to the last step, and the multiply is in double in both
-/// - so switching between them changes exactly one rounding, which is the point.
-void qsa_gate_apply_f32(const float* attn, const float* q_full, const QsaShapes& s, float* out, void* stream);
-
 // ================= THE CAPTURABLE ENTRY POINTS =================
 //
 // These take the per-token counts from `step` AND size every launch from a CONSTANT capacity, which is the two

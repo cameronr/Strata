@@ -31,7 +31,6 @@
 
 namespace strata::kernels {
 namespace {
-std::atomic<bool> enabled{false};
 constexpr int D = 128, R = 4, ROT = 64, THREADS = 256;
 __device__ float warp_sum(float x) {
 #pragma unroll
@@ -136,83 +135,6 @@ __device__ __forceinline__ float pooled_value(const float* values, int d, int ro
     }
     return y;
 }
-__device__ __forceinline__ float norm_scale(float mean, float* partials, int d) {
-    float square_sum = d < D ? mean * mean : 0.0f;
-    square_sum = warp_sum(square_sum);
-    const int lane = d % 32;
-    if (lane == 0) partials[d / 32] = square_sum;
-    __syncthreads();
-    square_sum = lane < THREADS / 32 ? partials[lane] : 0.0f;
-    square_sum = warp_sum(square_sum);
-    return square_sum;
-}
-// cell 0 of a sequence: the spare (every gather index names cell 0), written to pooled[0] and dead
-template <int MODE>
-__global__ void append_first(const float* __restrict__ raw, const float* __restrict__ gamma, float epsilon,
-                             float* __restrict__ dead, float* __restrict__ pooled, float theta_scale,
-                             const int32_t* __restrict__ mtab, RopeKernelArgs k, RopeTab rt) {
-    const int d = threadIdx.x;
-    __shared__ float values[D];
-    __shared__ float partials[32];
-    float mean = 0.0f;
-    if (d < D) {
-        const float incoming = __half2float(__float2half_rn(raw[d]));
-        float sum = incoming;
-#pragma unroll
-        for (int j = 1; j < R; ++j) sum = __fadd_rn(sum, incoming);
-        mean = __fmaf_rn(0.25f, sum, 0.0f);
-    }
-    const float square_sum = norm_scale(mean, partials, d);
-    const float scale = rsqrtf(square_sum / D + epsilon);
-    if (d < D) values[d] = scale * mean * gamma[d];
-    __syncthreads();
-    if (d >= D) return;
-    const float y = pooled_value<MODE>(values, d, 0, theta_scale, mtab, true, k, rt);
-    pooled[d] = y;
-    dead[d] = y;
-}
-template <int MODE>
-__global__ void append_blocks(const float* __restrict__ raw, int64_t n, int64_t p0, int pos_base,
-                              const float* __restrict__ gamma, float epsilon, const float* __restrict__ tail,
-                              const float* __restrict__ dead, float* __restrict__ pooled, int32_t* __restrict__ block_pos,
-                              int64_t first_block, int64_t last_block, float theta_scale, const int32_t* __restrict__ mtab,
-                              RopeKernelArgs k, RopeTab rt) {
-    const int64_t b = first_block + blockIdx.x;
-    const int d = threadIdx.x;
-    __shared__ float values[D];
-    __shared__ float partials[32];
-    float mean = 0.0f;
-    if (d < D) {
-        auto key = [&](int j) -> float {
-            const int64_t cell = b * R + j;
-            return cell >= p0 ? __half2float(__float2half_rn(raw[(cell - p0) * D + d])) : tail[j * D + d];
-        };
-        float sum = key(0);
-#pragma unroll
-        for (int j = 1; j < R; ++j) sum = __fadd_rn(sum, key(j));
-        mean = __fmaf_rn(0.25f, sum, 0.0f);
-    }
-    const float square_sum = norm_scale(mean, partials, d);
-    const float scale = rsqrtf(square_sum / D + epsilon);
-    if (d < D) values[d] = scale * mean * gamma[d];
-    __syncthreads();
-    if (d >= D) return;
-    const int rope_pos = pos_base + R * (int) b;
-    pooled[std::size_t(b) * D + d] = pooled_value<MODE>(values, d, rope_pos, theta_scale, mtab, false, k, rt);
-    if (b == last_block) {
-        pooled[std::size_t(b + 1) * D + d] = dead[d];
-        if (d == 0) *block_pos = rope_pos;
-    }
-}
-// the tail after the batch: slot s holds the key of the batch's last cell with cell % 4 == s (s < 3), if any
-__global__ void append_tail(const float* __restrict__ raw, int64_t n, int64_t p0, float* __restrict__ tail) {
-    const int s = blockIdx.x, d = threadIdx.x;
-    if (d >= D) return;
-    const int64_t last = p0 + n - 1;
-    int64_t cell = last - ((last % R) - s + R) % R;       // the last cell <= last with cell % 4 == s
-    if (cell < p0) return;
-    tail[s * D + d] = __half2float(__float2half_rn(raw[(cell - p0) * D + d]));
-}
 struct Span { const void* p; std::size_t n; };
 void validate(Span s) {
     const auto p = reinterpret_cast<std::uintptr_t>(s.p);
@@ -225,8 +147,6 @@ bool overlaps(Span a, Span b) {
 }
 } // namespace
 
-void native_qsa_indexer_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
-bool native_qsa_indexer_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_qsa_indexer_append(const float* raw, const int32_t* relative_pos_device, int32_t pos_base,
                                const float* gamma, float epsilon, const QsaIndexerBuffers& b,
                                const QsaShapes& s, int64_t max_cells, const RopeScaling& scaling, void* stream) {
@@ -270,47 +190,6 @@ void native_qsa_indexer_append_multi(const float* raw, const int32_t* relative_p
     else
         append<ROPE_PLAIN><<<1,THREADS,0,st>>>(raw,relative_pos_device,pos_stride,n_tok,pos_base,gamma,
             epsilon,b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,mrope_table(),tail_snap,k,rt);
-    const auto error = cudaGetLastError();
-    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
-}
-void native_qsa_indexer_append_batch(const float* raw, int64_t n, int64_t p0, int32_t pos_base, const float* gamma,
-                                     float epsilon, const QsaIndexerBuffers& b, const QsaShapes& s, int64_t max_cells,
-                                     const RopeScaling& scaling, void* stream) {
-    if (n <= 0) return;
-    if (!stream || s.idx_dim != D || s.idx_block != R || s.n_rot != ROT || p0 < 0 || p0 + n > max_cells ||
-        max_cells > INT32_MAX || pos_base < 0 || pos_base % R || int64_t(pos_base) + max_cells > INT32_MAX ||
-        !std::isfinite(epsilon) || epsilon <= 0.0f || rope_scaling_invalid(scaling) != nullptr)
-        throw std::invalid_argument("native QSA indexer (batch): bad geometry, positions or parameters");
-    const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
-    const cudaStream_t st = static_cast<cudaStream_t>(stream);
-    const int32_t* mtab = mrope_table();
-    const RopeKernelArgs k = scaling.kernel_args(ROT);
-    RopeTab rt;
-    const int mode = rope_mode(scaling, rt);
-    if (p0 == 0) {
-        if (mode == ROPE_TABLE)
-            append_first<ROPE_TABLE><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale, mtab, k, rt);
-        else if (mode == ROPE_SCALED)
-            append_first<ROPE_SCALED><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale, mtab, k, rt);
-        else
-            append_first<ROPE_PLAIN><<<1, THREADS, 0, st>>>(raw, gamma, epsilon, b.dead, b.pooled, theta_scale, mtab, k, rt);
-    }
-    // completed blocks: those whose last cell (4b+3) lies in [p0, p0 + n)
-    const int64_t first = p0 <= R - 1 ? 0 : (p0 - (R - 1) + R - 1) / R;       // the smallest b with 4b+3 >= p0
-    const int64_t hi = p0 + n - 1 >= R - 1 ? (p0 + n - 1 - (R - 1)) / R : -1;   // the largest b with 4b+3 <= p0+n-1
-    if (hi >= first) {
-        const unsigned nb = (unsigned) (hi - first + 1);
-        if (mode == ROPE_TABLE)
-            append_blocks<ROPE_TABLE><<<nb, THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon, b.tail, b.dead,
-                                                              b.pooled, b.block_pos, first, hi, theta_scale, mtab, k, rt);
-        else if (mode == ROPE_SCALED)
-            append_blocks<ROPE_SCALED><<<nb, THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon, b.tail, b.dead,
-                                                               b.pooled, b.block_pos, first, hi, theta_scale, mtab, k, rt);
-        else
-            append_blocks<ROPE_PLAIN><<<nb, THREADS, 0, st>>>(raw, n, p0, pos_base, gamma, epsilon, b.tail, b.dead,
-                                                              b.pooled, b.block_pos, first, hi, theta_scale, mtab, k, rt);
-    }
-    append_tail<<<R - 1, D, 0, st>>>(raw, n, p0, b.tail);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

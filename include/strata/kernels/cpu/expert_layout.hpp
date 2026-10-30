@@ -44,16 +44,12 @@ struct ExpertLayout {
 /// Plan v0.3 P6: whether this CPU (and its OS) runs the AVX-512 kernels (F, BW, VL, VNNI, VBMI).  Probed in a
 /// file compiled without AVX-512, so asking is safe everywhere; STRATA_FORCE_AVX2=1 answers no (for tests).
 bool cpu_avx512_ok();
-/// Whether this CPU runs AVX-512F + AVX-512BW + AVX-512VL + AVX-512DQ (e.g. Skylake-X i9-9920X) for iq_avx512.cpp.
-bool cpu_avx512bw_ok();
 /// Whether this CPU (and its OS) runs the AVX2 kernels (AVX, AVX2, FMA, F16C): the floor of every expert kernel
 /// (q2_avx2.cpp, iq_avx2.cpp, and ggml-cpu in the portable build).  STRATA_FORCE_AVX2 does not change it.
 bool cpu_avx2_ok();
 /// Whether this CPU (and its OS) runs AVX (Sandy Bridge and newer): the AVX1 router dot (kq_avx1.cpp) and ggml-cpu in
 /// a STRATA_ISA_FLOOR=avx build.  The other expert rows then run on ggml-cpu (experimental, slow).
 bool cpu_avx1_ok();
-/// SSE4.2 + POPCNT: ggml-cpu in a STRATA_ISA_FLOOR=none build.
-bool cpu_sse42_ok();
 /// STRATA_FORCE_ISA=avx2|avx|sse caps the probes above (3 = no cap, 2 = AVX2, 1 = AVX, 0 = SSE4.2), so the older-CPU
 /// paths run on any PC: tests and the experimental builds' checks.  ggml-cpu keeps what it was compiled for.
 int cpu_isa_cap();
@@ -85,9 +81,6 @@ std::string cpu_name();
 void q2_rows_any(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out,
                  int r0, int r1);
 void act_quant_any(const float* x, int n, ActQ& a);
-/// The same dispatch, always the pre-bit-plane kernel (tests and A/B; the bit-plane switch off by construction).
-void q2_rows_any_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out,
-                        int r0, int r1);
 
 /// The process-wide layout (canonical Q2_0 until `expert_layout_load` finds a native pack).
 const ExpertLayout& expert_layout();

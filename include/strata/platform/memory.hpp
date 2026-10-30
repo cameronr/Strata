@@ -36,9 +36,6 @@ void unlock_resident(void* p, uint64_t bytes);
 /// `why` says so) when the query is not possible - always elsewhere than Windows.
 bool gpu_shared_memory_budget(const void* luid, uint64_t& budget, uint64_t& usage, std::string& why);
 
-/// The machine's physical RAM in bytes (0 when unknown).
-uint64_t total_physical_memory();
-
 /// #357/#577: whether the OS file cache could keep the `read_bytes` the expert files are read for, beside
 /// `arena_bytes` of RAM held by the engine's own copy of the experts and `margin` for everything else, with `avail`
 /// bytes of RAM available.  The file tier passes only the expert bytes it really reads from the files (the experts
@@ -67,14 +64,5 @@ bool read_ahead_enabled();
 void advise_willneed(const void* p, uint64_t bytes);
 /// The same for [offset, offset + bytes) of an open file.
 void advise_willneed(int fd, uint64_t offset, uint64_t bytes);
-
-/// What the OS says this process read from storage: `read_bytes` (/proc/self/io: bytes fetched from the block layer on
-/// its behalf, page faults on a mapping included, page-cache hits not) and `major_faults` (/proc/self/stat).  Linux
-/// only; `valid` is false elsewhere.  Take one at the start of a request and one at its end.
-struct ProcIo {
-    bool valid = false;
-    uint64_t read_bytes = 0, major_faults = 0;
-};
-ProcIo proc_io_sample();
 
 }  // namespace strata::platform

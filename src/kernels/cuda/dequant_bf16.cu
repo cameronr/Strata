@@ -265,10 +265,8 @@ __global__ void dequant_wide_kernel(const uint8_t* __restrict__ blocks, int64_t 
     for (int k = 0; k < (int) (8 * sizeof(T) / 16); ++k) o[k] = ((const uint4*) v)[k];
 }
 bool wide_type(int type) { return type == 12 || type == 13 || type == 14 || type == 23; }
-int g_dequant_wide = -1;   // dequant_set_wide (the parity test); -1 = STRATA_DEQUANT_WIDE, else the card's default
 bool dequant_wide_on() {
     static const int env = [] { const char* v = std::getenv("STRATA_DEQUANT_WIDE"); return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
-    if (g_dequant_wide >= 0) return g_dequant_wide != 0;
     if (env >= 0) return env != 0;
     static int per_dev[64];   // 0 unknown, 1 no, 2 yes: sm_61 (measured on a Tesla P40) and sm_86 (RTX 3060 / A4000, 0.1.45: short-prompt TTFT -12..-17%, bitwise)
     int dev = 0;
@@ -382,8 +380,6 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
 
 }  // namespace
 
-void dequant_set_wide(int mode) { g_dequant_wide = mode; }
-
 bool dequant_bf16_supported(int ggml_type) noexcept {
     int a, b;
     return geometry(ggml_type, a, b);
@@ -407,15 +403,6 @@ void dequant_f16(int ggml_type, const void* blocks, int64_t row0, int64_t rows, 
         return;
     }
     launch<H16>(ggml_type, blocks, row0, rows, cols, reinterpret_cast<H16*>(out), stream);
-}
-
-bool dequant_f16_ld(int ggml_type, const void* blocks, int64_t row0, int64_t rows, int64_t cols, int64_t ld,
-                    uint16_t* out, void* stream) {
-    int be = 0, bb = 0;
-    if (iq_only(ggml_type) || !geometry(ggml_type, be, bb) || cols % be != 0 || rows <= 0 || ld < cols || ld % 8 != 0)
-        return false;
-    launch<H16>(ggml_type, blocks, row0, rows, cols, reinterpret_cast<H16*>(out), stream, ld);
-    return true;
 }
 
 void dequant_f32(int ggml_type, const void* blocks, int64_t row0, int64_t rows, int64_t cols, float* out, void* stream) {

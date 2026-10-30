@@ -112,38 +112,18 @@ target_link_libraries(strata-plan PRIVATE strata_plan)
 # Only built when CUDA is on, so the targets above keep working on a machine with no toolkit.  The arch guard
 # above has already refused anything older than sm_80 by the time this runs.
 if(STRATA_ENABLE_CUDA)
-  add_library(strata_core STATIC src/core/device.cu src/core/pinned.cu src/platform/memory.cpp src/core/graph.cpp src/core/weights.cpp
-                               src/core/layout.cpp src/platform/console_quit.cpp)
+  add_library(strata_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
+                                 src/platform/console_quit.cpp)
   target_include_directories(strata_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  # CUDA::cudart is PUBLIC because graph.cpp is a HOST translation unit that calls cudaGraphLaunch and
-  # cudaEventQuery: the .cu sources get cudart through the CUDA language rules, a .cpp does not, and the
-  # linker error ("unresolved external symbol cudaGraphInstantiate") names the function rather than the cause.
+  # CUDA::cudart is PUBLIC because host translation units call the runtime: the .cu sources get cudart through the
+  # CUDA language rules, a .cpp does not.
   target_link_libraries(strata_core PUBLIC strata_plan strata_warnings CUDA::cudart)
-
-  add_executable(strata-device src/core/device_main.cpp)
-  target_link_libraries(strata-device PRIVATE strata_core)
-
-  add_executable(strata-load src/core/load_main.cpp)
-  target_link_libraries(strata-load PRIVATE strata_core strata_kernels)
-
-  add_executable(strata-concurrent src/core/concurrent_main.cpp)
-  target_include_directories(strata-concurrent PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(strata-concurrent PRIVATE strata_core strata_kernels CUDA::cudart)
-
-  add_executable(strata-overlap src/core/overlap_main.cpp)
-  # a .cpp that calls cudaMemcpyAsync itself needs the toolkit headers and cudart explicitly
-  target_include_directories(strata-overlap PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(strata-overlap PRIVATE strata_core strata_kernels CUDA::cudart)
 
   # ---- strata_kernels (P2.S2) ----
   # Naive first, each with a parity test against a reference that was itself validated against ggml.  The
   # kernels link `strata_artifact` for the scalar dequantizers, because using the VALIDATED scalar path as the
   # reference is the whole point - a kernel checked against another copy of itself proves nothing.
-  add_library(strata_kernels STATIC src/kernels/cuda/dequant_s2.cu src/kernels/cuda/s2_gemv.cu
-                          src/kernels/cuda/s_gemv.cu
-                          src/kernels/cuda/s2_gemv_quads.cu
-                          src/kernels/cuda/s2_gemv_fast.cu
-                          src/kernels/cuda/router_top10.cu
+  add_library(strata_kernels STATIC src/kernels/cuda/s_gemv.cu
                           src/kernels/cuda/quantize_act.cu
                           src/kernels/cuda/rope.cu
                           src/kernels/cuda/sampler.cu
@@ -154,22 +134,17 @@ if(STRATA_ENABLE_CUDA)
                           src/kernels/cuda/gdn.cu
                           src/kernels/cuda/qsa.cu
                           src/kernels/cuda/elementwise.cu
-                          src/kernels/cuda/bf16_gemv.cu
                           src/kernels/cuda/native_mmvq.cu
                           src/kernels/cuda/native_mma.cu
                           src/kernels/cuda/native_bf16.cu
                           src/kernels/cuda/native_gr_norm.cu
                           src/kernels/cuda/native_moe.cu
-                          src/kernels/cuda/native_gdn.cu
                           src/kernels/cuda/native_gr_postops.cu
                           src/kernels/cuda/native_router.cu
-                          src/kernels/cuda/native_gdn_preprocess.cu
                           src/kernels/cuda/native_qsa.cu
                           src/kernels/cuda/native_rope.cu
                           src/kernels/cuda/native_ple_postops.cu
-                          src/kernels/cuda/native_flash_attn.cu
                           src/kernels/cuda/native_qsa_indexer.cu
-                          src/kernels/cuda/native_qsa_score.cu
                           src/kernels/cuda/ple.cu
                           src/kernels/cuda/kv_q8.cu
                           src/kernels/cuda/kv_q4.cu
@@ -191,16 +166,12 @@ if(STRATA_ENABLE_CUDA)
   set_source_files_properties(src/kernels/cuda/native_mmvq.cu src/kernels/cuda/native_mma.cu src/kernels/cuda/native_bf16.cu
     src/kernels/cuda/native_gr_norm.cu
     src/kernels/cuda/native_moe.cu
-    src/kernels/cuda/native_gdn.cu
     src/kernels/cuda/native_gr_postops.cu
     src/kernels/cuda/native_router.cu
-    src/kernels/cuda/native_gdn_preprocess.cu
     src/kernels/cuda/native_qsa.cu
     src/kernels/cuda/native_rope.cu
     src/kernels/cuda/native_ple_postops.cu
-    src/kernels/cuda/native_flash_attn.cu
     src/kernels/cuda/native_qsa_indexer.cu
-    src/kernels/cuda/native_qsa_score.cu
     src/kernels/cuda/draft_proxy.cu
     PROPERTIES COMPILE_OPTIONS "--use_fast_math")
 
@@ -252,22 +223,13 @@ if(STRATA_ENABLE_CUDA)
                          PASS_REGULAR_EXPRESSION "--deterministic-adapt")
   endif()
 
-  add_executable(dequant_s2_parity src/kernels/dequant_s2_parity.cpp)
   # The tests are HOST C++ files that call cudaMalloc/cudaMemcpy themselves, so they need the toolkit headers
   # and cudart explicitly: enabling the CUDA language gives those to .cu sources automatically, but a .cpp
   # target is just a C++ target and gets neither.
-  target_include_directories(dequant_s2_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(dequant_s2_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME dequant_s2_parity COMMAND dequant_s2_parity --selftest)
   # the coalesced Q8_0 dequant against the per-block kernel: the same bytes in BF16, FP16 and FP32
   add_executable(dequant_q8_0_identity src/kernels/dequant_q8_0_identity.cu)
   target_link_libraries(dequant_q8_0_identity PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME dequant_q8_0_identity COMMAND dequant_q8_0_identity)
-
-  add_executable(s2_gemv_parity src/kernels/s2_gemv_parity.cpp)
-  target_include_directories(s2_gemv_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(s2_gemv_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME s2_gemv_parity COMMAND s2_gemv_parity --selftest)
 
   add_executable(iq_parity src/kernels/iq_parity.cpp)
   target_include_directories(iq_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -318,11 +280,6 @@ if(STRATA_ENABLE_CUDA)
   target_link_libraries(quantize_act_parity PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME quantize_act_parity COMMAND quantize_act_parity --selftest)
 
-  add_executable(router_top10_parity src/kernels/router_top10_parity.cpp)
-  target_include_directories(router_top10_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(router_top10_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME router_top10_parity COMMAND router_top10_parity --selftest)
-
   add_executable(s_gemv_parity src/kernels/s_gemv_parity.cpp)
   target_include_directories(s_gemv_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(s_gemv_parity PRIVATE strata_kernels CUDA::cudart)
@@ -332,11 +289,6 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(elementwise_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(elementwise_parity PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME elementwise_parity COMMAND elementwise_parity --selftest)
-
-  add_executable(bf16_gemv_parity src/kernels/bf16_gemv_parity.cpp)
-  target_include_directories(bf16_gemv_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(bf16_gemv_parity PRIVATE strata_kernels CUDA::cudart)
-  add_test(NAME bf16_gemv_parity COMMAND bf16_gemv_parity --selftest)
 
   add_executable(s_gemv_q8k_parity src/kernels/s_gemv_q8k_parity.cpp)
   target_include_directories(s_gemv_q8k_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
@@ -403,11 +355,6 @@ if(STRATA_ENABLE_CUDA)
   target_include_directories(ple_reader_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
   target_link_libraries(ple_reader_test PRIVATE strata_kernels CUDA::cudart)
   add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
-
-  # The GPU test is registered only when CUDA is on, and it runs ON THE TARGET PC.  `--selftest` allocates
-  # and writes real VRAM, so a machine without a device fails this test rather than skipping it silently -
-  # which is correct: an engine that targets one GPU should not report a pass for having no GPU.
-  add_test(NAME cuda_device_selftest COMMAND strata-device --selftest)
 endif()
 
 # ---- strata_kernels_cpu (P2.S3) ----
@@ -419,18 +366,14 @@ endif()
 #     (AVX512-VBMI); without the flag MSVC reports undeclared intrinsics and never mentions AVX-512;
 #   * a TU compiled WITH `/arch:AVX512` may use AVX-512 in ANY of its code, so the scalar fallback and the
 #     test drivers must NOT be in it - otherwise the fallback is not a fallback, it is the same bet with
-#     worse opt-out.  `cpu_require_expert_support()` therefore refuses at startup on a CPU without the
-#     features, and the fallback exists for tests, exactly as P2.S3 specifies.
+#     worse opt-out.
 # Plan v0.3 P6: speculation components that need no GPU.
-add_library(strata_spec STATIC src/spec/suffix_drafter.cpp src/spec/controller.cpp)
+add_library(strata_spec STATIC src/spec/suffix_drafter.cpp)
 target_include_directories(strata_spec PUBLIC include)
 add_executable(suffix_drafter_test src/spec/suffix_drafter_test.cpp)
 target_link_libraries(suffix_drafter_test PRIVATE strata_spec)
 add_test(NAME suffix_drafter_test COMMAND suffix_drafter_test)
 if(STRATA_BUILD_TESTS)
-  add_executable(controller_test src/spec/controller_test.cpp)
-  target_link_libraries(controller_test PRIVATE strata_spec)
-  add_test(NAME controller_test COMMAND controller_test)
   # the f32 -> bf16 rounding against ggml's, NaN included, over every f32 bit pattern (header-only, CPU)
   add_executable(bf16_bits_test src/kernels/bf16_bits_test.cpp)
   target_include_directories(bf16_bits_test PRIVATE include)
@@ -528,21 +471,19 @@ if(STRATA_NATIVE_EXPERTS)
   # one-pass static linking has no cycle to resolve)
   target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                            src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp
-                                           src/kernels/cpu/kq_avx1.cpp src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp)
+                                           src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp)
   target_include_directories(strata_kernels_cpu PRIVATE third_party/ggml)
   if(MSVC)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     set_source_files_properties(src/kernels/cpu/kq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
     # older CPUs' kernels (AVX1, called behind cpu_avx1_ok() && !cpu_avx2_ok()): no FMA, no 256-bit integer ops
-    set_source_files_properties(src/kernels/cpu/kq_avx1.cpp src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp
-                                PROPERTIES COMPILE_OPTIONS "/arch:AVX")
+    set_source_files_properties(src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX")
   else()
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS
                                 "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mf16c;-mfma")
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
     set_source_files_properties(src/kernels/cpu/kq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
-    set_source_files_properties(src/kernels/cpu/kq_avx1.cpp PROPERTIES COMPILE_OPTIONS "-mavx")
     set_source_files_properties(src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp PROPERTIES COMPILE_OPTIONS
                                 "-msse4.2;-mavx;-mno-avx2;-mno-fma;-mno-f16c")
   endif()

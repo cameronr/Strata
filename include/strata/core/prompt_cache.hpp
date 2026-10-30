@@ -93,8 +93,6 @@ public:
     void set(int64_t pos, const int32_t* tokens, int64_t n);
     /// Checkpoints the session, which is at `pos` == the live length.
     void checkpoint(int64_t pos);
-    /// Forgets the live sequence after a failed/cancelled request.
-    void forget();
     /// Forgets the live sequence, every checkpoint and every stashed sequence (after non-finite logits: whatever the
     /// state holds may be poisoned).
     void clear();

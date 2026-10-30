@@ -150,8 +150,6 @@ const bool kBitplane = [] {
 
 }  // namespace
 
-bool q2_bitplane_enabled() { return kBitplane; }
-
 void q2_0_gguf_rows_multi_avx2_v(bool vnni_rows, const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
                                  int nt, float* const* out, int r0, int r1) {
 #if STRATA_AVXVNNI

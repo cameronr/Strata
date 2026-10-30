@@ -55,8 +55,6 @@ void gdn_out_norm(float* y, const float* z, const float* gamma, float eps, uint1
 // ---- MoE
 /// softmax over 512, top-10 (ties to the lower id), weights renormalised over the ten (the native router).
 void route(const float* logits, int32_t* ids, float* weights, int64_t T, void* stream);
-/// Expert blob (Strata pack layout, Q2_0) -> BF16 matrices: gate/up interleaved [1280, 2560], down [2560, 640].
-void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream);
 /// h16[n, r] = fp16(silu(gu[n, 2r]) * gu[n, 2r + 1])   (the interleaved expert gate/up)
 void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream);
 /// h16[n, r] = fp16(silu(g[n, r]) * u[n, r])   (the shared expert, gate and up separate, width 640)

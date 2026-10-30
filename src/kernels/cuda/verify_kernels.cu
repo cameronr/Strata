@@ -285,13 +285,6 @@ __global__ void add_streams_broadcast_kernel(const float* __restrict__ h, const 
     R[(size_t) t * n * hc + i] = h[(size_t) t * n * hc + i] + e[(size_t) t * n + i % n];
 }
 
-__global__ void ident_hits_kernel(const int32_t* __restrict__ ids, int n, int32_t* __restrict__ slot,
-                                  int32_t* __restrict__ dst, int32_t* __restrict__ count) {
-    const int i = threadIdx.x;
-    if (i < n) { slot[i] = ids[i]; dst[i] = i; }
-    if (i == 0) *count = n;
-}
-
 template <typename U>
 __global__ void gather_rows_kernel(const U* __restrict__ src, long long row_units, const int32_t* __restrict__ ids,
                                    long long n, U* __restrict__ dst) {
@@ -339,16 +332,6 @@ __global__ void mtp_select_kernel(const float* __restrict__ R_src, int64_t strid
     }
 }
 
-__global__ void dense_steps_kernel(const int32_t* __restrict__ cells, int n, int32_t* __restrict__ steps) {
-    const int i = threadIdx.x;
-    if (i >= n) return;
-    const int c = cells[i];
-    steps[i * 4 + 0] = c;
-    steps[i * 4 + 1] = c + 1;
-    steps[i * 4 + 2] = (c + 1) / 4;
-    steps[i * 4 + 3] = c + 1;
-}
-
 }  // namespace
 
 void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
@@ -387,12 +370,6 @@ void verify_hit_plan(const int32_t* ids, int n, int k, const int32_t* res, int n
     hit_plan_kernel<<<1, kHitPlanMax, 0, (cudaStream_t) stream>>>(ids, n, k, res, n_expert, slot_ptr, plan, (int) cap,
                                                                    (int) ptr_off);
     check("verify_hit_plan");
-}
-
-void ident_hits(const int32_t* ids, int n, int32_t* slot, int32_t* dst, int32_t* count, void* stream) {
-    if (n < 1 || n > 1024) { std::fprintf(stderr, "ident_hits: n out of range\n"); std::exit(1); }
-    ident_hits_kernel<<<1, 1024, 0, (cudaStream_t) stream>>>(ids, n, slot, dst, count);
-    check("ident_hits");
 }
 
 namespace {
@@ -628,11 +605,6 @@ __global__ void window_ids_kernel(int32_t* steps, int window, int32_t* ids, long
 void window_ids(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_stride, void* stream) {
     window_ids_kernel<<<dim3(8, (unsigned) n), 256, 0, (cudaStream_t) stream>>>(steps, window, ids, (long long) ids_stride);
     check("window_ids");
-}
-
-void dense_steps(const int32_t* cells, int n, int32_t* steps, void* stream) {
-    dense_steps_kernel<<<1, 64, 0, (cudaStream_t) stream>>>(cells, n, steps);
-    check("dense_steps");
 }
 
 void gdn_conv_l2_multi(const float* history, const float* qkv, const float* conv_w, float* h, int channels,

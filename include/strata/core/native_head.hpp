@@ -54,8 +54,6 @@ public:
     bool load(const std::vector<std::string>& shards, int64_t n_embd, int64_t n_vocab, std::string& err);
     /// Rows for device token ids.
     void gather_dev(const int32_t* tokens, int64_t n_tok, float* out, void* stream) const;
-    /// One row for a host token id.
-    void gather_one(int64_t token, float* out, void* stream) const;
     uint64_t bytes() const { return bytes_; }
     int type() const { return type_; }
 

@@ -57,50 +57,26 @@ void native_q2_0_f32(const void* weights, const float* x, void* scratch_q8_1,
 void native_q3_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream);
 
-void native_q3_k_f32(const void* weights, const float* x, void* scratch_q8_1,
-                     float* y, int n_in, int n_out, int ncols, void* stream);
-
 void native_iq4_xs_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream);
-
-void native_iq4_xs_f32(const void* weights, const float* x, void* scratch_q8_1,
-                      float* y, int n_in, int n_out, int ncols, void* stream);
 
 void native_q4_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream);
 
-void native_q4_k_f32(const void* weights, const float* x, void* scratch_q8_1,
-                     float* y, int n_in, int n_out, int ncols, void* stream);
-
 void native_q6_k_mmvq(const void* weights, const void* x_q8_1, float* y,
                       int n_in, int n_out, int ncols, void* stream);
-
-void native_q6_k_f32(const void* weights, const float* x, void* scratch_q8_1,
-                     float* y, int n_in, int n_out, int ncols, void* stream);
 
 void native_q4_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream);
 
-void native_q4_0_f32(const void* weights, const float* x, void* scratch_q8_1,
-                      float* y, int n_in, int n_out, int ncols, void* stream);
-
 void native_q5_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream);
-
-void native_q5_0_f32(const void* weights, const float* x, void* scratch_q8_1,
-                      float* y, int n_in, int n_out, int ncols, void* stream);
 
 void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream);
 
-void native_q8_0_f32(const void* weights, const float* x, void* scratch_q8_1,
-                      float* y, int n_in, int n_out, int ncols, void* stream);
-
 void native_iq4_nl_mmvq(const void* weights, const void* x_q8_1, float* y,
                        int n_in, int n_out, int ncols, void* stream);
-
-void native_iq4_nl_f32(const void* weights, const float* x, void* scratch_q8_1,
-                      float* y, int n_in, int n_out, int ncols, void* stream);
 
 // Storage/dispatch helpers take stable GGML type IDs, avoiding a ggml runtime
 // dependency in the engine: Q4_0=2, Q5_0=6, Q8_0=8, Q3_K=11, Q4_K=12, Q5_K=13,

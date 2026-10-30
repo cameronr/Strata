@@ -57,15 +57,6 @@ __device__ __forceinline__ int xor_scatter_index(int lane) {
     return vi;
 }
 
-// the lowest lane holding value vi
-template <int NV>
-__device__ __forceinline__ int xor_scatter_lane(int vi) {
-    int lane = 0;
-#pragma unroll
-    for (int s = 0; (NV >> s) > 1; ++s) lane += (vi & (NV >> (s + 1))) ? 16 >> s : 0;
-    return lane;
-}
-
 // the smallest power of two >= n
 __host__ __device__ constexpr int pow2_at_least(int n) { return n <= 1 ? 1 : 2 * pow2_at_least((n + 1) / 2); }
 
