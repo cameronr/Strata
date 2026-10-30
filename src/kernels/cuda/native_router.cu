@@ -264,12 +264,12 @@ __global__ void __launch_bounds__(VR_THREADS) verify_router_kernel(VerifyRouterA
     if (t == 0) s_last = atomicAdd(a.counter, 1u) == gridDim.x - 1;
     __syncthreads();
     if (!s_last) return;
-    if (warp < TT) {
-        route_token(a.logits + (size_t) warp * a.n_expert, a.ids + warp * 10, a.weights + warp * 10,
-                    a.ids_out != nullptr ? a.ids_out + warp * 10 : nullptr,
-                    a.w_out != nullptr ? a.w_out + warp * 10 : nullptr, lane);
-        __threadfence_system();
+    for (int r = warp; r < TT; r += VR_THREADS / 32) {   // TT may exceed the block's 8 warps (window up to 16)
+        route_token(a.logits + (size_t) r * a.n_expert, a.ids + r * 10, a.weights + r * 10,
+                    a.ids_out != nullptr ? a.ids_out + r * 10 : nullptr,
+                    a.w_out != nullptr ? a.w_out + r * 10 : nullptr, lane);
     }
+    __threadfence_system();   // every route's writes before the block's seq flag (raised after the sync below)
     __syncthreads();
     if (t == 0) {   // warp 0 routed and fenced
         *(volatile uint32_t*) a.seq = a.ring;
@@ -307,9 +307,9 @@ void native_router_top10(const float* logits, int32_t* ids, float* weights, void
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void verify_router(const VerifyRouterArgs& a, void* stream) {
-    if (!stream || a.n_tok < 1 || a.n_tok > 8 || a.n_expert != 512 || a.n_embd <= 0 || a.n_embd % 512 != 0 ||
+    if (!stream || a.n_tok < 1 || a.n_tok > kMmvfMaxRows || a.n_expert != 512 || a.n_embd <= 0 || a.n_embd % 512 != 0 ||
         !a.x || !a.w || !a.logits || !a.ids || !a.weights || !a.seq || !a.counter || (a.plan && (!a.res || !a.slot_ptr)))
-        throw std::invalid_argument("verify_router: 1..8 tokens, 512 experts, n_embd a multiple of 512, and buffers");
+        throw std::invalid_argument("verify_router: 1..16 tokens, 512 experts, n_embd a multiple of 512, and buffers");
     if ((a.xk_out != nullptr &&
          (a.xq1 == nullptr || a.xk_stride < (a.n_embd / 256 * kQ8KBytes + 15) / 16 * 16 || a.xk_stride % 16)) ||
         (a.xq1_out != nullptr && a.xq1 == nullptr))
@@ -323,14 +323,16 @@ void verify_router(const VerifyRouterArgs& a, void* stream) {
 #define STRATA_VR(T) \
     case T: verify_router_kernel<T><<<unsigned(n_copy + a.n_expert), VR_THREADS, 0, st>>>(a, n_copy); break;
         STRATA_VR(1) STRATA_VR(2) STRATA_VR(3) STRATA_VR(4) STRATA_VR(5) STRATA_VR(6) STRATA_VR(7) STRATA_VR(8)
+        STRATA_VR(9) STRATA_VR(10) STRATA_VR(11) STRATA_VR(12) STRATA_VR(13) STRATA_VR(14) STRATA_VR(15)
+        STRATA_VR(16)
 #undef STRATA_VR
     }
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
 void verify_router_bias_update(const float* logits, const float* predicted, int n_tok, float* bias, void* stream) {
-    if (!stream || n_tok < 1 || n_tok > 8 || !logits || !predicted || !bias)
-        throw std::invalid_argument("verify_router_bias_update: 1..8 tokens and buffers");
+    if (!stream || n_tok < 1 || n_tok > kMmvfMaxRows || !logits || !predicted || !bias)
+        throw std::invalid_argument("verify_router_bias_update: 1..16 tokens and buffers");
     bias_update<<<1, 512, 0, static_cast<cudaStream_t>(stream)>>>(logits, predicted, n_tok, 0.125f / (float) n_tok,
                                                                    bias);
     const auto error = cudaGetLastError();
