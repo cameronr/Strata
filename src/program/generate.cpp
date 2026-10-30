@@ -362,7 +362,9 @@ void usage() {
                  "                       also takes the prompt path's share, the head's rows and --prompt-split's\n"
                  "                       stage. One no visible GPU answers to is left out. auto: every other GPU,\n"
                  "                       the fastest link first (a short probe at startup: host-to-device rate x\n"
-                 "                       multiprocessors) (--tier-gpus: the same; -1: none)\n"
+                 "                       multiprocessors) (--tier-gpus: the same; -1: none). Qwen3.6-35B-A3B and\n"
+                 "                       Qwen3.8-27B: the GPUs a layer split may add, in order (auto: CUDA's), the\n"
+                 "                       fewest that hold the model; --layer-split N,N,.. sets each one's layers\n"
                  "  --second-gpu-gib G[,..]  each tier's VRAM for experts (default: all but its reserve; a list's\n"
                  "                       last value stands for the tiers past it, as in the two below)\n"
                  "  --second-gpu-reserve-mib R[,..]  the VRAM each tier leaves free (default 2048 on a GPU the\n"
@@ -1001,15 +1003,21 @@ struct PromptBuffers {
 
 #if defined(STRATA_HAVE_QWEN35)
 constexpr int kNotQwen35 = -1;
-/// The family switch: kNotQwen35 for a file this engine runs, else the exit code of Qwen3.6-35B-A3B's engine path
-/// (src/qwen35), which a qwen35moe file (--native's header) runs on.  That path runs on one GPU, --main-gpu's (named as
-/// for this engine), made current before its first CUDA call; it gets the command line without --main-gpu.
+/// The family switch: kNotQwen35 for a file this engine runs, else the exit code of the engine path of Qwen3.6-35B-A3B
+/// and Qwen3.8-27B (src/qwen35), which qwen35moe and qwen35 files (--native's header) run on.  That path runs on
+/// --main-gpu (named as for this engine), made current before its first CUDA call, and splits the layers over it and
+/// --second-gpu's GPUs where one does not hold them; it gets the command line without either, the GPUs as --stage-gpus.
 int qwen35_switch(int argc, char** argv) {
-    std::string model, main_gpu = "0";
+    std::string model, main_gpu = "0", second;
+    strata::ModelFamily family = strata::ModelFamily::Unknown;
     std::vector<char*> rest{argv[0]};
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--main-gpu") == 0 && i + 1 < argc) {
             main_gpu = argv[++i];
+            continue;
+        }
+        if (std::strcmp(argv[i], "--second-gpu") == 0 && i + 1 < argc) {
+            second = argv[++i];
             continue;
         }
         if ((std::strcmp(argv[i], "--native") == 0 || std::strcmp(argv[i], "--model") == 0) && i + 1 < argc)
@@ -1019,7 +1027,8 @@ int qwen35_switch(int argc, char** argv) {
     if (model.empty()) return kNotQwen35;
     try {
         const strata::GgufFile meta(strata::gguf_split_paths(model).front());
-        if (strata::model_family(meta) != strata::ModelFamily::Qwen35Moe) return kNotQwen35;
+        family = strata::model_family(meta);
+        if (family != strata::ModelFamily::Qwen35Moe && family != strata::ModelFamily::Qwen35) return kNotQwen35;
     } catch (const std::exception&) {
         return kNotQwen35;   // not readable here: the engine below says why
     }
@@ -1030,7 +1039,41 @@ int qwen35_switch(int argc, char** argv) {
         std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
         return 2;
     }
-    std::fprintf(stderr, "lamina: Qwen3.6-35B-A3B (qwen35moe) on GPU %d, %s\n", dev, gpus[(size_t) dev].name.c_str());
+    // --second-gpu: the GPUs a layer split may add, in order (names or numbers, comma-separated; auto: every other GPU
+    // in CUDA's order; -1: none); the engine takes the fewest that hold the model
+    std::vector<int> stages{dev};
+    if (second == "auto") {
+        for (const strata::core::GpuInfo& gi : gpus)
+            if (gi.ordinal != dev) stages.push_back(gi.ordinal);
+    } else if (!second.empty() && second != "-1") {
+        for (size_t at = 0; at <= second.size();) {
+            const size_t comma = std::min(second.find(',', at), second.size());
+            const std::string name = second.substr(at, comma - at);
+            at = comma + 1;
+            const int d = strata::core::find_gpu(gpus, name, why);
+            if (d < 0) {
+                std::fprintf(stderr, "lamina: --second-gpu %s: %s\n", name.c_str(), why.c_str());
+                return 2;
+            }
+            if (std::find(stages.begin(), stages.end(), d) != stages.end()) {
+                std::fprintf(stderr, "lamina: --second-gpu %s names a GPU the split has already\n", name.c_str());
+                return 2;
+            }
+            stages.push_back(d);
+        }
+    }
+    std::string list, more, flag = "--stage-gpus";
+    for (const int d : stages) {
+        list += (list.empty() ? "" : ",") + std::to_string(d);
+        if (d != dev) more += (more.empty() ? "" : ", ") + std::string("GPU ") + std::to_string(d) + ", " + gpus[(size_t) d].name;
+    }
+    if (stages.size() > 1) {
+        rest.push_back(flag.data());
+        rest.push_back(list.data());
+    }
+    std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s%s%s\n", strata::model_family_title(family),
+                 strata::model_family_arch(family), dev, gpus[(size_t) dev].name.c_str(),
+                 more.empty() ? "" : "; a layer split may add ", more.c_str());
     return strata::qwen35::run((int) rest.size(), rest.data());
 }
 #endif
