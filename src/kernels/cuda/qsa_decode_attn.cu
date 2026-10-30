@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_decode_attn.cu - see include/strata/kernels/qsa_decode_attn.hpp.
 #include "strata/kernels/qsa_decode_attn.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
 
@@ -23,17 +24,6 @@ constexpr int THREADS = 256;
 constexpr int WARPS = THREADS / 32;
 constexpr int PT = 64;           // cells per tile
 constexpr int SPLIT_MAX = 20;    // a decode query's splits at most
-
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
 
 // The decode's partial results, per query `stride` floats: [split][head][HD] sums of p * v (p relative to the split's
 // maximum), then at `m` and `l` (offsets from `acc`) [split][head] maxima and sums of p.
@@ -280,19 +270,6 @@ __device__ __forceinline__ void mma_s8s8(int (&d)[4], const unsigned (&a)[4], un
     asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                  : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ void ldsm4(unsigned (&r)[4], const void* s) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(s)));
-}
-__device__ __forceinline__ void ldsm4t(unsigned (&r)[4], const void* s) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(s)));
-}
-__device__ __forceinline__ void cp_async16(void* s, const void* g) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
 }
 __device__ __forceinline__ void cp_async8(void* s, const void* g) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));

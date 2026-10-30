@@ -10,6 +10,7 @@
 // mma.m16n8k16 / m16n8k32 .s8 fragments (lane = 4 g + t): A row g (and g + 8), k 4t..4t+3 (and 16 + 4t..); B column g,
 // k 4t..4t+3 (and 16 + 4t..); C rows g / g + 8, columns 2t, 2t + 1.
 #include "strata/kernels/native_mma.hpp"
+#include "strata/kernels/warp.cuh"
 
 #include "strata/kernels/native_mmvq.hpp"
 #include "q8_1_il.cuh"
@@ -39,8 +40,6 @@ __device__ __forceinline__ void cp16(unsigned dst, const void* src) {
 __device__ __forceinline__ void cp4(unsigned dst, const void* src) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" ::"r"(dst), "l"(src));
 }
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;"); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" ::"n"(N)); }
 // byte K of w, sign-extended: prmt's selector takes byte K, then its sign (bit 3 of a nibble) into bytes 1-3
 template <int K> __device__ __forceinline__ int sbyte(int w) {
     int r;

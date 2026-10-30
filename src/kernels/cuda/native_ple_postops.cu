@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "strata/kernels/native_ple_postops.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/native_gr_norm.hpp"
 #include "strata/kernels/ngram.hpp"
 #include <cuda_runtime.h>
@@ -33,10 +34,6 @@
 namespace strata::kernels {
 namespace {
 constexpr int N = 2560, H = 4, D = N * H, HISTORY = 9;
-__device__ float warp_sum(float x) {
-    for (int offset = 16; offset; offset >>= 1) x += __shfl_xor_sync(0xffffffffu, x, offset);
-    return x;
-}
 __global__ void gate_kernel(const float* key, const float* query, float* gate, float scale) {
     // SUM_ROWS selects 512 threads for four rows on the target GPU. Preserve
     // its eight partial lanes and materialized MUL rounding (never a dot FMA).

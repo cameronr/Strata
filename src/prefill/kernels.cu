@@ -1,5 +1,6 @@
 // src/prefill/kernels.cu - see include/strata/prefill/kernels.hpp.
 #include "strata/prefill/kernels.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/verify_kernels.hpp"
@@ -17,19 +18,11 @@
 namespace strata::prefill {
 namespace {
 
+using strata::kernels::warp_max;
+using strata::kernels::warp_sum;
 constexpr int N = 2560, HC = 4, D = N * HC, LR = 320;
 constexpr int S = 128, HK = 16, HV = 48, C = 10240;
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
-__device__ __forceinline__ float warp_max(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
 __device__ __forceinline__ uint16_t bf(float f) { return strata::kernels::bf16_from_f32(f); }
 __device__ __forceinline__ float sigm(float x) { return 1.0f / (1.0f + __expf(-x)); }
 __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__float2half_rn(f)); }

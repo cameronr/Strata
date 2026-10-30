@@ -19,25 +19,16 @@
 
 namespace q36a {
 
+using strata::kernels::cp_async16;
+using strata::kernels::cp_commit;
+using strata::kernels::cp_wait;
+using strata::kernels::ldsm4;
+using strata::kernels::ldsm4t;
+
 constexpr int kHD = 256;     // the head size
 constexpr int kBc = 32;      // cells a tile
 constexpr int kRows = 64;    // query rows a block
 
-__device__ __forceinline__ void ldsm4(unsigned (&r)[4], const void* s) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(s)));
-}
-__device__ __forceinline__ void ldsm4t(unsigned (&r)[4], const void* s) {
-    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-                 : "r"((unsigned) __cvta_generic_to_shared(s)));
-}
-__device__ __forceinline__ void cp16(void* s, const void* g) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
-}
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
 __device__ __forceinline__ void mma16816(float (&d)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
                  "{%0,%1,%2,%3};\n"
@@ -65,7 +56,7 @@ __device__ __forceinline__ void load_tile(__half* dst, const __half* src, int n)
     for (int i = (int) threadIdx.x; i < kBc * (kHD / 8); i += (int) blockDim.x) {
         const int c = i >> 5, j = i & 31;
         __half* d = dst + kv_at(c, j);
-        if (c < n) cp16(d, src + (size_t) c * kHD + j * 8);
+        if (c < n) cp_async16(d, src + (size_t) c * kHD + j * 8);
         else *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
     }
 }

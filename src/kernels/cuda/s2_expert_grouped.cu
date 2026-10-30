@@ -14,6 +14,7 @@
 // The two agree to float rounding and not to the bit, which is the same contract `s_gemv_parity` carries for
 // the same reason.  `bench/micro/moe_hit_parity.cu` is the check.
 #include "strata/kernels/s2_expert_grouped.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/core/geometry.hpp"
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/f16_bits.hpp"
@@ -50,12 +51,6 @@ constexpr size_t O_D_SCALES = O_GU_SCALES + (size_t) 2 * FF * SC_GU * 2;
 
 __device__ __forceinline__ float f16_at(const uint8_t* p) {
     return __half2float(__ushort_as_half((uint16_t) (p[0] | (p[1] << 8))));
-}
-
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xFFFFFFFFu, v, off);
-    return v;
 }
 
 /// `silu(gate) * up`, in place, over a GATE-MAJOR buffer: `[0, n_pairs)` is every hit's gate and

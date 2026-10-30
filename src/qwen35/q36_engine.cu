@@ -26,6 +26,7 @@
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_router.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/qwen35/engine.hpp"
@@ -160,6 +161,9 @@ void* heap_new(size_t n) {
 
 using Clock = std::chrono::steady_clock;
 using strata::core::ms_since;
+using strata::kernels::block128_sum;
+using strata::kernels::warp_max;
+using strata::kernels::warp_sum;
 
 constexpr int kThreads = 256;
 constexpr int kChunkCells = 256;   // attention split-K chunk
@@ -312,14 +316,6 @@ struct RowSel {
     __half* const* vc = nullptr;
 };
 
-__device__ __forceinline__ float warp_max(float v) {
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
-__device__ __forceinline__ float warp_sum(float v) {
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
 /// K and V in q8_0 (--kv q8_0): a KV head's cell is a row of its 256 values in int8, then its eight 32-value blocks'
 /// scales in FP16 (llama.cpp's q8_0 rounding: d = amax / 127, q = round(x / d)), 272 bytes against FP16's 512.
 constexpr int kKvQ8Row = 256 + 8 * 2;
@@ -842,13 +838,8 @@ __global__ void __launch_bounds__(128) k_conv_seq(float* hist, const float* qkv,
         v2 = x;
         float y = sum / (1.0f + __expf(-sum));
         if (qk) {
-            float sq = y * y;
-            for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xffffffffu, sq, o);
-            if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = sq;
-            __syncthreads();
-            const float ss = part[0] + part[1] + part[2] + part[3];
-            __syncthreads();
-            y *= rsqrtf(ss + eps);
+            y *= rsqrtf(block128_sum(y * y, part) + eps);
+            __syncthreads();   // every thread has read `part` before the next token writes it
         }
         h[(size_t) t * C + c] = y;
     }
@@ -1007,12 +998,7 @@ __global__ void __launch_bounds__(128) k_gdn_norm(const float* o_raw, const floa
     __shared__ float part[4];
     const size_t i = ((size_t) blockIdx.y * h_v + blockIdx.x) * 128 + threadIdx.x;
     const float oc = o_raw[i];
-    float sq = oc * oc;
-    for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xffffffffu, sq, o);
-    if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = sq;
-    __syncthreads();
-    const float ss = part[0] + part[1] + part[2] + part[3];
-    const float scale = rsqrtf(ss / 128.0f + eps);
+    const float scale = rsqrtf(block128_sum(oc * oc, part) / 128.0f + eps);
     const float zz = z[i];
     y[i] = oc * scale * gamma[threadIdx.x] * (zz / (1.0f + __expf(-zz)));
 }

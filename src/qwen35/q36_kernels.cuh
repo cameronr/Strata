@@ -6,6 +6,7 @@
 
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
+#include "strata/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -16,22 +17,15 @@
 
 namespace q36k {
 
+using strata::kernels::warp_max;
+using strata::kernels::warp_sum;
+
 struct QB {   // a q8_1 activation block (what native_quantize_q8_1 writes)
     half2 ds;
     int8_t qs[32];
 };
 static_assert(sizeof(QB) == 36, "q8_1 block");
 
-__device__ __forceinline__ float wsum(float x) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) x += __shfl_xor_sync(0xffffffffu, x, o, 32);
-    return x;
-}
-__device__ __forceinline__ float wmax(float x) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) x = fmaxf(x, __shfl_xor_sync(0xffffffffu, x, o, 32));
-    return x;
-}
 __device__ __forceinline__ float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 
 // The shared CUDA kernels these ones replace (native_mmvq.cu, native_router.cu) are compiled with --use_fast_math (CMakeLists.txt);
@@ -58,8 +52,8 @@ __device__ __forceinline__ float fexp_fm(float a) { return expf(a); }
 /// One lane's element `v` of a 32-element q8_1 block (the warp is the block): native_quantize_q8_1_kernel's body.
 /// `y` points at the row's blocks, `i` is the element index within the row.
 __device__ __forceinline__ void q8_store(QB* __restrict__ y, int i, float v, int lane) {
-    const float amax = wmax(fabsf(v));
-    const float sum = wsum(v);
+    const float amax = warp_max(fabsf(v));
+    const float sum = warp_sum(v);
     const float d = strata::kernels::q8_1_finite(fdiv_fm(amax, 127.0f));
     int8_t q = 0;   // strata::kernels::q8_1_quant with the division of the fast-math TU
     if (amax != 0.0f) {
@@ -128,7 +122,7 @@ __device__ __forceinline__ void q8_row_dot(const uint8_t* __restrict__ w, const 
         t += P[c][1];
         t += P[c][2];
         t += P[c][3];
-        res[c] = wsum(t);
+        res[c] = warp_sum(t);
     }
 }
 
@@ -323,14 +317,14 @@ __global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ l
         float maximum = -INFINITY;
 #pragma unroll
         for (int i = 0; i < V; ++i) maximum = max(maximum, values[i]);
-        maximum = wmax(maximum);
+        maximum = warp_max(maximum);
         float sum = 0.0f;
 #pragma unroll
         for (int i = 0; i < V; ++i) {
             values[i] = fexp_fm(values[i] - maximum);
             sum += values[i];
         }
-        const float reciprocal = frcp_fm(wsum(sum));
+        const float reciprocal = frcp_fm(warp_sum(sum));
 #pragma unroll
         for (int i = 0; i < V; ++i) {
             values[i] *= reciprocal;
@@ -358,7 +352,7 @@ __global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ l
             }
             if (rank == lane) selected = best;
         }
-        selected_sum = max(wsum(selected_sum), 6.103515625e-5f);
+        selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
         const float inverse_selected_sum = frcp_fm(selected_sum);
         if (lane < K) weights[(size_t) tk * K + lane] = selected * inverse_selected_sum;
     }

@@ -3,6 +3,7 @@
 // Built with --use_fast_math like native_mmvq.cu, whose Q6_K and Q8_0 x q8_1 dots the exact rescoring repeats (the
 // same thread-to-block mapping, sums in the same order: bitwise its logits).
 #include "strata/kernels/draft_proxy.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/dp4a.hpp"
 
 #include <cuda_fp16.h>
@@ -217,12 +218,6 @@ __global__ void __launch_bounds__(SCORE_WARPS * WARP) score_kernel(const uint4* 
 // ---- the exact rows: native_mmvq's single-column dots, one warp standing for its row's four warps (lane L for
 // threads L, L + 32, L + 64, L + 96), each virtual thread's blocks in its order, the four added in the cross-warp
 // order before the same xor tree
-
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int offset = WARP / 2; offset > 0; offset >>= 1) x += __shfl_xor_sync(0xffffffff, x, offset, WARP);
-    return x;
-}
 
 // native_mmvq's load_int_b2: the blocks are two-byte aligned
 __device__ __forceinline__ int load_int_b2(const void* ptr, int i32) {

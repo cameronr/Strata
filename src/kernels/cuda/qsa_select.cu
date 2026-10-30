@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_select.cu - see include/strata/kernels/qsa_select.hpp.
 #include "strata/kernels/qsa_select.hpp"
+#include "strata/kernels/warp.cuh"
 
 #include <cuda_runtime.h>
 
@@ -241,9 +242,6 @@ __host__ __device__ constexpr int popc5(int i) {
 }
 // key rows in shared memory, 16-byte chunk c of row r at c ^ (r & 7): a quarter warp's rows on distinct bank quads
 __device__ __forceinline__ int key_at(int r, int c) { return r * IDX_DIM + 4 * (c ^ (r & 7)); }
-__device__ __forceinline__ void cp_async16(void* s, const void* g) {
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
-}
 
 // The same scores for batches of queries, in a per-thread GEMM form.  Lane l of a warp scores key blocks l + 32 j
 // (j < BATCH_BT) of the tile against the warp's BATCH_QT queries, all heads: a dot4 per leaf (dims 4l..4l+3), the 32

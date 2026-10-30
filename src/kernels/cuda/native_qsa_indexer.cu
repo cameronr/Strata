@@ -19,6 +19,7 @@
 // SOFTWARE.
 
 #include "strata/kernels/native_qsa_indexer.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -32,12 +33,6 @@
 namespace strata::kernels {
 namespace {
 constexpr int D = 128, R = 4, ROT = 64, THREADS = 256;
-__device__ float warp_sum(float x) {
-#pragma unroll
-    for (int offset = 16; offset; offset >>= 1)
-        x += __shfl_xor_sync(0xffffffffu, x, offset);
-    return x;
-}
 // One token's append; every thread of the block calls it (it synchronizes the block), a later call sees this one's
 // tail writes.
 template <int MODE>

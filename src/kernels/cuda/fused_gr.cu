@@ -1,5 +1,6 @@
 // src/kernels/cuda/fused_gr.cu - see include/strata/kernels/fused_gr.hpp.
 #include "strata/kernels/fused_gr.hpp"
+#include "strata/kernels/warp.cuh"
 #include "xor_scatter.cuh"
 
 #include <cuda_runtime.h>
@@ -33,11 +34,6 @@ constexpr int UPM_ROWS = HC * UPM_COLS / WARPS;   // 8
 // the scratch (floats): DG counters, the slices' sums of squares [DG][DS][DT], the partial dots [DS][DT][NR]
 constexpr int SC_CTR = 0, SC_SSP = 64, SC_PART = SC_SSP + DG * DS * DT, SC_FLOATS = SC_PART + DS * DT * NR;
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
 __device__ __forceinline__ float sigmoidf_(float x) { return 1.0f / (1.0f + __expf(-x)); }
 
 // 8 bf16 packed in a uint4 against 8 floats held as two float4

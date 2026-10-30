@@ -21,6 +21,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 #include "strata/kernels/native_router.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/q8_1_finite.hpp"
 #include "strata/kernels/bf16_bits.hpp"
 #include "hit_plan.cuh"
@@ -35,16 +36,6 @@
 
 namespace strata::kernels {
 namespace {
-__device__ __forceinline__ float warp_sum(float value) {
-#pragma unroll
-    for (int mask = 16; mask; mask >>= 1) value += __shfl_xor_sync(0xffffffffu, value, mask, 32);
-    return value;
-}
-__device__ __forceinline__ float warp_max(float value) {
-#pragma unroll
-    for (int mask = 16; mask; mask >>= 1) value = fmaxf(value, __shfl_xor_sync(0xffffffffu, value, mask, 32));
-    return value;
-}
 // A float as a uint32 in the same order (sign flipped for positives, all bits for negatives), and back.
 __device__ __forceinline__ unsigned order_key(float f) {
     const unsigned b = __float_as_uint(f);

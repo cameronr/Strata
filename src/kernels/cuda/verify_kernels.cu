@@ -3,6 +3,7 @@
 // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
 #include "strata/kernels/verify_kernels.hpp"
+#include "strata/kernels/warp.cuh"
 #include "hit_plan.cuh"
 
 #include <cuda_runtime.h>
@@ -45,14 +46,7 @@ __global__ void __launch_bounds__(S) gdn_conv_l2_multi_kernel(float* hist, const
     }
     float sum = v0 * w[c * 4] + v1 * w[c * 4 + 1] + v2 * w[c * 4 + 2] + x * w[c * 4 + 3];
     float y = sum / (1.0f + __expf(-sum));
-    if ((int) blockIdx.x < qk_heads) {
-        float sq = y * y;
-        for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xffffffffu, sq, o);
-        if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = sq;
-        __syncthreads();
-        const float ss = part[0] + part[1] + part[2] + part[3];
-        y *= rsqrtf(ss + eps);
-    }
+    if ((int) blockIdx.x < qk_heads) y *= rsqrtf(block128_sum(y * y, part) + eps);
     h[(size_t) t * C + c] = y;
 }
 

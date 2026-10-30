@@ -42,6 +42,7 @@
 //    argument in this file for keeping both.
 #include "strata/core/emulate.hpp"
 #include "strata/kernels/qsa.hpp"
+#include "strata/kernels/warp.cuh"
 
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/kernels/kv_stream.hpp"
@@ -424,16 +425,6 @@ __global__ void kv_gather_kernel(const uint16_t* __restrict__ k_pool, const uint
 }
 
 // ================= 6. qsa_attend =================
-
-__device__ __forceinline__ float warp_max(float v) {
-    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, o));
-    return v;
-}
-
-__device__ __forceinline__ float warp_sum(float v) {
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
-}
 
 /// One block per query head.  `s` holds the scores, which are then overwritten with the softmax weights.
 __global__ void qsa_attend_kernel(const float* __restrict__ q, const uint16_t* __restrict__ k_scratch,

@@ -23,6 +23,7 @@
 // SOFTWARE.
 
 #include "strata/kernels/native_qsa.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <atomic>
@@ -35,12 +36,6 @@
 
 namespace strata::kernels {
 namespace {
-__device__ __forceinline__ float warp_sum(float value) {
-#pragma unroll
-    for (int offset = 16; offset; offset >>= 1)
-        value += __shfl_xor_sync(0xffffffffu, value, offset, 32);
-    return value;
-}
 template<int BlockSize>
 __global__ void norm(const float* input, const float* __restrict__ gamma, float* output,
                      int n_cols, float epsilon) {

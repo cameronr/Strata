@@ -24,6 +24,7 @@
 // SOFTWARE.
 
 #include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/kernels/native_mma.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
 #include "strata/kernels/dp4a.hpp"
@@ -124,22 +125,6 @@ static_assert(sizeof(Q50Block) == 22 && alignof(Q50Block) == 2 &&
               offsetof(Q50Block, qh) == 2 && offsetof(Q50Block, qs) == 6);
 static_assert(sizeof(Q80Block) == 34 && alignof(Q80Block) == 2 && offsetof(Q80Block, qs) == 2);
 static_assert(sizeof(IQ4NLBlock) == 18 && alignof(IQ4NLBlock) == 2 && offsetof(IQ4NLBlock, qs) == 2);
-
-__device__ __forceinline__ float warp_sum(float x) {
-#pragma unroll
-    for (int offset = WARP / 2; offset > 0; offset >>= 1) {
-        x += __shfl_xor_sync(0xffffffff, x, offset, WARP);
-    }
-    return x;
-}
-
-__device__ __forceinline__ float warp_max(float x) {
-#pragma unroll
-    for (int offset = WARP / 2; offset > 0; offset >>= 1) {
-        x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, offset, WARP));
-    }
-    return x;
-}
 
 __launch_bounds__(QUANT_THREADS, 1)
 __global__ void native_quantize_q8_1_kernel(const float* __restrict__ x,

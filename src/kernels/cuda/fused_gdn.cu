@@ -1,5 +1,6 @@
 // src/kernels/cuda/fused_gdn.cu - see include/strata/kernels/fused_gdn.hpp.
 #include "strata/kernels/fused_gdn.hpp"
+#include "strata/kernels/warp.cuh"
 #include "strata/core/geometry.hpp"
 
 #include <cuda_runtime.h>
@@ -87,14 +88,7 @@ __global__ void __launch_bounds__(S) gdn_conv_l2_kernel(float* __restrict__ hist
     hist[c * 3 + 1] = v2;
     hist[c * 3 + 2] = x;
     float y = sum / (1.0f + __expf(-sum));
-    if ((int) blockIdx.x < qk_heads) {
-        float sq = y * y;
-        for (int o = 16; o > 0; o >>= 1) sq += __shfl_xor_sync(0xffffffffu, sq, o);
-        if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = sq;
-        __syncthreads();
-        const float ss = part[0] + part[1] + part[2] + part[3];
-        y *= rsqrtf(ss + eps);
-    }
+    if ((int) blockIdx.x < qk_heads) y *= rsqrtf(block128_sum(y * y, part) + eps);
     h[c] = y;
 }
 

@@ -13,6 +13,7 @@
 #define GGML_COMMON_IMPL_CUDA
 #include "ggml-common.h"
 #include "strata/kernels/dp4a.hpp"
+#include "strata/kernels/warp.cuh"
 #include <type_traits>
 
 namespace strata::kernels {
@@ -851,12 +852,6 @@ inline int fmt_qk(int t) {
 #undef STRATA_QK
         default: return 0;
     }
-}
-
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    return v;
 }
 
 // The --expert-math exact dots below each compute ONE ROW PER EIGHT-LANE GROUP: lane l = lane & 7 of a group owns
