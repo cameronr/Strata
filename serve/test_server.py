@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from serve.frontend import ChatTemplate, literal_tags, mark_think_literals, unmark_think_literals  # noqa: E402
 from serve.server import (ANSWER_RESERVE_MIN, CTX_SLACK, ByteTokenizer, EngineDied, EngineNonFinite, GpuBusy, MockEngine,  # noqa: E402
                           PP_DONE_TAIL, Service,
-                          StrataEngine, api_key_of, engine_args, key_matches, layer_split_value, prompt_progress,
+                          StrataEngine, api_key_of, engine_args, key_matches, prompt_progress,
                           prompt_tokens_seen,
                           request_stats, request_timings, serve, start_failure_hint)
 from types import SimpleNamespace  # noqa: E402
@@ -1703,39 +1703,6 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(plain.get("CUDA_VISIBLE_DEVICES"), os.environ.get("CUDA_VISIBLE_DEVICES"))
         self.assertEqual(plain.get("CUDA_DEVICE_ORDER"), os.environ.get("CUDA_DEVICE_ORDER"))
 
-    def test_card_order(self):
-        """#1352: with an auto layer split the faster card (SMs x clock) goes last; ties, a manual split, a
-        measurement we lack, HIP and "gpu_order": "as_given" keep the config's order."""
-        from serve.server import child_env, hip_speed_scores, ordered_gpus
-        fast_first = {0: 8448.0 * 2610, 2: 4608.0 * 2575}      # 4070 Ti SUPER (66 SMs) vs 5060 Ti (36 SMs), shaped
-        base = {"gpu": [0, 2], "args": []}
-        self.assertEqual(ordered_gpus(base, fast_first), [2, 0])
-        self.assertEqual(ordered_gpus({"gpu": [2, 0], "args": []}, fast_first), [2, 0])
-        self.assertEqual(ordered_gpus(base, {0: 5.0, 2: 5.0}), [0, 2])                       # identical cards
-        self.assertEqual(ordered_gpus(base, {0: 173740000.0, 2: 171640000.0}), [0, 2])      # #1760: two 5070 Ti, 1.2% apart
-        self.assertEqual(ordered_gpus(base, {0: 106.0, 2: 100.0}), [2, 0])                    # 6% apart: a real difference
-        self.assertEqual(ordered_gpus({**base, "gpu_order": "as_given"}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "layer_split": "24"}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "args": ["--layer-split", "24"]}, fast_first), [0, 2])
-        self.assertEqual(ordered_gpus({**base, "backend": "hip"}, fast_first), [2, 0])           # AMD: same rule
-        self.assertEqual(ordered_gpus({**base, "backend": "hip"}, {0: 7.0, 2: 7.0}), [0, 2])      # identical cards (the R9700s)
-        self.assertEqual(ordered_gpus(base, {0: 1.0}), [0, 2])                               # a card unmeasured
-        self.assertEqual(ordered_gpus({"gpu": 1, "args": []}, {1: 1.0}), [1])
-        self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0}), [0, 2, 1])
-        self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 3.0, 2: 3.0}), [0, 1, 2])
-        # #1576: the reorder is skipped when it would land the last stage (head + draft + verify + cache) on a card
-        # with less VRAM than the config's own last card - the reporter's fast 12 GB / slow 22 GB pair
-        fast_small = {"gpu": [0, 1], "args": []}
-        speeds = {0: 8448.0 * 2610, 1: 4352.0 * 1665}     # 4070 Ti vs 2080 Ti
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 12288, 1: 22528}), [0, 1])   # keep: tail would shrink
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 24576, 1: 12288}), [1, 0])   # faster AND bigger: reorder
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 16384, 1: 16384}), [1, 0])   # equal VRAM: reorder
-        self.assertEqual(ordered_gpus(fast_small, speeds, {0: 12288}), [1, 0])             # a card unmeasured: reorder
-        self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0},
-                                    {0: 8192, 1: 12288, 2: 24576}), [0, 1, 2])  # tail 1 (12G) < given tail 2 (24G)
-        self.assertEqual(child_env({"gpu": [0, 2], "args": [], "gpu_order": "as_given"})["CUDA_VISIBLE_DEVICES"], "0,2")
-        self.assertIsNone(hip_speed_scores([0], root="/nonexistent/kfd"))
-
     def test_engine_gpus(self):
         """The Monitor's cards: --main-gpu and --second-gpu's GPU tiers (one card or a list; the last flag counts)."""
         from serve.server import engine_gpus
@@ -1762,19 +1729,6 @@ class GpuChoice(unittest.TestCase):
                                      gpus), [2, 1, 0])
         self.assertEqual(engine_gpus({"args": ["--main-gpu", "3090", "--second-gpu", "RTX,3090,7"]}, gpus), [2])
         self.assertEqual(engine_gpus({"args": ["--main-gpu", "1", "--second-gpu", "auto"]}, gpus), [1, 0, 2])
-
-    def test_kfd_scores(self):
-        """AMD on Linux: the GPU nodes of the KFD topology, SIMDs x clock, node order = the config's index."""
-        import tempfile
-        from serve.server import hip_speed_scores
-        with tempfile.TemporaryDirectory() as d:
-            for n, simd, clk in ((0, 0, 0), (1, 128, 2350), (2, 64, 2000), (3, 128, 2350)):
-                os.makedirs(os.path.join(d, str(n)))
-                with open(os.path.join(d, str(n), "properties"), "w") as f:
-                    f.write(f"simd_count {simd}\nmax_engine_clk_fcompute {clk}\ngfx_target_version 120001\n")
-            sc = hip_speed_scores([0, 1, 2], root=d)
-            self.assertEqual(sc, {0: 128 * 2350.0, 1: 64 * 2000.0, 2: 128 * 2350.0})
-            self.assertIsNone(hip_speed_scores([0, 1, 2, 3], root=d))      # a card the topology does not have
 
     def test_vision_device(self):
         # #408: the image encoder on its own card; the engine's environment stays as it was
@@ -2263,37 +2217,6 @@ class PcieShare(unittest.TestCase):
         self.assertIn("expert cache 60.0% hit (+20.0% of the routed experts over PCIe)", out.getvalue())
 
 
-class PeerDevice(unittest.TestCase):
-    """#665: several GPUs in the config are a layer split, but --peer-device uses the second card as an expert-cache
-    tier, and the engine refuses it beside --layer-split: the server must not add one then."""
-
-    def test_a_vision_section_starts_the_engine_with_images_1322(self):
-        args = ["--native", "x"]
-        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": True}})
-        self.assertEqual(got, args + ["--vision", "--vram-reserve-mib", "700"])
-        got = engine_args({"args": list(args), "vision": {"exe": "v", "gpu": False}})
-        self.assertEqual(got, args + ["--vision"])
-        mine = args + ["--vram-reserve-mib", "1500"]
-        self.assertEqual(engine_args({"args": list(mine), "vision": {"gpu": True}}), mine + ["--vision"])
-        done = args + ["--vision", "--vram-reserve-mib", "700"]                  # setup wrote it: unchanged
-        self.assertEqual(engine_args({"args": list(done), "vision": {"gpu": True}}), done)
-        self.assertEqual(engine_args({"args": list(args)}), args)                # no section: no images
-
-    def test_split_added_for_several_gpus(self):
-        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0, 1]}),
-                         ["--native", "x", "--layer-split", "auto"])
-
-    def test_no_split_with_a_peer(self):
-        args = ["--native", "x", "--peer-device", "1"]
-        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1]}), args)
-        self.assertEqual(engine_args({"args": list(args), "gpu": [0, 1], "split_skip_if_fits": True}), args)
-
-    def test_both_cards_visible(self):
-        from serve.server import child_env
-        env = child_env({"args": ["--peer-device", "1"], "gpu": [0, 1]})
-        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "0,1")
-
-
 class LearnedProfile(unittest.TestCase):
     """#477: "expert_profile_save" in the config: the engine saves its learned profile there, and the next start
     begins from it when it is a profile of the same model; without the key the arguments are unchanged."""
@@ -2486,38 +2409,6 @@ class NonFiniteLogits(unittest.TestCase):
         self.assertEqual(got, [5, 6])
         self.assertEqual(eng.last["finish"], "nonfinite")
         self.assertNotIn("STOP", eng.proc.stdin.getvalue())   # the DONE was read: nothing to stop or drain
-
-
-class LayerSplit(unittest.TestCase):
-    """#644: "layer_split" is the first layer of each later GPU; a list is accepted, counts per card are not."""
-
-    def cfg(self, split, gpus=(2, 0, 1, 3)):
-        c = {"args": ["--native", "x"], "gpu": list(gpus)}
-        if split is not ...:
-            c["layer_split"] = split
-        return c
-
-    def test_auto_and_absent(self):
-        for v in (..., None, "", "auto", "AUTO"):
-            self.assertEqual(engine_args(self.cfg(v))[-2:], ["--layer-split", "auto"])
-
-    def test_string_and_list(self):
-        self.assertEqual(engine_args(self.cfg("24,36,42"))[-2:], ["--layer-split", "24,36,42"])
-        self.assertEqual(engine_args(self.cfg(" 24, 36 ,42 "))[-2:], ["--layer-split", "24,36,42"])
-        self.assertEqual(engine_args(self.cfg([24, 36, 42]))[-2:], ["--layer-split", "24,36,42"])
-        self.assertEqual(engine_args(self.cfg(18, gpus=(0, 1)))[-2:], ["--layer-split", "18"])
-        self.assertEqual(engine_args(self.cfg([18], gpus=(0, 1)))[-2:], ["--layer-split", "18"])
-
-    def test_counts_per_card_are_refused_with_the_format(self):
-        for bad in ("24,16,12,12", [24, 16, 12, 12], "24,16,12", "24,36", "x", [24.5, 30, 40], "1,20,30", [True]):
-            with self.assertRaises(ValueError) as e:
-                layer_split_value(self.cfg(bad))
-            self.assertIn("first layer of each later GPU", str(e.exception))
-            self.assertIn('"12,24,36"', str(e.exception))   # the example for 4 GPUs
-
-    def test_one_gpu_ignores_it(self):
-        self.assertEqual(engine_args({"args": ["--native", "x"], "gpu": [0], "layer_split": "24,16"}),
-                         ["--native", "x"])
 
 
 class DraftHeadHint(unittest.TestCase):

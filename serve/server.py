@@ -33,7 +33,6 @@ import base64
 import hashlib
 import hmac
 import codecs
-import ctypes
 import json
 import math
 import os
@@ -791,101 +790,6 @@ FATAL_PREFIXES = ("ERR verify: timed out at layer ", "ERR verify batch: timed ou
                   "ERR verify: an earlier window never finished", "ERR verify batch: an earlier window never finished")
 
 
-def parse_engine_stage_line(line: str) -> list[dict] | None:
-    """Accept only the engine's final, contiguous stage plan (inclusive layer ends)."""
-    prefix = "strata serve: layer split: layers "
-    suffix = ", one hand-off per window"
-    if not line.startswith(prefix) or not line.rstrip("\r\n").endswith(suffix):
-        return None
-    body = line.rstrip("\r\n")[len(prefix):-len(suffix)]
-    parts = body.split(", ")
-    if not 2 <= len(parts) <= 16:
-        return None
-    stages, next_layer = [], 0
-    for i, part in enumerate(parts):
-        match = re.fullmatch(r"([0-9]{1,5})-([0-9]{1,5}) \(CUDA([0-9]{1,2})\)", part)
-        if match is None:
-            return None
-        first, last, ordinal = map(int, match.groups())
-        if first != next_layer or last < first or last > 65535 or ordinal > 15:
-            return None
-        stages.append({"stage": i, "layer_start": first, "layer_end": last,
-                       "engine_ordinal": ordinal})
-        next_layer = last + 1
-    return stages
-
-
-def read_engine_stage_log(path: str | None, start: int, limit: int = 2 << 20) -> list[dict]:
-    """Read this engine start only; oversized/unavailable logs leave placement unknown."""
-    if not path or start < 0:
-        return []
-    try:
-        with open(path, "rb") as source:
-            source.seek(start)
-            data = source.read(limit + 1)
-    except OSError:
-        return []
-    if len(data) > limit:
-        return []
-    for line in reversed(data.decode("utf-8", errors="replace").splitlines()):
-        stages = parse_engine_stage_line(line)
-        if stages is not None:
-            return stages
-    return []
-
-
-def visible_device_order(env: dict | None, backend: str | None) -> list[int]:
-    """Map engine ordinals to OS GPU indices only when the visibility list is unambiguous."""
-    if backend not in (None, "cuda", "hip"):
-        return []
-    if backend != "hip" and (env or {}).get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
-        return []
-    name = "HIP_VISIBLE_DEVICES" if backend == "hip" else "CUDA_VISIBLE_DEVICES"
-    value = (env or {}).get(name)
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,5}(?:,[0-9]{1,5}){0,15}", value):
-        return []
-    devices = [int(part) for part in value.split(",")]
-    return devices if all(0 <= device <= 65535 for device in devices) and len(set(devices)) == len(devices) else []
-
-
-def configure_batch_telemetry_env(env: dict, cfg: dict, override: bool | None) -> None:
-    """Only an explicit setting changes the inherited opt-in engine environment."""
-    choice = override if override is not None else cfg.get("batch_telemetry")
-    if choice is True:
-        env["STRATA_BATCH_TELEMETRY"] = "1"
-    elif choice is False:
-        env.pop("STRATA_BATCH_TELEMETRY", None)
-
-
-def parse_batch_window_sample(line: str) -> dict | None:
-    """Read an opt-in engine BSTAT sample; rows are verifier work, not emitted tokens."""
-    if len(line) > 80:
-        return None
-    match = re.fullmatch(r"BSTAT ([1-9][0-9]{0,8}) ([1-9][0-9]{0,9}) "
-                         r"([1-9][0-9]{0,9}) ([1-9][0-9]{0,9})\r?\n?", line)
-    if match is None:
-        return None
-    windows, rows, active, elapsed_ms = map(int, match.groups())
-    if rows > windows * 8 or active > rows or elapsed_ms > 86_400_000:
-        return None
-    return {"windows": windows, "processed_rows": rows, "active_rows": active,
-            "elapsed_ms": elapsed_ms}
-
-
-def parse_stage_in_flight_sample(line: str) -> dict | None:
-    """Read bounded PSTAT host scheduling spans; these are not GPU utilization."""
-    if len(line) > 256 or re.fullmatch(
-            r"PSTAT (?:[2-9]|1[0-6]) [1-9][0-9]{0,10}(?: (?:0|[1-9][0-9]{0,10})){2,16}\r?\n?", line) is None:
-        return None
-    parts = line.strip().split(" ")
-    stages, elapsed_us = int(parts[1]), int(parts[2])
-    in_flight_us = [int(value) for value in parts[3:]]
-    if len(in_flight_us) != stages or elapsed_us > 86_400_000_000 or \
-            any(value > elapsed_us for value in in_flight_us):
-        return None
-    return {"elapsed_us": elapsed_us, "in_flight_us": in_flight_us}
-
-
 class StrataEngine:
     """The resident engine: `strata --serve` reads `GEN <max_new> <ids>` lines and streams `T <id>` lines, then
     `DONE ...`.  Requests are serialized by the service's FIFO, so one pipe is enough.
@@ -930,9 +834,6 @@ class StrataEngine:
         self.can_stop = False            # the engine honours a STOP line mid-request (READY <ctx> stop)
         self.last = {}
         self.info = {}                   # INFO key=value facts (engine 0.1.8+): kv, expert slots, ... (Monitor tab)
-        self.terminal_stages: list[dict] = []  # final layer ranges from this engine start's bounded stderr log
-        self.terminal_batch_sample: dict | None = None
-        self.terminal_stage_sample: dict | None = None
         self.prefill_tok_s_mean = None
         self.progress = None             # (read, total) prompt tokens while a prompt is read, from PP lines
         self.progress_ms = 0             # PP's own milliseconds since the prompt started (its third field)
@@ -1049,7 +950,6 @@ class StrataEngine:
         # report their own version (INFO engine=, 0.1.8+) win, the manifest stays the fallback for older ones
         if self.info.get("engine"):
             self.info["version"] = str(self.info["engine"])
-        self.terminal_stages = read_engine_stage_log(log, log_start) if log else []
         self.ended = False                              # READY: alive from here (restart() set it True, #344)
         # the engine's stdout on a thread, so a request can wait with a timeout (heartbeats, cancel checks)
         self.lines: queue.Queue = queue.Queue()
@@ -1123,16 +1023,6 @@ class StrataEngine:
                 except OSError:
                     pass
                 break                           # publish EOF, never the trailing DONE
-            if line.startswith("BSTAT"):
-                sample = parse_batch_window_sample(line)
-                if sample is not None and self.proc is proc:
-                    self.terminal_batch_sample = {**sample, "observed_monotonic": time.monotonic()}
-                continue                        # control telemetry never enters a request's token stream
-            if line.startswith("PSTAT"):
-                sample = parse_stage_in_flight_sample(line)
-                if sample is not None and self.proc is proc:
-                    self.terminal_stage_sample = {**sample, "observed_monotonic": time.monotonic()}
-                continue
             if line.startswith(("BT ", "BDONE ")) and slot_q:   # --batch: a batch slot's own lines
                 try:
                     slot_q[int(line.split()[1])].put(line)
@@ -2751,49 +2641,9 @@ def engine_silence_s(cfg: dict) -> float:
     return float(v)
 
 
-def layer_split_value(cfg: dict) -> str:
-    """#644: the config's "layer_split" as the engine's --layer-split value: "auto" (the default), or the FIRST LAYER of
-    each later GPU's share - one rising number per GPU after the first, e.g. "24,36,42" for 4 GPUs (layers 0-23 on the
-    first card, 24-35, 36-41, 42 to the end) - as a string or a JSON list ([24, 36, 42]).  ValueError with the format
-    and an example for anything else, such as per-card layer counts ("24,16,12,12")."""
-    v = cfg.get("layer_split")
-    if v is None or (isinstance(v, str) and v.strip().lower() in ("", "auto")):
-        return "auto"
-    n = len(gpu_list(cfg))
-    items = v if isinstance(v, (list, tuple)) else str(v).split(",") if isinstance(v, (str, int)) else None
-    vals = []
-    for x in items or []:
-        try:
-            if isinstance(x, bool) or isinstance(x, float):
-                raise ValueError
-            vals.append(int(str(x).strip()))
-        except ValueError:
-            vals = None
-            break
-    want = max(n - 1, 1)
-    example = ",".join(str(round(48 * (i + 1) / (want + 1))) for i in range(want))
-    hint = (f'"layer_split" is the first layer of each later GPU, one rising number per GPU after the first '
-            f'({want} for {n} GPUs), not a count of layers per card - e.g. "{example}" (or [{example.replace(",", ", ")}])'
-            f' for an even share of 48 layers, or "auto" (the default) to place them by each card\'s free VRAM')
-    if not vals:
-        raise ValueError(f"{hint}; got {v!r}")
-    if n > 1 and len(vals) != n - 1:
-        raise ValueError(f"{hint}; got {len(vals)} number(s) ({v!r}) for {n} GPUs")
-    if vals[0] < 2 or any(b <= a for a, b in zip(vals, vals[1:])):
-        raise ValueError(f"{hint}; got {v!r}, which does not rise from 2 or more")
-    return ",".join(str(x) for x in vals)
-
-
-def layer_split_of(cfg: dict) -> bool:
-    """Several GPUs in the config are a layer split, unless the args put the later card(s) to another use: with
-    --peer-device the second card is an expert-cache tier, and the engine refuses that beside --layer-split (#665)."""
-    return len(gpu_list(cfg)) > 1 and "--peer-device" not in cfg["args"]
-
-
 def engine_args(cfg: dict) -> list[str]:
-    """The engine's arguments: the config's, and with several GPUs the layer split across them ("layer_split" in the
-    config: "auto" by default, or the first layer of each later GPU's share, e.g. "18" or "16,32"; see
-    layer_split_value)."""
+    """The engine's arguments: the config's, with what its other keys ask for ("vision", "parallel",
+    "expert_profile_save")."""
     args = list(cfg["args"])
     # #1322: a config with a "vision" section but without --vision in its args (written by an older setup run, or edited by
     # hand) advertised images and then refused every picture ("this engine was started without --vision").  The section
@@ -2807,11 +2657,6 @@ def engine_args(cfg: dict) -> list[str]:
             note += " and --vram-reserve-mib 700"
         print(f'[lamina] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
               "--vision to write them)", flush=True)
-    if layer_split_of(cfg) and "--layer-split" not in args:
-        args += ["--layer-split", layer_split_value(cfg)]
-    # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
-    if layer_split_of(cfg) and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
-        args.append("--split-skip-if-fits")
     args += parallel_args(cfg, args)
     return learned_profile_args(cfg, args)
 
@@ -2891,111 +2736,7 @@ def hip_visible(cfg: dict) -> list[int]:
             return [int(str(ordinal).strip())]
         except ValueError:
             pass
-    return ordered_gpus(cfg)
-
-
-def gpu_speed_scores(indices: list[int]) -> dict[int, float] | None:
-    """Multiprocessors x max clock for each NVIDIA card, numbered as nvidia-smi numbers them (the CUDA driver API,
-    which every driver ships: no toolkit needed); None when it cannot say for every one of them."""
-    code = (
-        "import ctypes,sys,os\n"
-        "os.environ['CUDA_DEVICE_ORDER']='PCI_BUS_ID'\n"
-        "lib=ctypes.CDLL('nvcuda.dll' if os.name=='nt' else 'libcuda.so.1')\n"
-        "assert lib.cuInit(0)==0\n"
-        "n=ctypes.c_int()\n"
-        "assert lib.cuDeviceGetCount(ctypes.byref(n))==0\n"
-        "for i in range(n.value):\n"
-        "    d=ctypes.c_int()\n"
-        "    assert lib.cuDeviceGet(ctypes.byref(d),i)==0\n"
-        "    sm=ctypes.c_int(); mhz=ctypes.c_int()\n"
-        "    lib.cuDeviceGetAttribute(ctypes.byref(sm),16,d)\n"
-        "    lib.cuDeviceGetAttribute(ctypes.byref(mhz),13,d)\n"
-        "    print(i,sm.value,mhz.value)\n")
-    try:
-        env = dict(os.environ)
-        env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-        env.pop("CUDA_VISIBLE_DEVICES", None)
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30, env=env)
-        got = {}
-        for line in r.stdout.splitlines():
-            i, sm, khz = (int(x) for x in line.split())
-            got[i] = float(sm) * float(khz)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    return got if all(i in got and got[i] > 0 for i in indices) else None
-
-
-def hip_speed_scores(indices: list[int], root: str = "/sys/class/kfd/kfd/topology/nodes") -> dict[int, float] | None:
-    """AMD on Linux: SIMDs x max engine clock of each card, from the KFD topology (the order setup and the engine use
-    for "gpu" there: the GPU nodes in node order).  None when the files are not there (Windows, no ROCm driver)."""
-    try:
-        nodes = sorted((int(n) for n in os.listdir(root) if n.isdigit()))
-    except OSError:
-        return None
-    cards = []
-    for n in nodes:
-        try:
-            props = dict(line.split() for line in open(os.path.join(root, str(n), "properties")) if len(line.split()) == 2)
-            simd, clk = int(props.get("simd_count", 0)), int(props.get("max_engine_clk_fcompute", 0))
-        except (OSError, ValueError):
-            continue
-        if simd > 0:
-            cards.append(float(simd) * float(clk or 1))
-    got = dict(enumerate(cards))
-    return got if all(i in got for i in indices) else None
-
-
-def gpu_vram_mib(indices: list[int], hip: bool = False) -> dict[int, int] | None:
-    """Total VRAM of each card in MiB (NVML / amdgpu sysfs); None when any of them cannot be read."""
-    try:
-        from serve.telemetry import gpu_reader
-    except ImportError:
-        return None
-    out = {}
-    for i in indices:
-        g = gpu_reader(i, amd=hip)
-        if not g.ok():
-            return None
-        total = g.read().get("mem_total")
-        if total is None:
-            return None
-        out[i] = int(total) >> 20
-    return out
-
-
-def ordered_gpus(cfg: dict, scores=None, vrams=None) -> list[int]:
-    """#1352: the cards of a layer split in the order the engine stages them.  With "layer_split": "auto" (the
-    default) the faster card goes LAST - the last stage runs the head, the draft layer and the verify, and a prompt
-    chunk waits on it (the reporter's 4070 Ti SUPER + 5060 Ti: a 6K prompt took 50 s one way round and 15 s the
-    other); "faster" is multiprocessors x max clock.  Equal cards - scores within 5% - keep the config's order, and
-    so does anything we cannot measure.  "gpu_order": "as_given" keeps the config's order whatever the cards.  A
-    manual "layer_split" ("24") also keeps it: the user placed the layers.  #1576: the reorder is skipped when it
-    would land the last stage on a card with less total VRAM than the one the config put there - that stage's head,
-    draft and verify have a floor the smaller card cannot afford.  scores/vrams: {index: value} (tests); None asks
-    the driver - injected scores without injected vrams means no VRAM check (a test seam is a test seam)."""
-    gl = gpu_list(cfg)
-    if len(gl) < 2 or cfg.get("gpu_order") == "as_given":
-        return gl
-    args = cfg.get("args") or []
-    if "--peer-device" in args or "--layer-split" in args or layer_split_value(cfg) != "auto":
-        return gl
-    hip = cfg.get("backend") == "hip"
-    sc = scores if scores is not None else (hip_speed_scores(gl) if hip else gpu_speed_scores(gl))
-    if not sc or any(i not in sc for i in gl):
-        return gl
-    if max(sc[i] for i in gl) < 1.05 * min(sc[i] for i in gl):
-        return gl     # #1760: cards within 5% of each other are the same card (two 5070 Ti read 1.2% apart on the clock): keep the order
-    out = sorted(gl, key=lambda i: sc[i])
-    if out != gl:
-        vram = vrams if vrams is not None else (None if scores is not None else gpu_vram_mib(gl, hip))
-        if vram is not None and all(i in vram for i in gl) and vram[out[-1]] < vram[gl[-1]]:
-            print(f"[lamina] layer split: keeping card order {','.join(map(str, gl))} - the faster card has "
-                  f"less VRAM than the one the split ends on ({vram[out[-1]]} vs {vram[gl[-1]]} MiB, #1576)",
-                  flush=True)
-            return gl
-        print(f"[lamina] layer split: card order {','.join(map(str, out))} (the faster card last; "
-              f'"gpu_order": "as_given" keeps {",".join(map(str, gl))}, #1352)', flush=True)
-    return out
+    return gpu_list(cfg)
 
 
 def child_env(cfg: dict, *, offline: bool = False) -> dict:
@@ -3006,7 +2747,7 @@ def child_env(cfg: dict, *, offline: bool = False) -> dict:
         env["HIP_VISIBLE_DEVICES"] = ",".join(str(i) for i in hip_visible(cfg))
     elif gpu_list(cfg):                              # issue #51: the GPU(s) to run on, numbered as nvidia-smi does; CUDA's
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"      # own default order (fastest first) can number the cards otherwise
-        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in ordered_gpus(cfg))
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in gpu_list(cfg))
     for k, v in (cfg.get("env") or {}).items():      # engine settings the config carries (AMD: the GEMM tuning table)
         env[str(k)] = str(v)
     # Strict offline reaches children through the environment, because a tool subprocess or a model
@@ -3251,10 +2992,8 @@ class Service:
         # "parallel" (the engine's batch slots): every running request's own status and rate window; self.status
         # then says busy while any runs and shows the newest one
         self.live_reqs: dict[int, tuple[dict, collections.deque]] = {}
-        # Privacy-safe correlation for terminal telemetry. No prompts, client identity or tool text is stored.
+        # the requests queued or running, by id (no prompt, client or tool text): a disconnect counts against them
         self.terminal_requests: dict[str, dict] = {}
-        self.terminal_events = collections.deque(maxlen=128)  # fixed-shape request transitions only
-        self.terminal_event_seq = 0
         # HTTP admission is reserved before generation or SSE headers. This bounds pending inference calls even
         # while a model is loading or a request is between MCP rounds; the engine's own slots remain unchanged.
         self.max_queue: int | None = None
@@ -3325,20 +3064,6 @@ class Service:
         if self.max_queue is None:
             return None
         return max(1, int(getattr(self.engine, "batch", 0) or 0)) + self.max_queue
-
-    def _terminal_event_locked(self, request_id: str, event: str, outcome: str | None = None) -> None:
-        """Append one redacted transition while holding status_lock; never include request content."""
-        if event not in ("queued", "admitted", "reading", "first_token", "finished", "cancelled",
-                         "disconnected", "timeout", "error"):
-            return
-        if outcome is not None and outcome not in ("stop", "length", "cancel", "disconnect", "timeout", "error"):
-            outcome = "error"
-        self.terminal_event_seq += 1
-        row = {"seq": self.terminal_event_seq, "at": time.time(),
-               "request_id": request_id, "event": event}
-        if outcome is not None:
-            row["outcome"] = outcome
-        self.terminal_events.append(row)
 
     def reserve_inference(self) -> bool | None:
         """Reserve one bounded HTTP inference call before response headers are written."""
@@ -3871,7 +3596,7 @@ class Service:
         def scaled(v, unit, digits=0):
             return round(v / unit, digits) if isinstance(v, (int, float)) else None
 
-        busy, ctx = bool(s.get("busy")), self.reported_ctx()
+        ctx = self.reported_ctx()
         images = self.vision is not None
         return {
             "service": "lamina", "model": self.model,
@@ -4358,7 +4083,6 @@ class Service:
                 row = self.terminal_requests.get(request_id)
                 if row is not None and row["state"] != "reading":
                     row["state"] = "reading"
-                    self._terminal_event_locked(request_id, "reading")
         setattr(cancel, "_strata_queue_started", queue_started)
         def replica_selected(index: int) -> None:
             with self.status_lock:
@@ -4371,7 +4095,6 @@ class Service:
             self.terminal_requests[request_id] = {"id": request_id, "state": "queued",
                                                     "queued_at": time.time(), "admitted_at": None,
                                                     "prompt_tokens": len(ids)}
-            self._terminal_event_locked(request_id, "queued")
         queued_counted = True
         try:
             # --batch: the engine runs several requests at once (StrataEngine.generate_batched orders them)
@@ -4408,7 +4131,6 @@ class Service:
                             self.status["queued"] -= 1
                             queued_counted = False
                             self.terminal_requests[request_id].update(state="admitted", admitted_at=time.time())
-                            self._terminal_event_locked(request_id, "admitted")
                     # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
                     # (parallel requests do not hold the fifo: one of them starts it, the others wait for that).
                     # #1603: a parallel request stays counted as queued until it is registered as running below -
@@ -4424,7 +4146,6 @@ class Service:
                             self.status["queued"] -= 1
                             queued_counted = False
                             self.terminal_requests[request_id].update(state="waiting", admitted_at=time.time())
-                            self._terminal_event_locked(request_id, "admitted")
                         st.update(busy=True, phase="reading the prompt", prompt_tokens=len(ids),
                                   generated=0, started=time.time(), first_token=None, tool=None, tail="",
                                   max_tokens=max_new, reasoning_recoveries=0, thinking_budget=budget)
@@ -4467,7 +4188,6 @@ class Service:
                                         row = self.terminal_requests.get(request_id)
                                         if row is not None:
                                             row["first_engine_token_s"] = first_engine_token_s
-                                            self._terminal_event_locked(request_id, "first_token")
                                 if trace is not None and trace["first_token_s"] is None:
                                     with self.status_lock:
                                         trace["first_token_s"] = round(time.perf_counter() - trace["_clock"], 3)
@@ -4800,9 +4520,6 @@ class Service:
                 if queued_counted:
                     self.status["queued"] -= 1
                 self.terminal_requests.pop(request_id, None)
-                event = {"stop": "finished", "length": "finished", "cancel": "cancelled",
-                         "disconnect": "disconnected", "timeout": "timeout", "error": "error"}.get(finish, "error")
-                self._terminal_event_locked(request_id, event, finish)
             if emb:
                 Path(emb).unlink(missing_ok=True)
         for ev in cut(parser.finish(finish)):
@@ -7089,11 +6806,9 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                     help="maximum inference calls waiting beyond effective engine slots; 0 refuses overload")
     ap.add_argument("--queue-timeout", type=float, default=None,
                     help="maximum seconds waiting for the first engine turn (0.1..600; off by default)")
-    ap.add_argument("--batch-telemetry", action=argparse.BooleanOptionalAction, default=None,
-                    help="opt in to low-rate engine decode-window samples for /v1/telemetry")
     ap.add_argument("--offline", action="store_true",
                     help="do not fetch remote image URLs or start MCP/tool subprocesses")
-    ap.add_argument("--gpu", help="the GPU to run on, as nvidia-smi numbers them, or several for a layer split "
+    ap.add_argument("--gpu", help="the GPU to run on, as nvidia-smi numbers them, or several for replicas "
                                   "(\"0,2\"; also \"gpu\" in the config)")
     ap.add_argument("--tokenizer", default=str(ROOT / "pack/full/tokenizer"),
                     help="pack tokenizer directory (falls back to a byte tokenizer if absent)")
@@ -7165,8 +6880,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             ap.error("owned server needs a private launch attestation key")
         launch_attestation = launch_identity.attestation(bytes.fromhex(attestation_key),
                                                           config_bytes, launch_args)
-    if "batch_telemetry" in cfg and type(cfg["batch_telemetry"]) is not bool:
-        ap.error("batch_telemetry must be true or false")
     try:
         ready_path = ready_file.preflight(a.ready_file) if a.ready_file else None
     except ValueError as e:
@@ -7255,7 +6968,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         # The engine's own environment. It carries the offline policy too: an engine that fetched a
         # missing shard or a plugin would break the promise the flag makes.
         env = child_env(cfg, offline=a.offline)
-        configure_batch_telemetry_env(env, cfg, a.batch_telemetry)
         sampling_defaults = sampling_defaults_from_config(cfg)
         if sampling_defaults:
             pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
@@ -7273,15 +6985,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg) if "args" in cfg else [])      # #1080
-        if layer_split_of(cfg):
-            try:
-                split = layer_split_value(cfg)          # #644: before the (minutes-long) start
-            except ValueError as e:
-                raise SystemExit(f"[lamina] config {e}")
-            print(f"[lamina] layer split across GPUs {gpu_list(cfg)} ({split})", flush=True)
-        elif len(gpu_list(cfg)) > 1:
-            print(f"[lamina] GPUs {gpu_list(cfg)}: the later card(s) serve as the peer expert tier (--peer-device)",
-                  flush=True)
         # a relative "exe" is the config's cwd's: Windows' CreateProcess resolves "engine/strata.exe" against nothing
         # it is told about (WinError 2), so it is made absolute here
         exe = cfg["exe"] if os.path.isabs(cfg["exe"]) else os.path.abspath(os.path.join(cfg.get("cwd") or ".", cfg["exe"]))
@@ -7448,12 +7151,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         svc.gpu_indices = [c for g in groups for c in g]
         svc.gpu_index = svc.gpu_indices[0]
         svc.replica_gpu_groups = groups
-    svc.terminal_visibility_order = visible_device_order(env, cfg.get("backend")) if a.engine == "lamina" else []
-    svc.terminal_topology_mode = ("replicas (configured)" if a.engine == "lamina" and groups
-                                  else "layer split (configured)" if a.engine == "lamina" and layer_split_of(cfg)
-                                  else "single GPU or CPU" if a.engine == "lamina" else "mock")
-    svc.terminal_configured_split = (layer_split_value(cfg) if a.engine == "lamina" and layer_split_of(cfg)
-                                     else None)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
