@@ -8,10 +8,10 @@
    "pluginName": "Prometheus"
   }
  ],
- "title": "Strata (and vLLM)",
- "uid": "strata-serving",
+ "title": "Lamina (and vLLM)",
+ "uid": "lamina-serving",
  "tags": [
-  "strata",
+  "lamina",
   "vllm",
   "llm"
  ],
@@ -267,7 +267,7 @@
    "id": 5,
    "type": "timeseries",
    "title": "Time between tokens (p50 / p95)",
-   "description": "Strata observes the mean gap of each request (the engine reports its decode time, not each token's).",
+   "description": "Lamina observes the mean gap of each request (the engine reports its decode time, not each token's).",
    "datasource": {
     "type": "prometheus",
     "uid": "${DS_PROMETHEUS}"
@@ -423,7 +423,7 @@
    "id": 8,
    "type": "timeseries",
    "title": "Prompt tokens served from the cache",
-   "description": "Strata: the prompt cache and parked conversations; vLLM: its prefix-cache blocks.",
+   "description": "Lamina: the prompt cache and the conversations kept in RAM; vLLM: its prefix-cache blocks.",
    "datasource": {
     "type": "prometheus",
     "uid": "${DS_PROMETHEUS}"
@@ -606,7 +606,7 @@
   {
    "id": 12,
    "type": "row",
-   "title": "Strata engine (strata: names, after the /metrics JSON keys)",
+   "title": "Lamina engine (lamina: names, after the /metrics JSON keys)",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -638,7 +638,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max by (state) (strata:live_state{model_name=~\"$model\",instance=~\"$instance\"}) > 0",
+     "expr": "max by (state) (lamina:live_state{model_name=~\"$model\",instance=~\"$instance\"}) > 0",
      "legendFormat": "{{state}}"
     }
    ],
@@ -687,7 +687,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum by (state) (strata:live_slots{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "sum by (state) (lamina:live_slots{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "{{state}}"
     }
    ],
@@ -736,7 +736,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(strata:live_tok_s{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max(lamina:live_tok_s{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "decode tok/s"
     },
     {
@@ -745,7 +745,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(strata:live_prefill_tok_s_mean{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max(lamina:live_prefill_tok_s_mean{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "prompt tok/s"
     }
    ],
@@ -791,7 +791,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(strata:last_hit_rate{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max(lamina:last_hit_rate{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "hit rate"
     }
    ],
@@ -837,7 +837,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum(rate(strata:totals_prompt_seconds_total{model_name=~\"$model\",instance=~\"$instance\"}[5m]))",
+     "expr": "sum(rate(lamina:totals_prompt_seconds_total{model_name=~\"$model\",instance=~\"$instance\"}[5m]))",
      "legendFormat": "reading prompts"
     },
     {
@@ -846,7 +846,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "sum(rate(strata:totals_decode_seconds_total{model_name=~\"$model\",instance=~\"$instance\"}[5m]))",
+     "expr": "sum(rate(lamina:totals_decode_seconds_total{model_name=~\"$model\",instance=~\"$instance\"}[5m]))",
      "legendFormat": "decoding"
     }
    ],
@@ -895,7 +895,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max by (gpu) (strata:gpu_util{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max by (gpu) (lamina:gpu_util{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "GPU {{gpu}}"
     }
    ],
@@ -941,7 +941,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max by (gpu) (strata:gpu_mem_used_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max by (gpu) (lamina:gpu_mem_used_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "GPU {{gpu}} used"
     },
     {
@@ -950,7 +950,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max by (gpu) (strata:gpu_mem_total_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max by (gpu) (lamina:gpu_mem_total_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "GPU {{gpu}} total"
     }
    ],
@@ -996,7 +996,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(strata:ram_used_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max(lamina:ram_used_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "used"
     },
     {
@@ -1005,7 +1005,7 @@
       "type": "prometheus",
       "uid": "${DS_PROMETHEUS}"
      },
-     "expr": "max(strata:ram_total_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
+     "expr": "max(lamina:ram_total_bytes{model_name=~\"$model\",instance=~\"$instance\"})",
      "legendFormat": "total"
     }
    ],

@@ -1,122 +1,41 @@
-# Contributing to Strata
+# Contributing to Lamina
 
-**AI assistance is welcome. The contributor is responsible for understanding the change and supplying real evidence.**
+Issues and pull requests are welcome, AI-assisted ones too. Whoever submits a change answers for it: be able to explain
+every line of it, and show what you ran.
 
-These rules apply to issues, pull requests, benchmark reports, and the agents helping prepare them.
-You should be able to explain every changed line and answer review questions about it.
+## Reporting a problem
 
-## Before starting
+Search the [issues](https://github.com/eddoursul/Lamina/issues) first, closed ones too. A report says:
 
-1. Search [issues](https://github.com/Niko1221/Strata/issues) and
-   [pull requests](https://github.com/Niko1221/Strata/pulls), including closed discussions. Add new evidence to an
-   existing thread when it covers your problem.
-2. Read [AGENTS.md](AGENTS.md) and the documentation for the component you want to change.
-3. Get maintainer agreement on scope before substantial features, refactors, architecture changes, or changes to
-   defaults. Describe the user problem, proposed behavior, and tradeoffs in an issue first. Agreement on scope
-   does not guarantee a merge. Focused fixes and benchmark reports can go straight to a PR.
-4. Keep one problem per PR. Update that PR after feedback; do not open competing attempts for the same change.
+- what you did (the request, the command), what you expected and what happened, with the exact error;
+- the commit (`git rev-parse --short HEAD`), the output of `setup --check`, and the config's `args` if you changed them;
+- the engine's log (`lamina-<model>.log`) and the server's output, with keys and private text removed;
+- whether you saw it happen or found it by reading the code (then say so: "not reproduced").
 
-Do not resubmit a declined proposal under a different title or through another agent. If new evidence changes
-the situation, bring it to the original discussion and let a maintainer decide whether to reopen it.
+[TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) has the common problems.
 
-## Report a problem people can investigate
+## Pull requests
 
-Use the matching [issue form](https://github.com/Niko1221/Strata/issues/new/choose). A bug report should include:
+Against `main`, one problem per pull request. Say what it fixes or adds, why this way, and what it does not do; link
+the issue when there is one. For a large change or a new default, open an issue first.
 
-- The smallest steps or command that reproduce the problem, and the expected and actual behavior.
-- Strata version or commit, OS, GPU and VRAM, and relevant model, quantization, and configuration.
-- The exact error and relevant logs, with credentials and private content removed.
-- Whether you reproduced it yourself. Label a finding based only on reading code or a scanner as
-  **unconfirmed static analysis**, and explain the suspected path without presenting it as an observed failure.
+- **The model stays the model.** Lamina computes every routed expert and every row; changes that approximate the model
+  to gain speed (skipping experts, cutting rows) are not taken. Changes that round differently are, with their
+  agreement measured (below).
+- **Options for one kind of hardware are off by default.** A feature that pays on some PCs only (a RAM layout, a pair
+  of GPUs, a link) goes behind an option, measured on the hardware it is for.
+- **The engine's output.** Show what a change does to it. A change meant to keep the arithmetic is checked bitwise:
+  the verify windows' hashes (`--window-hashes`) on a fixed text (`--spec-follow`, the token ids of a continuation;
+  `--adapt-every 0` and a fixed `--expert-cache N`) before and after. A change of rounding is measured against
+  llama.cpp: next-token distributions (`--window-logits`) along llama.cpp's own greedy text, mean KL and argmax
+  agreement, beside the distance between llama.cpp's CPU and CUDA backends ([COMPARISON.md](docs/COMPARISON.md)).
+- **Speed.** Before and after on the same PC and the same fixed text, several runs in both orders, with every changed
+  setting named; the runs themselves, not only the best. Long prompts and long conversations come first: a gain on
+  short texts alone does not decide a default.
+- **Tests.** The engine builds without warnings; the test suite builds with `-DSTRATA_BUILD_TESTS=ON` and runs with
+  `ctest`. The server's and the tools' tests run from the clone's folder:
+  `python -m unittest discover -s serve -p "test_*.py"` and `python -m unittest discover -s tools -p "test_*.py"`.
+- **Docs** describe what is, not what changed: update the ones your change makes wrong.
 
-Do not invent reproduction steps, errors, affected hardware, or severity. If you cannot reproduce something,
-say what you inspected and what would verify the hypothesis. Feature requests should explain a concrete user
-need and the current workaround. Questions should say what you tried and where you got stuck.
-
-Example structure, with placeholders to replace with actual observations:
-
-```text
-Problem: <one observed behavior>
-Environment: <commit, OS, GPU/VRAM, model/quant, relevant settings>
-Reproduce: <exact command or short sequence>
-Expected: <documented or intended behavior>
-Actual: <observed behavior and exact error>
-Evidence: <sanitized log attachment>
-Reproduction status: <reproduced locally OR unconfirmed static analysis>
-```
-
-## Titles
-
-Every issue and pull request title starts with its area in square brackets, then a short description: `[Engine]`, `[GUI]`, `[TUI]`,
-`[Benchmark]`, `[Docs]` or `[Other]`. For example `[Engine] fix decode stop on long prompts` or `[GUI] keep the model list after a tab
-switch`. The issue forms ask for the area and a check on the title fails when the prefix is missing.
-
-## Prepare a focused pull request
-
-Lead with the problem and resulting behavior. Explain why the approach is needed, the important limits, and
-any compatibility effects. Link the issue and scope agreement when applicable. A file-by-file narration or
-an AI-generated summary of the diff is not a substitute for this explanation.
-
-- Keep unrelated formatting, cleanup, dependency changes, and speculative abstractions out of the PR.
-- Add documentation where it changes what a user or developer needs to know. Avoid repeated summaries,
-  speculative roadmaps, and generated documentation with no actionable information.
-- Preserve existing behavior outside the intended change. New features are opt-in; follow the default-path
-  and performance requirements in [AGENTS.md](AGENTS.md).
-- Read the complete diff, including generated files, before submitting. Remove debugging output, secrets,
-  private paths, and accidental files.
-- Prefer a small relevant regression check over tests that only restate the implementation. Documentation-only
-  changes need link, example, and consistency checks; they do not require GPU builds.
-
-## Show the validation you actually performed
-
-List exact commands, the revision and environment tested, and observed outcomes. Keep **passed**, **failed**,
-and **not run** separate. Include relevant output or a log attachment. A command you suggest running is not
-evidence that it passed; a CI run on a different revision is not validation of the submitted code.
-
-Build every backend a code change touches, including CUDA, HIP, and SYCL where applicable, before requesting
-review. For changes that need hardware execution, report that execution separately from compilation. A mock,
-static check, or successful build does not establish hardware correctness. If you lack a required environment,
-keep the PR as a draft, identify the missing checks, and ask for targeted help in the same thread. Do not claim
-compatibility you have not tested.
-
-Performance claims need before/after runs on the same hardware and workload, with every changed setting
-identified. Preserve the individual runs, failures, and variability. Follow the
-[community measurement guide](docs/COMMUNITY_BENCHMARKS.md); standard submissions will use the
-[benchmark protocol](docs/BENCHMARK_PROTOCOL.md) once it is activated. One fast run does not justify changing a
-default or claiming a speedup for other machines.
-
-Example PR body; placeholders are not test results:
-
-```text
-Problem and result: <trigger; behavior before and after the change>
-Related discussion: <issue URL and scope agreement, when required>
-Approach: <why this fix; relevant compatibility effects>
-Validation:
-  Passed: <exact command, revision/environment, observed result, log>
-  Failed: <exact command and failure, or none observed>
-  Not run: <check, reason, and what remains unverified>
-Limits: <known limitations or remaining work>
-```
-
-## Rules for AI-assisted work
-
-Use agents to help investigate, implement, and explain work that you can review. Before submitting, verify
-their claims against the source, actual command output, or a cited primary reference.
-
-Never submit fabricated measurements, invented test results, fake logs, or copied claims you have not checked.
-Do not turn a repository scan into a batch of speculative issues or PRs. Consolidate related findings, establish
-their effect, and submit the useful evidence. Do not present an agent's confidence or another model's approval
-as validation. Keep review replies concise and address the requested change or evidence directly.
-
-Maintainers may request a smaller change, return a PR to draft, or close a submission that lacks evidence,
-duplicates existing work, or ignores agreed scope. A smaller, understandable contribution with honest limits
-is easier to review and maintain.
-
-## Share a benchmark
-
-A results-only PR should contain the human report, raw measurements, sanitized configuration, and supporting
-logs. Keep it separate from engine changes and include poor results and failed requests.
-
-The [current community benchmark guide](docs/COMMUNITY_BENCHMARKS.md) remains available for measurements made
-with today's tools. The [new protocol](docs/BENCHMARK_PROTOCOL.md) defines the draft standard and future approval
-workflow. Its draft status must remain visible: existing reports are not automatically standard or approved.
+Report what you ran as passed, failed or not run, with the commands and the hardware. Never submit measurements,
+logs or test results you did not get yourself.
