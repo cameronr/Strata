@@ -281,8 +281,9 @@ public:
     ArenaExpertSource(const ArenaExpertSource&) = delete;
     ArenaExpertSource& operator=(const ArenaExpertSource&) = delete;
 
-    /// Allocates and loads `<pack_dir>/experts.bin`.  Prints nothing; the caller reports `note()` and the load
-    /// rate, because those are the two numbers that say whether the arena is the one that was asked for.
+    /// Allocates and loads `<pack_dir>/experts.bin`, or set_gguf's shards when there is none (an empty `pack_dir`:
+    /// no pack directory).  Prints nothing; the caller reports `note()` and the load rate, because those are the
+    /// two numbers that say whether the arena is the one that was asked for.
     bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads, std::string& err);
     /// Plan v0.3 P6: a native pack without experts.bin takes its experts from the model's GGUF shards
     /// (strata::gguf_split_paths), found by tensor name.

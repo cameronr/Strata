@@ -222,6 +222,7 @@ uint64_t qsa_kv_elastic_full_bytes() {
     for (const auto& p : g_pools) n += (uint64_t) p->range.chunks() * vmm_granularity();
     return n;
 }
+void qsa_kv_elastic_release() { g_pools.clear(); }
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope, KvFormat kv) {
     const QsaShapes s = qsa_shapes(g);
     const int64_t pages = (max_cells + s.page_size - 1) / s.page_size;
@@ -366,6 +367,11 @@ std::vector<int32_t> tab((size_t) pages);
 for (int64_t i = 0; i < pages; ++i) tab[(size_t) i] = (int32_t) i;
 cudaMemcpy(st.page_table, tab.data(), tab.size() * 4, cudaMemcpyHostToDevice);
 return c.used;
+}
+void qsa_state_free(QsaState& st) {
+    if (st.host_step != nullptr) cudaFreeHost(st.host_step);
+    if (st.host_pos != nullptr) cudaFreeHost(st.host_pos);
+    st.host_step = st.host_pos = nullptr;
 }
 std::vector<KvArray> qsa_kv_arrays(const QsaState& st, const ModelGeometry& g) {
     const uint64_t hd = (uint64_t) g.head_dim;

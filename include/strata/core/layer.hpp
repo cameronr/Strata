@@ -104,6 +104,9 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
                          KvFormat kv = qsa_kv_format());
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
                         const QsaState* share_rope = nullptr, KvFormat kv = qsa_kv_format());
+/// Frees what qsa_state_init took outside `base`: the pinned step and position staging (an elastic state's range goes
+/// with qsa_kv_elastic_release).
+void qsa_state_free(QsaState& st);
 /// Zeroes the pools AND the indexer, so a fresh sequence matches the reference's own `zeros()`.  The KV pool
 /// matters even for cells that are never attended, because `kv_gather` reads whatever the selection names.
 void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream);
@@ -151,6 +154,9 @@ int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>
 /// Physical bytes the elastic pools hold, and what all of them would at the full context.
 uint64_t qsa_kv_elastic_mapped_bytes();
 uint64_t qsa_kv_elastic_full_bytes();
+/// Unmaps and frees every elastic range (the engine's end: no state may use them after; a server starts the engine
+/// again in its process).
+void qsa_kv_elastic_release();
 
 
 

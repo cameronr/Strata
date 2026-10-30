@@ -72,9 +72,87 @@ namespace MMQ = strata::prefill::mmq;
         cudaError_t e_ = (x);                                                                                          \
         if (e_ != cudaSuccess) {                                                                                       \
             std::fprintf(stderr, "strata-q36: %s failed: %s (%s:%d)\n", #x, cudaGetErrorString(e_), __FILE__, __LINE__); \
-            std::exit(1);                                                                                              \
+            throw Fatal{1};                                                                                            \
         }                                                                                                              \
     } while (0)
+
+/// The run's end on an error (CK's, a missing tensor's ...): its message is printed, run() returns `code`.  The engine may
+/// run in the server's process (lamina-server), which an exit would end.
+struct Fatal {
+    int code;
+};
+
+/// What a run allocates, freed when it ends (the server starts the engine again in its process after an unload): device,
+/// pinned and heap memory, streams, events, graphs and cuBLAS handles, each recorded by the helpers below.  One run at a
+/// time per process.
+struct Owned {
+    std::mutex mu;
+    std::vector<void*> dev, pinned, heap;
+    std::vector<cudaStream_t> streams;
+    std::vector<cudaEvent_t> events;
+    std::vector<cudaGraphExec_t> graphs;
+    std::vector<cublasHandle_t> blas;
+    ~Owned() {
+        cudaDeviceSynchronize();
+        for (cudaGraphExec_t g : graphs) cudaGraphExecDestroy(g);
+        for (cublasHandle_t h : blas) cublasDestroy(h);
+        for (cudaEvent_t e : events) cudaEventDestroy(e);
+        for (cudaStream_t st : streams) cudaStreamDestroy(st);
+        for (void* d : dev) cudaFree(d);
+        for (void* h : pinned) cudaFreeHost(h);
+        for (void* h : heap) std::free(h);
+        (void) cudaGetLastError();
+    }
+};
+Owned* g_owned = nullptr;
+template <class V, class T> void own(std::vector<V> Owned::*list, T v) {
+    if (g_owned == nullptr) return;
+    std::lock_guard<std::mutex> lk(g_owned->mu);
+    (g_owned->*list).push_back((V) v);
+}
+template <class T> cudaError_t dmalloc(T** p, size_t n) {
+    const cudaError_t e = cudaMalloc((void**) p, n);
+    if (e == cudaSuccess) own(&Owned::dev, (void*) *p);
+    return e;
+}
+template <class T> cudaError_t hmalloc(T** p, size_t n, unsigned flags) {
+    const cudaError_t e = cudaHostAlloc((void**) p, n, flags);
+    if (e == cudaSuccess) own(&Owned::pinned, (void*) *p);
+    return e;
+}
+cudaError_t dfree(void* p) {
+    if (g_owned != nullptr) {
+        std::lock_guard<std::mutex> lk(g_owned->mu);
+        auto& d = g_owned->dev;
+        d.erase(std::remove(d.begin(), d.end(), p), d.end());
+    }
+    return cudaFree(p);
+}
+cudaError_t stream_new(cudaStream_t* st, unsigned flags) {
+    const cudaError_t e = cudaStreamCreateWithFlags(st, flags);
+    if (e == cudaSuccess) own(&Owned::streams, *st);
+    return e;
+}
+cudaError_t event_new(cudaEvent_t* ev, unsigned flags) {
+    const cudaError_t e = cudaEventCreateWithFlags(ev, flags);
+    if (e == cudaSuccess) own(&Owned::events, *ev);
+    return e;
+}
+cudaError_t graph_new(cudaGraphExec_t* gx, cudaGraph_t graph) {
+    const cudaError_t e = cudaGraphInstantiate(gx, graph, 0);
+    if (e == cudaSuccess) own(&Owned::graphs, *gx);
+    return e;
+}
+cublasStatus_t blas_new(cublasHandle_t* h) {
+    const cublasStatus_t e = cublasCreate(h);
+    if (e == CUBLAS_STATUS_SUCCESS) own(&Owned::blas, *h);
+    return e;
+}
+void* heap_new(size_t n) {
+    void* h = std::malloc(n);
+    if (h != nullptr) own(&Owned::heap, h);
+    return h;
+}
 
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
@@ -939,10 +1017,10 @@ float* upload_f32(const strata::TensorInfo& t, const uint8_t* src) {
         }
     } else {
         std::fprintf(stderr, "strata-q36: %s is %s, expected F32, BF16, F16 or Q8_0\n", t.name.c_str(), t.type_name());
-        std::exit(1);
+        throw Fatal{1};
     }
     float* d = nullptr;
-    CK(cudaMalloc(&d, h.size() * 4));
+    CK(dmalloc(&d, h.size() * 4));
     CK(cudaMemcpy(d, h.data(), h.size() * 4, cudaMemcpyHostToDevice));
     return d;
 }
@@ -972,7 +1050,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         const strata::TensorInfo* t = gm.find(name, &s);
         if (!t) {
             std::fprintf(stderr, "strata-q36: missing %s\n", name.c_str());
-            std::exit(1);
+            throw Fatal{1};
         }
         return t;
     };
@@ -991,11 +1069,11 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         w.n_out = (int) t->shape[1];
         if (!K::native_mmvq_supported(w.type)) {
             std::fprintf(stderr, "strata-q36: %s is %s, which the native MMVQ does not take\n", name.c_str(), t->type_name());
-            std::exit(1);
+            throw Fatal{1};
         }
         const uint64_t nb = strata::tensor_payload_bytes(*t);
         uint8_t* d = nullptr;
-        CK(cudaMalloc(&d, nb));
+        CK(dmalloc(&d, nb));
         CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
         bytes += nb;
         w.d = d;
@@ -1036,7 +1114,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         y.sh_up = mat(L(l, "ffn_up_shexp.weight"));
         y.sh_down = mat(L(l, "ffn_down_shexp.weight"));
         y.sh_gate_inp = f32(L(l, "ffn_gate_inp_shexp.weight"));
-        CK(cudaMalloc(&y.router_ext, (size_t) (g.n_expert + 1) * g.n_embd * 4));
+        CK(dmalloc(&y.router_ext, (size_t) (g.n_expert + 1) * g.n_embd * 4));
         CK(cudaMemcpy(y.router_ext, y.router, (size_t) g.n_expert * g.n_embd * 4, cudaMemcpyDeviceToDevice));
         CK(cudaMemcpy(y.router_ext + (size_t) g.n_expert * g.n_embd, y.sh_gate_inp, (size_t) g.n_embd * 4,
                       cudaMemcpyDeviceToDevice));
@@ -1082,7 +1160,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         m.embd_row = row_bytes(m.embd_type, (int64_t) t->shape[0]);
         const uint64_t nb = strata::tensor_payload_bytes(*t);
         uint8_t* d = nullptr;
-        CK(cudaMalloc(&d, nb));
+        CK(dmalloc(&d, nb));
         CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
         m.embd = d;
         bytes += nb;
@@ -1103,13 +1181,13 @@ void expert_blob(const Layer& L, int64_t e, uint8_t* dst) {
 // ------------------------------------------------------------------------------------------------ the engine
 float* dalloc(size_t n) {
     float* p = nullptr;
-    CK(cudaMalloc(&p, n * 4));
+    CK(dmalloc(&p, n * 4));
     CK(cudaMemset(p, 0, n * 4));
     return p;
 }
 template <class T> T* dalloc_t(size_t n) {
     T* p = nullptr;
-    CK(cudaMalloc(&p, n * sizeof(T)));
+    CK(dmalloc(&p, n * sizeof(T)));
     CK(cudaMemset(p, 0, n * sizeof(T)));
     return p;
 }
@@ -1324,7 +1402,7 @@ struct Engine {
         const auto& g = m->g;
         const size_t T = (size_t) tmax, N = (size_t) g.n_embd, Kp = (size_t) m->top_k, FF = (size_t) g.n_ff;
         const size_t C = (size_t) g.ssm_conv_channels;
-        CK(cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking));
+        CK(stream_new(&st, cudaStreamNonBlocking));
         x = dalloc(T * N); h = dalloc(T * N); y = dalloc(T * N); hmain = dalloc(T * N);
         qkv = dalloc(T * C); hc = dalloc(T * C); z = dalloc(T * g.ssm_value_dim);
         alpha = dalloc(T * g.ssm_v_heads); beta = dalloc(T * g.ssm_v_heads); gdn_y = dalloc(T * g.ssm_value_dim);
@@ -1336,12 +1414,12 @@ struct Engine {
         sg = dalloc(T * g.n_ff_shexp); su = dalloc(T * g.n_ff_shexp); shh = dalloc(T * g.n_ff_shexp); sy = dalloc(T * N);
         sgate = dalloc(T); ewts = dalloc(T * Kp); logits = dalloc((size_t) kVerify * g.n_vocab);
         const int max_in = (int) std::max<int64_t>({2 * g.n_embd, g.ssm_value_dim, g.n_head * g.head_dim, g.n_ff_shexp});
-        CK(cudaMalloc(&q8, K::native_q8_1_bytes(max_in, 1) * T));
-        CK(cudaMalloc(&xq, K::native_q8_1_bytes((int) N, 1) * T));
+        CK(dmalloc(&q8, K::native_q8_1_bytes(max_in, 1) * T));
+        CK(dmalloc(&xq, K::native_q8_1_bytes((int) N, 1) * T));
         x16 = dalloc_t<__half>(T * (size_t) max_in);
-        if (cublasCreate(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
+        if (blas_new(&blas) != CUBLAS_STATUS_SUCCESS || cublasSetStream(blas, st) != CUBLAS_STATUS_SUCCESS) {
             std::fprintf(stderr, "strata-q36: cuBLAS handle failed\n");
-            std::exit(1);
+            throw Fatal{1};
         }
         att_s = dalloc(kAttScoreFloats);
         sk_part = dalloc((size_t) kSplitK * T * (g.n_expert + 1));
@@ -1367,8 +1445,8 @@ struct Engine {
             rinv = dalloc_t<int32_t>((size_t) ne);
             CK(cudaDeviceSynchronize());   // ident's cudaMemset (legacy stream) before the iota on the non-blocking stream
             MMQ::iota(ident, ne, st);
-            CK(cudaMalloc(&mq_x, MMQ::q8_bytes(ne, g.n_embd)));
-            CK(cudaMalloc(&mq_hq, MMQ::q8_bytes(ne, g.n_ff)));
+            CK(dmalloc(&mq_x, MMQ::q8_bytes(ne, g.n_embd)));
+            CK(dmalloc(&mq_hq, MMQ::q8_bytes(ne, g.n_ff)));
             mq_gu = dalloc((size_t) ne * 2 * FF);
             mq_h = dalloc((size_t) ne * FF);
         }
@@ -1387,15 +1465,15 @@ struct Engine {
             }
             if (!gemm.init(st, gerr)) {
                 std::fprintf(stderr, "strata-q36: prompt GEMM: %s\n", gerr.c_str());
-                std::exit(1);
+                throw Fatal{1};
             }
             constexpr size_t kGemmWs = 32u << 20;   // the cuBLAS workspace, as the Flash-Next prompt path's
             uint16_t* gscr = dalloc_t<uint16_t>((size_t) big);
             void* gws = nullptr;
-            CK(cudaMalloc(&gws, kGemmWs));
+            CK(dmalloc(&gws, kGemmWs));
             gemm.set_buffers(gscr, big, gws, kGemmWs);
         }
-        CK(cudaMalloc(&escr, K::native_expert_scratch_bytes((int64_t) (T * Kp), (int64_t) FF)));
+        CK(dmalloc(&escr, K::native_expert_scratch_bytes((int64_t) (T * Kp), (int64_t) FF)));
         ids = dalloc_t<int32_t>(T * Kp);
         grp_ptr = dalloc_t<unsigned long long>(std::min<size_t>(T * Kp, (size_t) g.n_expert) + 1);
         grp_start = dalloc_t<int32_t>(std::min<size_t>(T * Kp, (size_t) g.n_expert) + 1);
@@ -1407,7 +1485,7 @@ struct Engine {
         pick = dalloc_t<int32_t>(kVerify);
         amv = dalloc((size_t) kArgBlocks * kVerify);
         ami = dalloc_t<int32_t>((size_t) kArgBlocks * kVerify);
-        CK(cudaHostAlloc((void**) &hpin, 64 * sizeof(int32_t), cudaHostAllocDefault));
+        CK(hmalloc((void**) &hpin, 64 * sizeof(int32_t), cudaHostAllocDefault));
         n_chunk = (ctx + kChunkCells - 1) / kChunkCells;
         att_rows = (int) (g.n_head * std::min<int64_t>((int64_t) T, 64));   // 64 query tokens per attention batch
         pacc = dalloc((size_t) att_rows * n_chunk * g.head_dim);
@@ -1449,7 +1527,7 @@ struct Engine {
                 std::fprintf(stderr, "strata-q36: not enough VRAM for %d slots at a context of %d (%.2f GiB each, %.2f GiB "
                              "free): use fewer slots (\"parallel\" / --batch) or a shorter --max-context\n", n_sess, ctx,
                              (double) per / (1 << 30), (double) fr0 / (1 << 30));
-                std::exit(1);
+                throw Fatal{1};
             }
         }
         for (Sess& ss : sess) alloc_session(ss);
@@ -1466,7 +1544,7 @@ struct Engine {
             const std::pair<float***, std::vector<float*>*> tabs[4] = {{&d_conv_tab, &hcs}, {&d_S_tab, &hs},
                                                                           {&d_kc_tab, &hk}, {&d_vc_tab, &hv}};
             for (const auto& tb : tabs) {
-                CK(cudaMalloc((void**) tb.first, tb.second->size() * sizeof(float*)));
+                CK(dmalloc((void**) tb.first, tb.second->size() * sizeof(float*)));
                 CK(cudaMemcpy((void*) *tb.first, tb.second->data(), tb.second->size() * sizeof(float*),
                               cudaMemcpyHostToDevice));
             }
@@ -1476,12 +1554,12 @@ struct Engine {
             d_gslot = dalloc_t<int32_t>(kVerify);
             d_grow0 = dalloc_t<int32_t>(kVerify);
             d_gcnt = dalloc_t<int32_t>(kVerify);
-            CK(cudaHostAlloc((void**) &hrow, 128 * sizeof(int32_t), cudaHostAllocDefault));
+            CK(hmalloc((void**) &hrow, 128 * sizeof(int32_t), cudaHostAllocDefault));
         }
         if (vision) {
             d_mtab = dalloc_t<int32_t>((size_t) ctx * 3);
             d_map = dalloc_t<int32_t>(T);
-            CK(cudaHostAlloc((void**) &h_map, T * sizeof(int32_t), cudaHostAllocDefault));
+            CK(hmalloc((void**) &h_map, T * sizeof(int32_t), cudaHostAllocDefault));
         }
         d_delta = dalloc_t<int32_t>(1);
         cur = 0;
@@ -1539,7 +1617,7 @@ struct Engine {
         if (cublasSgemm(blas, CUBLAS_OP_T, CUBLAS_OP_N, n_out, T, n_in, &one, W, n_in, xin, n_in, &zero, out, n_out) !=
             CUBLAS_STATUS_SUCCESS) {
             std::fprintf(stderr, "strata-q36: cublasSgemm failed\n");
-            std::exit(1);
+            throw Fatal{1};
         }
     }
 
@@ -1594,7 +1672,7 @@ struct Engine {
         switch (T) { Q36_Q8(1) Q36_Q8(2) Q36_Q8(3) Q36_Q8(4) Q36_Q8(5) Q36_Q8(6) Q36_Q8(7) Q36_Q8(8) }
 #undef Q36_Q8
         if (verify_k) {
-            if (!vbuf) CK(cudaMalloc((void**) &vbuf, (size_t) 8 * 16384 * 4));
+            if (!vbuf) CK(dmalloc((void**) &vbuf, (size_t) 8 * 16384 * 4));
             const size_t qb = K::native_q8_1_bytes(w.n_in, 1);
             for (int c0 = 0; c0 < T; c0 += 8) {
                 const int nc = std::min(8, T - c0);
@@ -1613,7 +1691,7 @@ struct Engine {
     void verify_q8(const char* what, const float* hsrc, int T, const std::string& tag) {
         const int N = (int) m->g.n_embd;
         const size_t qb = K::native_q8_1_bytes(N, 1);
-        if (!vq) CK(cudaMalloc(&vq, qb * 8));
+        if (!vq) CK(dmalloc(&vq, qb * 8));
         K::native_quantize_q8_1(hsrc, vq, N * T, 1, st);
         const long long before = v_bad;
         verify_cmp(what, (const float*) xq, (const float*) vq, qb * (size_t) T / 4, tag);
@@ -1657,8 +1735,8 @@ struct Engine {
         if (fast_k && T <= kGemmT) {
             if (verify_k) {
                 if (!vx_) {
-                    CK(cudaMalloc((void**) &vx_, (size_t) 8 * 2048 * 4));
-                    CK(cudaMalloc((void**) &vh_, (size_t) 8 * 2048 * 4));
+                    CK(dmalloc((void**) &vx_, (size_t) 8 * 2048 * 4));
+                    CK(dmalloc((void**) &vh_, (size_t) 8 * 2048 * 4));
                 }
                 CK(cudaMemcpyAsync(vx_, x, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, st));
                 k_add_rms<<<T, kThreads, 0, st>>>(vx_, y, L.post_norm, vh_, N, m->eps);
@@ -1700,8 +1778,8 @@ struct Engine {
         switch (T) { Q36_SH(1) Q36_SH(2) Q36_SH(3) Q36_SH(4) }
 #undef Q36_SH
         if (verify_k) {
-            if (!vbuf) CK(cudaMalloc((void**) &vbuf, (size_t) 8 * 16384 * 4));
-            if (!vq) CK(cudaMalloc(&vq, K::native_q8_1_bytes((int) m->g.n_embd, 1) * 8));
+            if (!vbuf) CK(dmalloc((void**) &vbuf, (size_t) 8 * 16384 * 4));
+            if (!vq) CK(dmalloc(&vq, K::native_q8_1_bytes((int) m->g.n_embd, 1) * 8));
             float* vg = vbuf;
             float* vu = vbuf + (size_t) 8 * FS;
             mmq_ref(a, xq, vg, T);
@@ -1732,7 +1810,7 @@ struct Engine {
     }
     /// VERIFY: the old grouping of the current `ids` into scratch, compared with grp_ptr / grp_start / n_groups / ent_dst / ent_tok.
     void group_verify(const Layer& L, const int32_t* slot_of, int T) {
-        if (!vgrp) CK(cudaMalloc((void**) &vgrp, 2048));
+        if (!vgrp) CK(dmalloc((void**) &vgrp, 2048));
         unsigned long long* o_ptr = (unsigned long long*) vgrp;
         int32_t* o_start = (int32_t*) (o_ptr + 65);
         int32_t* o_ng = o_start + 66;
@@ -1783,7 +1861,7 @@ struct Engine {
         grouped_by_route = true;
         if (verify_k) {
             // the old top-k into scratch, the ids / weights compared, then the old grouping of the new ids
-            if (!vbuf) CK(cudaMalloc((void**) &vbuf, (size_t) 8 * 16384 * 4));
+            if (!vbuf) CK(dmalloc((void**) &vbuf, (size_t) 8 * 16384 * 4));
             int32_t* vid = (int32_t*) (vbuf + 8 * 8192);
             float* vw = vbuf + 8 * 8192 + 64;
             K::native_router_topk(logits_r, vid, vw, 256, Kp, T, st);
@@ -1820,8 +1898,8 @@ struct Engine {
         const bool small = fast_k && T <= 8 && N <= 2048 && N % 256 == 0 && Kp <= 15;
         if (small && verify_k) {
             if (!vx_) {
-                CK(cudaMalloc((void**) &vx_, (size_t) 8 * 2048 * 4));
-                CK(cudaMalloc((void**) &vh_, (size_t) 8 * 2048 * 4));
+                CK(dmalloc((void**) &vx_, (size_t) 8 * 2048 * 4));
+                CK(dmalloc((void**) &vh_, (size_t) 8 * 2048 * 4));
             }
             CK(cudaMemcpyAsync(vx_, x, (size_t) T * N * 4, cudaMemcpyDeviceToDevice, st));
             k_moe_out<<<T, kThreads, 0, st>>>(vx_, eparts, prow, ewts, Kp, shared, sgate_in, sgs, wn, vh_, N, m->eps);
@@ -1941,7 +2019,7 @@ struct Engine {
                                                        (long long) nt * ldp, G, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT) !=
                             CUBLAS_STATUS_SUCCESS) {
                             std::fprintf(stderr, "strata-q36: attention scores GEMM failed\n");
-                            std::exit(1);
+                            throw Fatal{1};
                         }
                     }
                     k_attn_softmax16<<<dim3(nt, H), kThreads, 0, st>>>(att_s, att_p16, ldp, nt, P, (int) p0 + t0,
@@ -1955,7 +2033,7 @@ struct Engine {
                                                        H * HD, HD, G, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT) !=
                             CUBLAS_STATUS_SUCCESS) {
                             std::fprintf(stderr, "strata-q36: attention values GEMM failed\n");
-                            std::exit(1);
+                            throw Fatal{1};
                         }
                     }
                 }
@@ -2178,7 +2256,7 @@ struct Engine {
     const uint8_t* stream_take(int li) {
         if (stream_pos >= (int) stream_seq.size() || stream_seq[(size_t) stream_pos] != li) {
             std::fprintf(stderr, "strata-q36: the expert stream is out of step (layer %d)\n", li);
-            std::exit(1);
+            throw Fatal{1};
         }
         const int b = stream_pos % 2;
         CK(cudaStreamWaitEvent(st, ev_copy[b], 0));
@@ -2318,8 +2396,8 @@ struct Engine {
 
     void shrink_att(size_t floats) {
         CK(cudaDeviceSynchronize());
-        CK(cudaFree(att_s));
-        CK(cudaFree(att_p16));
+        CK(dfree(att_s));
+        CK(dfree(att_p16));
         kAttScoreFloats = floats;
         att_s = dalloc(kAttScoreFloats);
         att_p16 = dalloc_t<__half>(kAttScoreFloats);
@@ -2333,7 +2411,7 @@ struct Engine {
             CK(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal));
             body();
             CK(cudaStreamEndCapture(st, &graph));
-            CK(cudaGraphInstantiate(&gx, graph, 0));
+            CK(graph_new(&gx, graph));
             CK(cudaGraphDestroy(graph));
         }
         CK(cudaGraphLaunch(gx, st));
@@ -2349,8 +2427,8 @@ struct Engine {
         const size_t need = rows.size();
         if (need > img_cap) {
             CK(cudaDeviceSynchronize());
-            if (d_img) CK(cudaFree(d_img));
-            CK(cudaMalloc((void**) &d_img, need * 4));
+            if (d_img) CK(dfree(d_img));
+            CK(dmalloc((void**) &d_img, need * 4));
             img_cap = need;
         }
         CK(cudaMemcpy(d_img, rows.data(), need * 4, cudaMemcpyHostToDevice));
@@ -2801,7 +2879,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     if (slots <= 0 && total <= budget2 && total + ((size_t) 256 << 20) <= fr) {
         std::vector<uint8_t> blob;
         for (Layer* L : all) {
-            CK(cudaMalloc(&L->blobs, L->stride * (size_t) ne + kMmqTail));
+            CK(dmalloc(&L->blobs, L->stride * (size_t) ne + kMmqTail));
             CK(cudaMemset(L->blobs, 0, L->stride * (size_t) ne + kMmqTail));
             blob.assign(L->L.bytes, 0);
             for (int64_t e = 0; e < ne; ++e) {
@@ -2858,10 +2936,10 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     for (Layer* L : all)
         if (!mtp_only || L == &m.mtp) host += L->stride * (size_t) ne + kMmqTail;
     uint8_t* arena = nullptr;
-    bool pinned = cudaHostAlloc((void**) &arena, host, cudaHostAllocDefault) == cudaSuccess;
+    bool pinned = hmalloc((void**) &arena, host, cudaHostAllocDefault) == cudaSuccess;
     if (!pinned) {
         (void) cudaGetLastError();
-        arena = (uint8_t*) std::malloc(host);
+        arena = (uint8_t*) heap_new(host);
         if (!arena) {
             err = "no host memory for the experts (" + std::to_string(host >> 20) + " MiB)";
             return false;
@@ -2872,7 +2950,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     for (size_t li = 0; li < all.size(); ++li) {
         Layer& L = *all[li];
         if (mtp_only && &L != &m.mtp) {   // a main layer: every expert in VRAM, as in the all-in-VRAM placement
-            CK(cudaMalloc(&L.blobs, L.stride * (size_t) ne + kMmqTail));
+            CK(dmalloc(&L.blobs, L.stride * (size_t) ne + kMmqTail));
             CK(cudaMemset(L.blobs, 0, L.stride * (size_t) ne + kMmqTail));
             std::vector<uint8_t> blob(L.L.bytes, 0);
             for (int64_t e = 0; e < ne; ++e) {
@@ -2888,7 +2966,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         for (int64_t e = 0; e < ne; ++e) expert_blob(L, e, L.hblobs + (size_t) e * L.stride);
         L.n_slots = S;
         if (S > 0) {
-            CK(cudaMalloc(&L.blobs, L.stride * (size_t) S + kMmqTail));
+            CK(dmalloc(&L.blobs, L.stride * (size_t) S + kMmqTail));
             CK(cudaMemset(L.blobs, 0, L.stride * (size_t) S + kMmqTail));
             CK(cudaMemcpy(L.blobs, L.hblobs, L.stride * (size_t) S, cudaMemcpyHostToDevice));
         }
@@ -2900,7 +2978,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             H.exp_in_slot[(size_t) s] = s;
         }
         H.score.assign((size_t) ne, 0.0);
-        CK(cudaMalloc(&H.slot_of_d, (size_t) ne * 4));
+        CK(dmalloc(&H.slot_of_d, (size_t) ne * 4));
         CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), (size_t) ne * 4, cudaMemcpyHostToDevice));
         if (!C::native_fmt(L.L.gu_type, L.L.d_type, g.n_embd, g.n_ff, H.fmt, err)) return false;
         if (H.fmt.up_off != L.L.up_off || H.fmt.down_off != L.L.down_off || H.fmt.bytes != L.L.bytes) {
@@ -2909,22 +2987,22 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         }
     }
     const size_t T = (size_t) E.tmax, N = (size_t) g.n_embd, Kp = (size_t) m.top_k;
-    CK(cudaHostAlloc((void**) &E.h_h, T * N * 4, cudaHostAllocDefault));
-    CK(cudaHostAlloc((void**) &E.cpu_out, T * Kp * N * 4, cudaHostAllocDefault));
-    CK(cudaHostAlloc((void**) &E.h_ids, T * Kp * 4, cudaHostAllocDefault));
-    CK(cudaHostAlloc((void**) &E.h_miss, T * Kp * 4, cudaHostAllocDefault));
-    CK(cudaHostAlloc((void**) &E.h_cnt, all.size() * (size_t) ne * 4, cudaHostAllocDefault));
-    CK(cudaMalloc(&E.ecpu, T * Kp * N * 4));
-    CK(cudaMalloc(&E.d_miss, T * Kp * 4));
-    E.acts = (uint8_t*) std::malloc(T * C::kNativeActBytes + 64);
-    CK(cudaEventCreateWithFlags(&E.ev_route, cudaEventDisableTiming));
+    CK(hmalloc((void**) &E.h_h, T * N * 4, cudaHostAllocDefault));
+    CK(hmalloc((void**) &E.cpu_out, T * Kp * N * 4, cudaHostAllocDefault));
+    CK(hmalloc((void**) &E.h_ids, T * Kp * 4, cudaHostAllocDefault));
+    CK(hmalloc((void**) &E.h_miss, T * Kp * 4, cudaHostAllocDefault));
+    CK(hmalloc((void**) &E.h_cnt, all.size() * (size_t) ne * 4, cudaHostAllocDefault));
+    CK(dmalloc(&E.ecpu, T * Kp * N * 4));
+    CK(dmalloc(&E.d_miss, T * Kp * 4));
+    E.acts = (uint8_t*) heap_new(T * C::kNativeActBytes + 64);
+    CK(event_new(&E.ev_route, cudaEventDisableTiming));
     if (staging) {
-        CK(cudaStreamCreateWithFlags(&E.cst, cudaStreamNonBlocking));
+        CK(stream_new(&E.cst, cudaStreamNonBlocking));
         for (int b = 0; b < 2; ++b) {
-            CK(cudaMalloc(&E.stage[b], max_layer + kMmqTail));
+            CK(dmalloc(&E.stage[b], max_layer + kMmqTail));
             CK(cudaMemset(E.stage[b], 0, max_layer + kMmqTail));
-            CK(cudaEventCreateWithFlags(&E.ev_copy[b], cudaEventDisableTiming));
-            CK(cudaEventCreateWithFlags(&E.ev_used[b], cudaEventDisableTiming));
+            CK(event_new(&E.ev_copy[b], cudaEventDisableTiming));
+            CK(event_new(&E.ev_used[b], cudaEventDisableTiming));
             CK(cudaEventRecord(E.ev_used[b], E.st));
         }
     }
@@ -3652,6 +3730,10 @@ struct Serve {
                 // (a read that has ended)
             } else if (line.rfind("GEN", 0) == 0 || line.rfind("BGEN", 0) == 0) {
                 request(line);
+            } else if (line == "QUIT") {   // as the input's end: the running requests finish (STOP ends them first)
+                std::lock_guard<std::mutex> lk(mu);
+                eof = true;
+                lines.clear();
             } else {
                 serve_print("ERR expected: GEN <max_new> [key=value ...] <id,id,...>\n");
             }
@@ -3667,7 +3749,7 @@ int serve(Engine& E) {
 
 }  // namespace
 
-int strata::qwen35::run(int argc, char** argv) {
+static int run_engine(int argc, char** argv) {
     std::string model, tokens, force, dump_full, emb_file;
     int ctx = 32768, chunk = 0, n_gen = 64, bench_pp = 0, bench_tg = 0, mtp_d = 0, cpu_threads = 0, hybrid_rows = 128;
     double expert_vram = -1.0;
@@ -3677,7 +3759,7 @@ int strata::qwen35::run(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> std::string {
-            if (i + 1 >= argc) { std::fprintf(stderr, "strata-q36: %s needs a value\n", a.c_str()); std::exit(2); }
+            if (i + 1 >= argc) { std::fprintf(stderr, "strata-q36: %s needs a value\n", a.c_str()); throw Fatal{2}; }
             return argv[++i];
         };
         // strata's names where they mean the same thing (the family switch passes strata's command line on)
@@ -3902,4 +3984,21 @@ int strata::qwen35::run(int argc, char** argv) {
                  prompt.size(), pp_ms, prompt.size() / (pp_ms / 1000.0), gen.size(), ms_since(t1),
                  gen.size() / (ms_since(t1) / 1000.0));
     return 0;
+}
+
+int strata::qwen35::run(int argc, char** argv) {
+    // what the run allocates goes when it ends, on an error too (Fatal: its message is printed)
+    Owned owned;
+    g_owned = &owned;
+    struct Unset {
+        ~Unset() { g_owned = nullptr; }
+    } unset;
+    try {
+        return run_engine(argc, argv);
+    } catch (const Fatal& f) {
+        return f.code;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "strata-q36: %s\n", e.what());
+        return 1;
+    }
 }

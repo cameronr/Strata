@@ -44,6 +44,7 @@
 #include "strata/kernels/f16_bits.hpp"
 #include "strata/spec/suffix_drafter.hpp"
 #include "strata/core/native_dense.hpp"
+#include "strata/core/pack_image.hpp"
 #include "strata/platform/console_quit.hpp"
 
 #include <cuda_runtime.h>
@@ -108,7 +109,8 @@ uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ull) 
 }
 
 struct Options {
-    std::string pack = "pack/full";
+    /// --pack: a pack directory tools/iq_pack.py wrote; empty = the pack computed from --native's GGUF at load
+    std::string pack;
     std::vector<int64_t> tokens;      // the prompt, PRE-TOKENIZED
     int64_t max_new = 16;
     int64_t max_context = 4096;
@@ -127,7 +129,8 @@ struct Options {
     bool disable_hit = false;          // every routed expert on the CPU (exact's reference)
     std::string expert_math = "fast";  // the GPU's native expert arithmetic: fast (llama.cpp q8_1) or exact (CPU ggml)
     /// the model's GGUF (its first shard: a split model's others are found by name): the quantized tensors,
-    /// the head, the token embedding and the PLE table come from it, the float tensors from the pack
+    /// the head, the token embedding and the PLE table come from it, the float tensors from the pack (computed
+    /// from it too unless --pack names one)
     std::string native_preset;
     std::vector<std::string> native_dense_gguf;   ///< its shards, and the PLE table's (set from it)
     /// Plan v0.3 P2: how the n-gram table is read. Direct (default) = unbuffered SSD reads, table never in RAM.
@@ -288,9 +291,11 @@ bool number_list(const char* s, std::vector<double>& out) {
 
 void usage() {
     std::fprintf(stderr,
-                 "lamina --native MODEL.gguf --pack DIR --spec T --prefill N --tokens \"1,2,3\" [options]\n"
+                 "lamina --native MODEL.gguf --spec T --prefill N --tokens \"1,2,3\" [options]\n"
                  "\n"
-                 "  --pack DIR           the pack directory (default pack/full)\n"
+                 "  --pack DIR           a pack directory tools/iq_pack.py wrote (index.txt, dense.bin,\n"
+                 "                       native_experts.txt, optionally experts.bin); default: none, the engine\n"
+                 "                       computes the same pack from --native's GGUF at load\n"
                  "  --tokens LIST        the prompt as comma-separated token IDS (required)\n"
                  "  --tokens-file PATH   pretokenized prompt, commas or whitespace (alternative to --tokens)\n"
                  "  --ple-gguf PATH      the PLE table: the model shard holding per_layer_token_embd (with --native,\n"
@@ -310,7 +315,7 @@ void usage() {
                  "  --yarn-attn-factor F  --yarn-beta-fast F  --yarn-beta-slow F  the remaining YaRN knobs\n"
                  "  --native MODEL.gguf  the model's GGUF (its first shard; a split model's others are found by\n"
                  "                       name): the quantized tensors, the head, the embedding and the PLE table\n"
-                 "                       come from it (required)\n"
+                 "                       come from it, and the pack unless --pack names one (required)\n"
                  "  --expert-math M      native packs: how the GPU computes the experts it holds. fast (default):\n"
                  "                       llama.cpp's CUDA q8_1 arithmetic. exact (K-quant files): the CPU pool's ggml\n"
                  "                       arithmetic (Q8_K/Q8_0 activations, ggml's x86 summation order, one expf on\n"
@@ -447,7 +452,8 @@ void usage() {
                  "                       (the expert kernels read the mapped RAM)\n"
                  "  --pool-workers N     the CPU expert pool's workers (default 0: every physical core but the\n"
                  "                       host loop's)\n"
-                 "  --mmap-experts       the experts read through a mapping of the GGUF instead of the RAM arena\n");
+                 "  --mmap-experts       the experts read through a mapping of the pack's experts.bin (--pack;\n"
+                 "                       tools/iq_pack.py --experts-bin) instead of the RAM arena\n");
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -1043,6 +1049,15 @@ int strata::program::run(int argc, char** argv) {
 #if defined(STRATA_HAVE_QWEN35)
     if (const int rc = qwen35_switch(argc, argv); rc != kNotQwen35) return rc;
 #endif
+    // The engine may run in the server's process (lamina-server), which starts it again after an unload: what it holds
+    // outside the objects below (device buffers, the main stream, the image position tables) goes back at every
+    // return, after those objects.
+    struct AtExit {
+        std::vector<std::function<void()>> undo;
+        ~AtExit() {
+            for (auto f = undo.rbegin(); f != undo.rend(); ++f) (*f)();
+        }
+    } at_exit;
     Options o;
     bool have_tokens = false;
     for (int i = 1; i < argc; ++i) {
@@ -1337,21 +1352,52 @@ int strata::program::run(int argc, char** argv) {
         std::fprintf(stderr, "lamina: invalid --expert-cache or --pool-workers\n");
         return 2;
     }
+    if (o.mmap_experts && o.pack.empty()) {
+        std::fprintf(stderr, "lamina: --mmap-experts maps a pack's experts.bin: it needs --pack\n");
+        return 2;
+    }
 
     std::string err;
+    // The pack: --pack's directory (tools/iq_pack.py), or the same pack computed from --native's GGUF here
+    // (core::PackImage: the index and the expert table as the tool writes them, dense.bin's bytes made as the loader
+    // reads them; nothing on disk).  It outlives the weight table, which may read it again (read_bf16_host).
+    strata::core::PackImage pack_image;
+    const bool own_pack = o.pack.empty();
+    if (own_pack) {
+        const Clock::time_point t0 = Clock::now();
+        if (!strata::core::PackImage::build(o.native_preset, pack_image, err)) {
+            std::fprintf(stderr, "lamina: %s\n", err.c_str());
+            return 1;
+        }
+        // the dequantized ones are rounded to the engine's form (UD-Q4_K_XL's Q8_0 projections; GSQ-RCO files have none)
+        size_t converted = 0, dequantized = 0;
+        for (const strata::core::PackImage::Piece& p : pack_image.pieces()) {
+            converted += p.conv != strata::core::PackImage::Conv::Copy;
+            dequantized += p.dequantized();
+        }
+        std::fprintf(stderr, "lamina: %s in %.0f ms: %zu float tensors (dense.bin %.0f MiB; %zu converted to the "
+                             "engine's form, %zu of them dequantized), %zu served from the GGUF\n",
+                     pack_image.where().c_str(), std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                     pack_image.pieces().size(), (double) pack_image.dense_bytes() / 1048576.0, converted, dequantized,
+                     pack_image.served());
+    }
+    const std::string pack_name = own_pack ? pack_image.where() : o.pack;
     // Plan v0.3 P6: where the experts live.  A native pack (tools/iq_pack.py: the IQ2_XS / IQ3_XXS files) keeps
     // every quantized tensor in its GGUF form, so it needs --native (the dense projections, head and embedding
     // come from the model file) and runs its experts in verify windows only (--spec).
     {
         const strata::core::ModelGeometry g0;
-        if (!strata::kernels::cpu::expert_layout_load(o.pack, g0.n_layers, g0.n_expert, err)) {
+        const bool laid = own_pack ? strata::kernels::cpu::expert_layout_load_text(pack_image.native_experts_text(),
+                                                                                   g0.n_layers, g0.n_expert, err)
+                                   : strata::kernels::cpu::expert_layout_load(o.pack, g0.n_layers, g0.n_expert, err);
+        if (!laid) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
     }
     if (!strata::kernels::cpu::expert_layout().native) {
         std::fprintf(stderr, "lamina: %s is not a native pack (tools/iq_pack.py makes one from the GGUF)\n",
-                     o.pack.c_str());
+                     pack_name.c_str());
         return 2;
     }
     for (int64_t l = 0; l < strata::kernels::cpu::expert_layout().n_layers; ++l) {
@@ -1388,9 +1434,9 @@ int strata::program::run(int argc, char** argv) {
             return 1;
         }
         strata::core::set_native_embed(&native_embed);
-        std::fprintf(stderr, "lamina: native pack: %s experts (largest blob %.2f MB), token embedding "
-                             "type %d in mapped host memory (%.0f MiB)\n",
-                     o.pack.c_str(), (double) strata::kernels::cpu::expert_layout().max_blob / 1e6,
+        std::fprintf(stderr, "lamina: %s: the experts' largest blob %.2f MB, token embedding type %d in mapped "
+                             "host memory (%.0f MiB)\n",
+                     pack_name.c_str(), (double) strata::kernels::cpu::expert_layout().max_blob / 1e6,
                      native_embed.type(), (double) native_embed.bytes() / 1048576.0);
     }
     // the tensors served in their GGUF form are not loaded from the pack
@@ -1409,7 +1455,9 @@ int strata::program::run(int argc, char** argv) {
         skip.insert("token_embd.weight");
     }
     uint64_t pool_bytes = 0;
-    if (!strata::core::WeightTable::pool_bytes(o.pack, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
+    const std::set<std::string>* skipped = skip.empty() ? nullptr : &skip;
+    if (!(own_pack ? strata::core::WeightTable::pool_bytes(pack_image, pool_bytes, err, skipped)
+                   : strata::core::WeightTable::pool_bytes(o.pack, pool_bytes, err, skipped))) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
     }
@@ -1419,14 +1467,16 @@ int strata::program::run(int argc, char** argv) {
                      (unsigned long long) pool_bytes);
         return 1;
     }
+    at_exit.undo.push_back([arena] { cudaFree(arena); });
     strata::core::WeightTable wt;
-    if (!wt.load(o.pack, arena, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
+    if (!(own_pack ? wt.load(pack_image, arena, pool_bytes, err, skipped)
+                   : wt.load(o.pack, arena, pool_bytes, err, skipped))) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
     }
     std::fprintf(stderr, "lamina: %llu MiB of weights loaded from %s (%zu canonical tensors skipped: "
                          "served natively)\n",
-                 (unsigned long long) (pool_bytes >> 20), o.pack.c_str(), skip.size());
+                 (unsigned long long) (pool_bytes >> 20), pack_name.c_str(), skip.size());
 
     strata::core::NativeDense native_dense;
     {
@@ -1475,9 +1525,17 @@ int strata::program::run(int argc, char** argv) {
         mrope_host.resize((size_t) cells * 3);
         for (int64_t c = 0; c < cells; ++c)
             mrope_host[(size_t) c * 3] = mrope_host[(size_t) c * 3 + 1] = mrope_host[(size_t) c * 3 + 2] = (int32_t) c;
-        if (cudaMalloc(&d_mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess ||
-            cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
-                cudaSuccess) {
+        if (cudaMalloc(&d_mrope, mrope_host.size() * sizeof(int32_t)) != cudaSuccess) {
+            std::fprintf(stderr, "lamina: cannot allocate the image position table\n");
+            return 1;
+        }
+        at_exit.undo.push_back([d_mrope, dev = o.main_gpu] {
+            cudaSetDevice(dev);
+            strata::kernels::mrope_table_set(nullptr);
+            cudaFree(d_mrope);
+        });
+        if (cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
+            cudaSuccess) {
             std::fprintf(stderr, "lamina: cannot allocate the image position table\n");
             return 1;
         }
@@ -1516,6 +1574,8 @@ int strata::program::run(int argc, char** argv) {
         std::fprintf(stderr, "lamina: session state allocation failed\n");
         return 1;
     }
+    at_exit.undo.push_back([sbuf] { cudaFree(sbuf); });
+    at_exit.undo.push_back([] { strata::core::qsa_kv_elastic_release(); });   // the session's and the drafter's
     // ---- the rope scaling, validated as a whole, then the process constant: session_init builds the rope table from
     // it and the captured graphs bake the rotation kernels' arguments
     {
@@ -1573,12 +1633,18 @@ int strata::program::run(int argc, char** argv) {
         strata::kernels::rope_scaling_set(rope_cfg);
     }
     strata::core::SessionState ss;
+    struct SessionFree {   // what session_init takes outside sbuf, after everything below that uses it
+        strata::core::SessionState& s;
+        const strata::core::ModelGeometry& g;
+        ~SessionFree() { strata::core::session_free(s, g); }
+    } ss_free{ss, g};
     // the engine's own non-blocking stream: on WDDM the legacy default stream costs ~8x a launch
     cudaStream_t main_stream = nullptr;
     if (cudaStreamCreateWithFlags(&main_stream, cudaStreamNonBlocking) != cudaSuccess) {
         std::fprintf(stderr, "lamina: cannot create the main stream\n");
         return 1;
     }
+    at_exit.undo.push_back([main_stream] { cudaStreamDestroy(main_stream); });
     void* const main_cs = (void*) main_stream;
     if (strata::core::session_init(g, o.max_context, K, sbuf, ss) == 0) {
         std::fprintf(stderr, "lamina: session_init failed\n");
@@ -2143,8 +2209,12 @@ int strata::program::run(int argc, char** argv) {
                 host_res[(size_t) (l * g.n_expert + e)] = slot;
                 if (slot != strata::core::kNotResident) ++resident;
             }
-        if (cudaMalloc((void**) &d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess ||
-            res_put(d_res, host_res) != cudaSuccess) {
+        if (cudaMalloc((void**) &d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess) {
+            std::fprintf(stderr, "lamina: the device residency table could not be staged\n");
+            return 1;
+        }
+        at_exit.undo.push_back([d_res] { cudaFree(d_res); });
+        if (res_put(d_res, host_res) != cudaSuccess) {
             std::fprintf(stderr, "lamina: the device residency table could not be staged\n");
             return 1;
         }
@@ -2505,6 +2575,11 @@ int strata::program::run(int argc, char** argv) {
                     strata::kernels::mrope_table_set(t);
                     d_mrope2 = t;
                     mrope2_dev = o.second_gpu;
+                    at_exit.undo.push_back([t, dev = o.second_gpu] {
+                        cudaSetDevice(dev);
+                        strata::kernels::mrope_table_set(nullptr);
+                        cudaFree(t);
+                    });
                 } else {
                     if (got) cudaFree(t);
                     (void) cudaGetLastError();
@@ -3138,12 +3213,13 @@ int strata::program::run(int argc, char** argv) {
             std::fprintf(stderr, "lamina serve: the penalty-history allocation failed\n");
             return 1;
         }
+        at_exit.undo.push_back([d_hist] { cudaFree(d_hist); });
         {
             // what the server's Monitor tab shows
             size_t free_b = 0, total_b = 0;
             cudaMemGetInfo(&free_b, &total_b);
             serve_print("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
-                        "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=0 arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
+                        "mtp_max=%d lookup=%d vram_free_mib=%lld arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
                         "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=custom\n",
                         (long long) o.max_context, o.kv.c_str(), (long long) xcache.slots(),
                         (long long) (xcache.bytes() >> 20), o.spec, o.spec, o.spec_lookup, (long long) (free_b >> 20),
@@ -3216,7 +3292,7 @@ int strata::program::run(int argc, char** argv) {
             // optional keys between max_new and the ids: temperature=F, top_p=F, top_k=N, min_p=F, penalty_last_n=N,
             // penalty_repeat=F, penalty_freq=F, penalty_present=F, seed=N, spec_min_p=F (this request's draft floor),
             // score=ID:ID:... (an `LP` line with those ids' log-probabilities after the prompt, before the first `T`);
-            // unknown keys (cvec, pcie_frac) are skipped.  Absent keys: greedy, no penalties.
+            // unknown keys are skipped.  Absent keys: greedy, no penalties.
             float req_temperature = 0.0f, req_top_p = 1.0f, req_min_p = 0.0f;
             int req_top_k = 20;   // the sampled path keeps 1..64 candidates
             unsigned long long req_seed = 0;
@@ -4343,8 +4419,5 @@ int strata::program::run(int argc, char** argv) {
 
     check_stack_limit(o.main_gpu, o.main_gpu);
     for (const int d : o.tier_gpus) check_stack_limit(d, o.main_gpu);
-
-    cudaFree(sbuf);
-    cudaFree(arena);
     return 0;
 }

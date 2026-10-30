@@ -777,6 +777,10 @@ ArenaExpertSource::~ArenaExpertSource() { close(); }
 bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
                              std::string& err) {
     close();
+    if (pack_dir.empty() && gguf_.empty()) {
+        err = "ArenaExpertSource: no pack directory and no model GGUF to read the experts from";
+        return false;
+    }
     const std::string path = pack_dir + "/experts.bin";
     // plan v0.3 P6: the layout (canonical, or a native pack's per-layer blobs) was loaded by the driver
     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
@@ -805,8 +809,9 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     }
     const uint64_t want = lay.total - vram_only_bytes_;
 
-    // plan v0.3 P6: no experts.bin in a native pack -> the experts come straight from the GGUF
-    const bool from_gguf = !std::ifstream(path, std::ios::binary) && !gguf_.empty();
+    // plan v0.3 P6: no experts.bin in a native pack, or no pack directory at all (the pack computed from the GGUF)
+    // -> the experts come straight from the GGUF
+    const bool from_gguf = (pack_dir.empty() || !std::ifstream(path, std::ios::binary)) && !gguf_.empty();
     // SIZE CHECK BEFORE THE ALLOCATION, not after.  A wrong pack should name the two numbers rather than spend
     // 34 GB and a minute of loading first.
     std::vector<GgufSpan> spans;

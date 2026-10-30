@@ -18,7 +18,8 @@
 //     engine    4.067 GiB dense + 0.444 GiB embd + 10.88 MiB widened scales = 4.522 GiB
 //
 // WHAT THE LOADER DOES NOT DO: it does not know what any tensor MEANS.  It reads a flat index
-// (`<pack>/index.txt`, written by `tools/pack_index.py`), copies each tensor into one arena at a recorded
+// (`<pack>/index.txt`, written by `tools/pack_index.py`, or the same text of a pack in memory: `PackContents`, the
+// pack computed from the GGUF at load), copies each tensor into one arena at a recorded
 // offset - as a list of PLANE SEGMENTS, because a scale plane can change width and the rest cannot - and hands
 // back a name -> WeightRef map.  Geometry, forms and semantics belong to the caller.
 //
@@ -27,6 +28,7 @@
 // logits.  Python wrote the manifest and already parses it correctly.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
@@ -34,6 +36,20 @@
 #include <vector>
 
 namespace strata::core {
+
+/// A pack held in memory instead of a directory: index.txt's text and dense.bin's bytes, made when they are read.
+/// core::PackImage (pack_image.hpp) computes them from the model's GGUF at load; the loader takes them through this
+/// interface, so it needs no GGUF reader.  A pack in memory has dense.bin only (file 0 of the index).
+class PackContents {
+public:
+    virtual ~PackContents() = default;
+    /// index.txt
+    virtual const std::string& index_text() const = 0;
+    /// dense.bin's bytes [offset, offset + n) into `dst`; false with `err` (a read that failed, a value refused)
+    virtual bool read(uint64_t offset, size_t n, void* dst, std::string& err) const = 0;
+    /// The pack, for messages.
+    virtual std::string where() const = 0;
+};
 
 /// What the loader had to DO for a tensor, decided by `tools/pack_index.py` and written into the index
 /// rather than inferred here.  The four cases are distinguishable in the manifest only by combining
@@ -116,12 +132,17 @@ public:
     /// With `skip`, the size of the compacted arena that holds every tensor EXCEPT the named ones.
     static bool pool_bytes(const std::string& pack_dir, uint64_t& out, std::string& err,
                            const std::set<std::string>* skip = nullptr);
+    /// The same for a pack in memory.
+    static bool pool_bytes(const PackContents& pack, uint64_t& out, std::string& err,
+                           const std::set<std::string>* skip = nullptr);
 
     /// The `code_bits` field of one row of `<pack_dir>/index.txt`, readable WITHOUT loading anything (0 = the
     /// pack stores the tensor unquantized, e.g. a --compat-bf16 key; -1 = no such row).  #326: the loader has
     /// to know this before it builds the skip set.
     static bool index_code_bits(const std::string& pack_dir, const std::string& name, int& code_bits,
                                 std::string& err);
+    /// The same for a pack in memory.
+    static bool index_code_bits(const PackContents& pack, const std::string& name, int& code_bits, std::string& err);
 
     /// Load every tensor in `<pack_dir>/index.txt` into `arena_base`.
     ///
@@ -131,9 +152,12 @@ public:
     /// `resident == false`, and the other tensors are packed into the compacted arena `pool_bytes` sized.
     bool load(const std::string& pack_dir, void* arena_base, uint64_t arena_bytes, std::string& err,
               const std::set<std::string>* skip = nullptr);
+    /// The same from a pack in memory, which read_bf16_host reads again: it must outlive the table's use of that.
+    bool load(const PackContents& pack, void* arena_base, uint64_t arena_bytes, std::string& err,
+              const std::set<std::string>* skip = nullptr);
 
-    /// A SKIPPED bf16 tensor's values read back from the pack file (the promoted-f32 and the raw 16-bit forms), for
-    /// the host-side Q8_0 quantizer of STRATA_HC_Q8 (the tensor then has no copy in the arena).
+    /// A SKIPPED bf16 tensor's values read back from the pack `load` read (the promoted-f32 and the raw 16-bit forms),
+    /// for the host-side Q8_0 quantizer of STRATA_HC_Q8 (the tensor then has no copy in the arena).
     bool read_bf16_host(const std::string& name, std::vector<uint16_t>& out, std::string& err) const;
 
     const WeightRef* find(const std::string& name) const;
@@ -145,9 +169,13 @@ public:
 private:
     friend class NativeDense;
     friend class HcQ8;
+    /// `load`'s work for both kinds of pack: `pack_dir`'s files when `pack` is null, else `pack`.
+    bool load_from(const std::string& pack_dir, const PackContents* pack, void* arena_base, uint64_t arena_bytes,
+                   std::string& err, const std::set<std::string>* skip);
     std::map<std::string, WeightRef> table_;
     LoadReport report_;
-    std::string pack_dir_;
+    std::string pack_dir_;                  ///< the directory `load` read, or empty
+    const PackContents* pack_ = nullptr;    ///< else the pack in memory it read
 };
 
 }  // namespace strata::core

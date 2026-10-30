@@ -53,6 +53,8 @@ uint64_t gdn_state_floats(const ModelGeometry& g);
 uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells);
 /// Carves `base` (DEVICE memory) into `s`.  Returns the bytes used.
 uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void* base, SessionState& s);
+/// Frees what session_init took outside `base`: the QSA states and their pinned staging (`base` stays the caller's).
+void session_free(SessionState& s, const ModelGeometry& g);
 /// Zeroes every layer's state - the residual to `R_init`, everything else to zero, so a fresh sequence starts
 /// from the reference's own `zeros()`.
 void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, void* stream);

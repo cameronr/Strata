@@ -88,6 +88,13 @@ uint64_t session_init(const ModelGeometry& g, int64_t max_cells, int64_t k, void
     return used;
 }
 
+void session_free(SessionState& s, const ModelGeometry& g) {
+    if (s.qsa_states == nullptr) return;
+    for (int64_t i = 0; i < g.n_qsa_layers(); ++i) qsa_state_free(s.qsa_states[i]);
+    delete[] s.qsa_states;
+    s.qsa_states = nullptr;
+}
+
 void session_zero(SessionState& s, const ModelGeometry& g, const float* R_init, void* stream) {
     cudaStream_t cs = (cudaStream_t) stream;
     // the residual: `hc` copies of the one vector a caller hands in.  A real sequence's first token is the

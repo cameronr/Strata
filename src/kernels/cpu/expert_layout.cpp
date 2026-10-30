@@ -309,17 +309,14 @@ void native_gu_rows(const NativeFmt&, const uint8_t*, const void* const*, int, f
 void native_down_rows(const NativeFmt&, const uint8_t*, const void* const*, int, float* const*, int, int) { std::abort(); }
 #endif
 
-bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err) {
+namespace {
+/// A native_experts.txt read from `in` into the process-wide layout.
+bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, std::string& err) {
     ExpertLayout L;
     L.n_layers = n_layers;
     L.n_expert = n_expert;
-    std::ifstream in(pack_dir + "/native_experts.txt");
-    if (!in) {
-        L.total = (uint64_t) n_layers * (uint64_t) n_expert * (uint64_t) BLOB;
-        g_layout = L;
-        return true;
-    }
 #if !defined(STRATA_NATIVE_EXPERTS)
+    (void) in;
     err = "this pack has native (IQ) experts but the engine was built without STRATA_NATIVE_EXPERTS";
     return false;
 #else
@@ -415,6 +412,26 @@ bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n
     g_layout = L;
     return true;
 #endif
+}
+}  // namespace
+
+bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err) {
+    std::ifstream in(pack_dir + "/native_experts.txt");
+    if (!in) {
+        ExpertLayout L;
+        L.n_layers = n_layers;
+        L.n_expert = n_expert;
+        L.total = (uint64_t) n_layers * (uint64_t) n_expert * (uint64_t) BLOB;
+        g_layout = L;
+        return true;
+    }
+    return native_layout_load(in, n_layers, n_expert, err);
+}
+
+bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert,
+                             std::string& err) {
+    std::istringstream in(native_experts);
+    return native_layout_load(in, n_layers, n_expert, err);
 }
 
 }  // namespace strata::kernels::cpu
