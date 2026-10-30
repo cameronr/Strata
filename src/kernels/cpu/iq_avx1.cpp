@@ -16,8 +16,8 @@
 // fork's type).  IQ2_XXS/IQ2_XS have no layer in the packs that need this and stay on ggml-cpu's dot.
 //
 // This file is compiled for SSE4.2 + AVX with AVX2/FMA/F16C explicitly off (CMakeLists.txt), and the engine
-// calls it only behind cpu_avx1_ok().  No static constructors at namespace scope (#391): the tables below
-// are constexpr, like iq_avx2.cpp's.
+// calls it only behind cpu_avx1_ok().  No static constructors at namespace scope (#391): its tables
+// (iq_common.inc, iq_avx2.cpp's too) are constexpr.
 #include "strata/kernels/cpu/iq_avx1.hpp"
 
 #include "ggml.h"
@@ -65,9 +65,7 @@ inline float h2f(uint16_t h) {
     return out;
 }
 
-inline uint32_t u32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
-inline uint16_t u16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
-inline uint64_t u64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
+#include "iq_common.inc"
 
 // The sign-vector pattern of iq_avx2.cpp's sgn_vec_at in 128-bit: 16 values from two sign bytes.
 // bits = the two bytes broadcast over the 16 lanes, sel = bit k of each byte per lane, -> 16 bytes of
@@ -80,44 +78,6 @@ inline __m128i sgn16(uint32_t w, int byte_pair) {   // byte_pair 0: bytes 0-1 (v
     return _mm_or_si128(_mm_cmpeq_epi8(_mm_and_si128(bits, sel), sel), _mm_set1_epi8(1));
 }
 
-// keven_signs_q2xs as a constexpr table (iq_avx2.cpp's EvenSigns; byte k = 0xFF when bit k of
-// ksigns_iq2xs[i] is set, 0x01 otherwise).  constexpr, not a runtime constructor (#391).
-struct EvenSigns {
-    uint64_t v[128];
-    constexpr EvenSigns() : v{} {
-        for (int i = 0; i < 128; ++i) {
-            int par = 0;
-            for (int k = 0; k < 7; ++k) par ^= (i >> k) & 1;
-            const int s = i | (par << 7);          // == ksigns_iq2xs[i]
-            uint64_t r = 0;
-            for (int k = 0; k < 8; ++k) r |= (uint64_t) (((s >> k) & 1) ? 0xFF : 0x01) << (8 * k);
-            v[i] = r;
-        }
-    }
-};
-static constexpr EvenSigns even_signs{};
-static_assert(even_signs.v[0] == 0x0101010101010101ull && even_signs.v[1] == 0xFF010101010101FFull,
-              "keven_signs_q2xs: byte k = 0xFF when bit k of ksigns_iq2xs[i] is set");
-
-// The high index bits of a 32-value half spread one per byte (iq_avx2.cpp's HiSpread): punpcklbw puts them
-// next to the low index bytes, so every grid index is a 16-bit load.  IQ3_S: byte k = bit k (the 9th bit of
-// index k).  IQ2_S: byte k = bits 2k,2k+1 (bits 8-9 of index k), k < 4.
-struct HiSpread {
-    uint64_t iq3s[256];
-    uint64_t iq2s[256];
-    constexpr HiSpread() : iq3s{}, iq2s{} {
-        for (int h = 0; h < 256; ++h) {
-            uint64_t r3 = 0, r2 = 0;
-            for (int k = 0; k < 8; ++k) r3 |= (uint64_t) ((h >> k) & 1) << (8 * k);
-            for (int k = 0; k < 4; ++k) r2 |= (uint64_t) ((h >> (2 * k)) & 3) << (8 * k);
-            iq3s[h] = r3;
-            iq2s[h] = r2;
-        }
-    }
-};
-static constexpr HiSpread hi_spread{};
-static_assert(hi_spread.iq3s[0x81] == 0x0100000000000001ull && hi_spread.iq2s[0xE4] == 0x0000000003020100ull,
-              "hi_spread: one high-bit group per index byte");
 
 // The low index bytes interleaved with the spread high bits: eight 16-bit grid indices in one register.
 // (iq_avx2.cpp's grid_indices stores them to memory; on Ivy Bridge that store -> narrow-load round trip
@@ -130,21 +90,6 @@ inline float hsum4(__m128 v) {
     __m128 s = _mm_add_ps(v, _mm_movehl_ps(v, v));
     s = _mm_add_ss(s, _mm_movehdup_ps(s));
     return _mm_cvtss_f32(s);
-}
-
-// E-2 prefetching, the same knob as the AVX-2/512 kernels: STRATA_IQ_PREFETCH is the distance in bytes.
-int prefetch_distance() {
-    static const int d = [] {
-        const char* v = std::getenv("STRATA_IQ_PREFETCH");
-        return v ? std::atoi(v) : 2048;
-    }();
-    return d;
-}
-
-inline void rows_ahead(const uint8_t* blk, int pf) {
-    if (pf <= 0) return;
-    _mm_prefetch((const char*) blk + pf, _MM_HINT_T0);
-    _mm_prefetch((const char*) blk + pf + 64, _MM_HINT_T0);
 }
 
 // ---- per format: one 32-value half (values 64*j + 32*half .. +31) -> grid magnitudes, sign vector and
@@ -268,46 +213,7 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
     for (int t = 0; t < NT; ++t) res[t] = hsum4(accf[t]);
 }
 
-template <int TY, int NT>
-inline void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
-                    float* const* ff, int r0, int r1) {
-    const block_q8_K* y[NT];
-    for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
-    const int nb = n / QK_K;
-    float g[NT], u[NT];
-    for (int r = r0; r < r1; ++r) {
-        row_dot<TY, NT>(blob + (size_t) r * gu_row, nb, y, g);
-        row_dot<TY, NT>(blob + up_off + (size_t) r * gu_row, nb, y, u);
-        for (int t = 0; t < NT; ++t) ff[t][r] = (g[t] / (1.f + std::exp(-g[t]))) * u[t];
-    }
-}
-
-template <int TY, int NT>
-inline void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out,
-                     int r0, int r1) {
-    const block_q8_K* y[NT];
-    for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
-    float res[NT];
-    for (int r = r0; r < r1; ++r) {
-        row_dot<TY, NT>(w + (size_t) r * row_bytes, n / QK_K, y, res);
-        for (int t = 0; t < NT; ++t) out[t][r] = res[t];
-    }
-}
-
-template <int TY>
-void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
-                float* const* ff, int r0, int r1) {
-    switch (nt) {
-        case 1: gu_rows<TY, 1>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 2: gu_rows<TY, 2>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 3: gu_rows<TY, 3>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 4: gu_rows<TY, 4>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 5: gu_rows<TY, 5>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 6: gu_rows<TY, 6>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 7: gu_rows<TY, 7>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        default: gu_rows<TY, 8>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-    }
-}
+#include "iq_rows.inc"
 
 // ---- IQ4_NL (20) down rows against Q8_0: ggml's dot is single-token even where it is vectorized (and
 // scalar here); decode the nibbles once, every token pays a sign, a maddubs, a madd and an fmadd-equivalent.
