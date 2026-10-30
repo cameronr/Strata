@@ -128,13 +128,7 @@ public:
     static bool pool_bytes(const PackContents& pack, uint64_t& out, std::string& err,
                            const std::set<std::string>* skip = nullptr);
 
-    /// The `code_bits` field of one row of the pack's index.txt, readable WITHOUT loading anything (0 = the
-    /// pack stores the tensor unquantized; -1 = no such row).  #326: the loader has to know this before it builds
-    /// the skip set.
-    static bool index_code_bits(const PackContents& pack, const std::string& name, int& code_bits, std::string& err);
-
-    /// Load every tensor in the pack's index.txt into `arena_base`.  The pack is read again by read_bf16_host: it must
-    /// outlive the table's use of that.
+    /// Load every tensor in the pack's index.txt into `arena_base`.
     ///
     /// `arena_bytes` MUST be at least `pool_bytes`; the loader checks rather than trusting the caller,
     /// because the failure mode otherwise is a device write past the end of the arena.
@@ -142,10 +136,6 @@ public:
     /// `resident == false`, and the other tensors are packed into the compacted arena `pool_bytes` sized.
     bool load(const PackContents& pack, void* arena_base, uint64_t arena_bytes, std::string& err,
               const std::set<std::string>* skip = nullptr);
-
-    /// A SKIPPED bf16 tensor's values read back from the pack `load` read (the promoted-f32 and the raw 16-bit forms),
-    /// for the host-side Q8_0 quantizer of STRATA_HC_Q8 (the tensor then has no copy in the arena).
-    bool read_bf16_host(const std::string& name, std::vector<uint16_t>& out, std::string& err) const;
 
     const WeightRef* find(const std::string& name) const;
     const std::map<std::string, WeightRef>& all() const { return table_; }
@@ -158,7 +148,6 @@ private:
     friend class HcQ8;
     std::map<std::string, WeightRef> table_;
     LoadReport report_;
-    const PackContents* pack_ = nullptr;    ///< the pack `load` read
 };
 
 }  // namespace strata::core

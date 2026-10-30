@@ -1391,8 +1391,7 @@ int strata::program::run(int argc, char** argv) {
 
     std::string err;
     // The pack, computed from --native's GGUF here (core::PackImage: the index and the expert table, dense.bin's bytes
-    // made as the loader reads them; nothing on disk).  It outlives the weight table, which may read it again
-    // (read_bf16_host).
+    // made as the loader reads them; nothing on disk).
     strata::core::PackImage pack_image;
     {
         const Clock::time_point t0 = Clock::now();

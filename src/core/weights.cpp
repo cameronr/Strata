@@ -105,63 +105,12 @@ bool pool_from(IndexLines& lines, const std::string& where, uint64_t& out, std::
     return true;
 }
 
-void code_bits_from(IndexLines& lines, const std::string& name, int& code_bits) {
-    char line[1024];
-    code_bits = -1;
-    while (lines.next(line, sizeof line)) {
-        if (line[0] == '#') continue;
-        char row[256] = {0};
-        unsigned long long dummy = 0;
-        long long ne = 0;
-        int i1 = 0, i2 = 0, bits = 0;
-        // the first ten fields of the row `load` parses: name file kind src_off src_bytes dst_off dst_bytes ne0 ne1 code_bits
-        if (std::sscanf(line, "%255s %d %d %llu %llu %llu %llu %lld %lld %d", row, &i1, &i2, &dummy, &dummy, &dummy,
-                        &dummy, &ne, &ne, &bits) != 10)
-            continue;
-        if (name == row) { code_bits = bits; break; }
-    }
-}
-
 }  // namespace
 
 bool WeightTable::pool_bytes(const PackContents& pack, uint64_t& out, std::string& err,
                              const std::set<std::string>* skip) {
     IndexLines lines(pack.index_text());
     return pool_from(lines, pack.where() + "'s index.txt", out, err, skip);
-}
-
-bool WeightTable::index_code_bits(const PackContents& pack, const std::string& name, int& code_bits,
-                                  std::string&) {
-    IndexLines lines(pack.index_text());
-    code_bits_from(lines, name, code_bits);
-    return true;
-}
-
-bool WeightTable::read_bf16_host(const std::string& name, std::vector<uint16_t>& out, std::string& err) const {
-    const auto it = table_.find(name);
-    if (it == table_.end()) { err = name + ": no such tensor"; return false; }
-    const WeightRef& r = it->second;
-    if (pack_ == nullptr || r.file_id != 0 || r.kind != WeightKind::Bf16InF32) {
-        err = name + ": not a bf16 row of the pack's dense.bin";
-        return false;
-    }
-    const uint64_t elems = (uint64_t) r.elements;
-    const bool raw16 = r.src_bytes == elems * 2;
-    if (!raw16 && r.src_bytes != elems * 4) { err = name + ": unexpected source size"; return false; }
-    out.resize((size_t) elems);
-    bool ok = true;
-    if (raw16) {
-        ok = pack_->read(r.src_off, (size_t) (elems * 2), out.data(), err);
-    } else {
-        std::vector<uint32_t> tmp((size_t) std::min<uint64_t>(elems, 1u << 22));
-        for (uint64_t done = 0; ok && done < elems;) {
-            const uint64_t n = std::min<uint64_t>(tmp.size(), elems - done);
-            ok = pack_->read(r.src_off + done * 4, (size_t) (n * 4), tmp.data(), err);
-            for (uint64_t i = 0; ok && i < n; ++i) out[(size_t) (done + i)] = (uint16_t) (tmp[(size_t) i] >> 16);
-            done += n;
-        }
-    }
-    return ok;
 }
 
 bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t arena_bytes, std::string& err,
@@ -252,7 +201,6 @@ bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t aren
     uint8_t* dst_base = (uint8_t*) arena_base;
     table_.clear();
     report_ = LoadReport{};
-    pack_ = &pack;
 
     const double t_read0 = now_ms();
     double upload_ms = 0;
