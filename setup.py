@@ -6,6 +6,7 @@ environment (.venv) and run this file in it. It asks nothing: the flags say what
     setup.bat --model iq3_s               Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S (84 GB of files)
     ./setup.sh --model ud-q4_k_xl         Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL (112 GB)
     setup.bat --model qwen36-ud-q4_k_xl   Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL (23 GB)
+    setup.bat --model qwen38-27b-ud-q6_k_xl   Qwen3.8-27B, unsloth's UD-Q6_K_XL (25 GB; its layers split over the GPUs)
     setup.bat                             the engine only
     setup.bat --check [--model M]         what this PC has and what the model needs; nothing is changed
 
@@ -54,6 +55,7 @@ REPOS = {
     "ista": ("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF", "ed59f92082b1e93c0e96d60a8b11aab089b52f09"),
     "unsloth": ("unsloth/Qwen3.8-Flash-Next-GGUF", "38bb39ee97821de2c9009abb7e93950eec396e66"),
     "qwen36": ("unsloth/Qwen3.6-35B-A3B-MTP-GGUF", "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d"),
+    "qwen38_27b": ("unsloth/Qwen3.8-27B-GGUF", "4ca720788d1e01f1bff70c033e0d0028fd02e502"),
     "draft": ("eddoursul/Lamina-Qwen3.8-Flash-Next-MTP", "362952648189e083ee413b3cdcac53eb5f0d183e"),
 }
 
@@ -89,6 +91,12 @@ QWEN36 = [
 ]
 QWEN36_MMPROJ = File("qwen36", "mmproj-F16.gguf", "models/qwen36-UD-Q4_K_XL/mmproj-F16.gguf",
                      899283584, "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160")
+QWEN38_27B = [
+    File("qwen38_27b", "Qwen3.8-27B-UD-Q6_K_XL.gguf", "models/qwen38-27b-UD-Q6_K_XL/Qwen3.8-27B-UD-Q6_K_XL.gguf",
+         25299061664, "701d8fa9ed214ab21bfc130cd2a7df19ca89bbef7713e2dfb19f3c63696aa917"),
+]
+QWEN38_27B_MMPROJ = File("qwen38_27b", "mmproj-F16.gguf", "models/qwen38-27b-UD-Q6_K_XL/mmproj-F16.gguf",
+                         927607488, "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e")
 # Qwen3.8-Flash-Next's image projector (the same for every quant). The CPU encoder reads it as Q8_0 (tools/mmproj_q8.py).
 FLASH_MMPROJ = File("ista", "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "models/mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
                     907543008, "b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0")
@@ -108,15 +116,18 @@ DRAFT = [
 class Model:
     title: str
     files: list
-    flash_next: bool      # Qwen3.8-Flash-Next: the draft layer too; else Qwen3.6's path
+    flash_next: bool      # Qwen3.8-Flash-Next: the draft layer too; else the Qwen3.6 path
     port: int
     ram_gb: int           # the RAM it takes while running (its experts pinned)
+    mmproj: File | None = None   # the Qwen3.6 path's image projector (Flash-Next's: FLASH_MMPROJ)
+    vram_gb: int = 0      # the VRAM of every GPU together it needs (its layers split over them), 0: one GPU's
 
 
 MODELS = {
     "iq3_s": Model("Qwen3.8-Flash-Next IQ3_S", IQ3_S, True, 8081, 53),
     "ud-q4_k_xl": Model("Qwen3.8-Flash-Next UD-Q4_K_XL", UD_Q4_K_XL, True, 8082, 81),
-    "qwen36-ud-q4_k_xl": Model("Qwen3.6-35B-A3B UD-Q4_K_XL", QWEN36, False, 8083, 22),
+    "qwen36-ud-q4_k_xl": Model("Qwen3.6-35B-A3B UD-Q4_K_XL", QWEN36, False, 8083, 22, QWEN36_MMPROJ),
+    "qwen38-27b-ud-q6_k_xl": Model("Qwen3.8-27B UD-Q6_K_XL", QWEN38_27B, False, 8084, 2, QWEN38_27B_MMPROJ, 36),
 }
 
 
@@ -570,8 +581,8 @@ def prepare(key: str, m: Model, data: Path, vision: bool):
                 ok(f"the image projector: {data / FLASH_MMPROJ_Q8}")
             else:
                 tool("mmproj_q8.py", data / FLASH_MMPROJ.dest, data / FLASH_MMPROJ_Q8)
-    elif vision:
-        fetch(QWEN36_MMPROJ, data)
+    elif vision and m.mmproj:
+        fetch(m.mmproj, data)
 
 
 # ---- the config and the launcher
@@ -651,7 +662,7 @@ def main() -> int:
     ap.add_argument("--main-gpu", help="the GPU the model runs on: its name, UUID or nvidia-smi index (default: the one "
                                        "with the most VRAM that drives no display)")
     ap.add_argument("--context", type=int, help="the context in tokens (default: the example config's)")
-    ap.add_argument("--port", type=int, help="the server's port (default: 8081, 8082, 8083 by model)")
+    ap.add_argument("--port", type=int, help="the server's port (default: 8081 to 8084 by model)")
     ap.add_argument("--check", action="store_true", help="say what this PC has and what the model needs; change nothing")
     ap.add_argument("--update", action="store_true", help="git pull this checkout first")
     ap.add_argument("--no-build", action="store_true", help="use the binaries already built")
@@ -691,9 +702,12 @@ def main() -> int:
                 fail(f"--main-gpu {a.main_gpu}: no such GPU of compute capability 8.0 or newer")
         else:
             main_gpu = pick_main(usable)
-        tiers = len(usable) - 1 if m.flash_next else 0
+        others = len(usable) - 1 if m.flash_next or m.vram_gb else 0
         say(f"\n{m.title} runs on GPU {main_gpu.index}, {main_gpu.name}"
-            + (f", with {tiers} more as expert tiers" if tiers else ""))
+            + (f", with {others} more as {'expert tiers' if m.flash_next else 'stages of a layer split'}" if others else ""))
+        if m.vram_gb and sum(g.mem_mib for g in usable) < m.vram_gb * 1024:
+            warn(f"its layers need ~{m.vram_gb} GB of VRAM over every GPU, and these have "
+                 f"{sum(g.mem_mib for g in usable) / 1024:.0f} GB: a shorter --context, or another GPU")
         files = m.files + (DRAFT if m.flash_next else [])
         need = sum(f.size for f in files)
         missing = sum(f.size for f in files if not (data / f.dest).exists())

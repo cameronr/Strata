@@ -1,7 +1,7 @@
 # Setup
 
 What a PC needs: [the README](../README.md#what-you-need). This page covers what setup does, the config it writes, the
-GPUs, the engine options worth knowing, Qwen3.6-35B-A3B and Docker.
+GPUs, the engine options worth knowing, Qwen3.6-35B-A3B and Qwen3.8-27B, and Docker.
 
 ## Setup
 
@@ -14,7 +14,8 @@ setup.bat --model iq3_s          (Windows)
 
 `setup.bat` and `setup.sh` make a Python environment, `.venv`, install the server's packages and CMake and Ninja into
 it, and run `setup.py` with the same arguments. The models: `iq3_s` (Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S),
-`ud-q4_k_xl` (Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL) and `qwen36-ud-q4_k_xl` (Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL).
+`ud-q4_k_xl` (Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL), `qwen36-ud-q4_k_xl` (Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL)
+and `qwen38-27b-ud-q6_k_xl` (Qwen3.8-27B, unsloth's UD-Q6_K_XL).
 Without `--model`, setup builds the engine only.
 
 | Option | |
@@ -24,7 +25,7 @@ Without `--model`, setup builds the engine only.
 | `--vision on\|off` | pictures (default on; the image encoder runs on the CPU) |
 | `--main-gpu GPU` | the GPU the model runs on (default: the one with the most VRAM that drives no display) |
 | `--context N` | the context in tokens (default: the example config's) |
-| `--port N` | the server's port (default 8081, 8082, 8083 by model) |
+| `--port N` | the server's port (default 8081 to 8084 by model) |
 | `--update` | `git pull` this clone first |
 | `--no-build` | use the binaries already built |
 | `--cuda-archs A` | the CUDA architectures to build for, e.g. `86;120` (default: this PC's GPUs) |
@@ -42,15 +43,15 @@ result is already there is skipped, so setup runs again after an interruption or
 3. The model's files from Hugging Face at pinned revisions, into the data folder, resumed when interrupted and checked
    once by size and SHA-256 (`<file>.sha256` beside each records the check):
    [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF),
-   [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) and
-   [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF). `HF_ENDPOINT` names a
-   mirror.
+   [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF),
+   [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) and
+   [unsloth/Qwen3.8-27B-GGUF](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF). `HF_ENDPOINT` names a mirror.
 4. Their preparation, for Flash-Next only: the MTP draft layer, `mtp/rt-distilled`, from
    [eddoursul/Lamina-Qwen3.8-Flash-Next-MTP](https://huggingface.co/eddoursul/Lamina-Qwen3.8-Flash-Next-MTP); with
    pictures, ISTA-DASLab's image projector converted to Q8_0 (`tools/mmproj_q8.py`), which the CPU encodes ~20% faster.
    Everything else comes from the GGUF files at start: the server reads the tokenizer and the chat template, the engine
    the experts, the projections and the float tensors (put in the forms it takes in memory, in milliseconds).
-   Qwen3.6 with pictures uses the file's own projector.
+   Qwen3.6 and Qwen3.8-27B with pictures use their repositories' projectors (`mmproj-F16.gguf`) as they are.
 5. The config, `lamina-<model>.json`, and its launcher, `run-<model>.bat` (`run-<model>.sh` on Linux), from
    `examples/<model>.json` with this PC's GPUs and data folder. A config written before keeps the keys the example
    lacks (an `api_key`, an `images` section).
@@ -120,17 +121,26 @@ The example configs' options, and the ones that pay on some PCs. `build/lamina -
 The last three are measured on the development PC in [examples/](../examples/README.md); measure them on yours before
 keeping them.
 
-## Qwen3.6-35B-A3B
+## Qwen3.6-35B-A3B and Qwen3.8-27B
 
-The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) on a path of its own (`src/qwen35`): `lamina` switches
-to it from the model file's header, so its config names the file with `--native` like the others. It reads the GGUF as
-it is (no expert profile; the drafts come from the file's own MTP block, `--mtp N` of them), keeps every
-expert that fits in the main GPU's VRAM and computes the rest on the CPU. It uses one GPU.
+The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) and Qwen3.8-27B (`qwen35`, a dense model of the same
+family) on a path of its own (`src/qwen35`): `lamina` switches to it from the model file's header, so their configs
+name the file with `--native` like the others. It reads the GGUF as it is (no expert profile; the drafts come from the
+file's own MTP block, `--mtp N` of them) and keeps K and V in fp16: ~22 KB a cell for Qwen3.6, ~68 KB for the 27B.
 
-Its K and V are kept in fp32, ~45 KB a cell, so the context decides how many experts fit: on a 24 GB GPU every expert at
-8,192 cells, 192 of 256 a layer at the example's 65,536 (`--context` sets another). Not on this path yet: the prompt
-cache's checkpoints (a follow-up turn whose history differs from what the engine holds is read again from the start),
-`/v1/choose` and the GPU tiers.
+On one GPU it keeps every Qwen3.6 expert that fits in its VRAM and computes the rest on the CPU: on a 24 GB GPU 212 of
+256 a layer at the example's 65,536 cells, every one at 8,192 (`--context` sets another). With `--second-gpu` (GPUs
+named as for `--main-gpu`, comma-separated, or `auto`: every other GPU in CUDA's order) it splits the layers instead,
+over the fewest of those GPUs, in order, that hold the whole model: each takes the layers that fit beside their K/V
+and its buffers, the last the rest with the output head and the MTP block, and each pass hands its activations from one
+GPU to the next. Every expert is then in VRAM: on the development PC Qwen3.6 over the RTX 3090 and the RTX 5070 Ti
+(4.7 GiB on the second) generates 1.6-1.7x as fast and reads prompts 1.9-3.3x as fast as on the 3090 alone
+([COMPARISON.md](COMPARISON.md#qwen36-35b-a3b)). `--layer-split N,N,..` sets each GPU's layer count. Qwen3.8-27B needs a
+split where one GPU does not hold it: its example's 98,304 cells take ~36 GB of VRAM (here the 3090 and the 5070 Ti, 46
+and 18 layers), the trained 262,144 ~49 GB (all three GPUs).
+
+Not on this path yet: the prompt cache's checkpoints (a follow-up turn whose history differs from what the engine holds
+is read again from the start), `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU.
 
 ## Docker
 

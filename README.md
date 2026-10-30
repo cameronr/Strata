@@ -2,7 +2,8 @@
 
 Lamina runs [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), a 125-billion-parameter
 mixture-of-experts model, on one PC with NVIDIA GPUs and plenty of RAM, and
-[Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) on one GPU. It serves them through the OpenAI and
+[Qwen3.6-35B-A3B](https://huggingface.co/Qwen/Qwen3.6-35B-A3B) and
+[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) on one GPU or a few. It serves them through the OpenAI and
 Anthropic APIs and its own web app, for chat, coding agents and pictures.
 
 The experts live in RAM and run where it is fastest: the GPUs keep the ones the model uses most and the CPU computes
@@ -19,7 +20,9 @@ own output. Its speeds against llama.cpp and Strata on one PC are in [docs/COMPA
   generations), with a driver for CUDA 13. The model runs on one GPU that nothing else uses: no display, no other
   program. Up to three more GPUs become further expert tiers, and these may drive the display. The engine was developed
   on an RTX 3090 (24 GB), with an RTX 5070 Ti and an RTX 5060 Ti (16 GB each) as tiers. A smaller card holds fewer
-  experts and runs slower.
+  experts and runs slower. Qwen3.6-35B-A3B and Qwen3.8-27B take more GPUs differently: their layers are split over the
+  fewest that hold the whole model. Qwen3.8-27B, a dense model, needs ~36 GB of VRAM at its example's context (98,304
+  tokens): two GPUs or more.
 - **RAM** for the experts, which are pinned while the model runs:
 
   | Model file | RAM taken | Download |
@@ -27,6 +30,7 @@ own output. Its speeds against llama.cpp and Strata on one PC are in [docs/COMPA
   | Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S | ~53 GB | ~86 GB |
   | Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL | ~81 GB | ~114 GB |
   | Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL | ~22 GB | ~24 GB |
+  | Qwen3.8-27B, unsloth's UD-Q6_K_XL | ~2 GB | ~26 GB |
 
 - **An SSD**: Flash-Next reads a 28.8 GB table of per-layer embeddings from the model file at every token.
 - **A 64-bit x86 CPU with AVX2** (AVX-512 is used when it is there). The CPU computes the experts no GPU holds, so its
@@ -45,9 +49,10 @@ setup.bat --model iq3_s          (Windows)
 ```
 
 Setup builds the engine and the image encoder for this PC's GPUs, downloads the model's files at pinned revisions and
-checks them, prepares them, and writes a config and a launcher. `--model ud-q4_k_xl` and `--model qwen36-ud-q4_k_xl`
-set up the others; `--check` says what the PC has and what a model needs, without changing anything. Setup asks
-nothing and installs no system software: it names what is missing. Details: [docs/SETUP.md](docs/SETUP.md).
+checks them, prepares them, and writes a config and a launcher. `--model ud-q4_k_xl`, `--model qwen36-ud-q4_k_xl` and
+`--model qwen38-27b-ud-q6_k_xl` set up the others; `--check` says what the PC has and what a model needs, without
+changing anything. Setup asks nothing and installs no system software: it names what is missing. Details:
+[docs/SETUP.md](docs/SETUP.md).
 
 ## Run
 
@@ -68,7 +73,7 @@ How to connect clients, the config's keys, images, image generation, MCP tools a
 
 ## Documentation
 
-- [docs/SETUP.md](docs/SETUP.md): setup, the configs, choosing the GPUs, Qwen3.6, Docker.
+- [docs/SETUP.md](docs/SETUP.md): setup, the configs, choosing the GPUs, Qwen3.6 and Qwen3.8-27B, Docker.
 - [docs/USING.md](docs/USING.md): the server, its API and web app, clients, pictures, image generation, MCP tools.
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the engine.
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md): when something goes wrong.

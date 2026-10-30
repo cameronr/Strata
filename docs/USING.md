@@ -1,11 +1,11 @@
 # Using Lamina
 
-The server, `lamina-server`, runs the engine in its own process and serves the OpenAI, Anthropic and Responses APIs
-and a web app. The launchers setup writes start it with the model's config (`run-iq3_s.bat`, or from the clone's
-folder `build\lamina-server.exe --config lamina-iq3_s.json`). It listens on the config's `port` (setup's
-defaults: 8081 for IQ3_S, 8082 for UD-Q4_K_XL, 8083 for Qwen3.6-35B-A3B; `--port` overrides it), on this PC only unless
-told otherwise ([below](#from-other-devices)). Ctrl+C in its window stops the engine, which saves its learned expert
-profile, and the server.
+The server, `lamina-server`, runs the engine in its own process and serves the OpenAI, Anthropic and Responses APIs and
+a web app. The launchers setup writes start it with the model's config (`run-iq3_s.bat`, or from the clone's folder
+`build\lamina-server.exe --config lamina-iq3_s.json`). It listens on the config's `port` (setup's defaults: 8081 for
+IQ3_S, 8082 for UD-Q4_K_XL, 8083 for Qwen3.6-35B-A3B, 8084 for Qwen3.8-27B; `--port` overrides it), on this PC only
+unless told otherwise ([below](#from-other-devices)). Ctrl+C in its window stops the engine, which saves its learned
+expert profile, and the server.
 
 ## The web app
 
@@ -171,7 +171,7 @@ curl http://127.0.0.1:8081/v1/choose -H "Content-Type: application/json" -d '{
 ```
 
 `probs` are renormalized over the options; `mass` is what they got of everything the model could have said there.
-Not on the Qwen3.6 path yet.
+Not on the path of Qwen3.6-35B-A3B and Qwen3.8-27B yet.
 
 ## Codex CLI and the Responses API
 
@@ -208,7 +208,7 @@ URLs or local file paths) go through the image encoder, `lamina-vision`, and rea
 TIFF, AVIF and others are converted to PNG first. The encoder runs on the CPU (the `vision` section's `threads`), so
 the GPUs keep their VRAM for experts: on the development PC's 8-core Ryzen 7 9700X a picture of ~1,000 tokens takes
 ~9 s, once per picture (a picture sent again, as chat apps do every turn, is not encoded again). `--offline` refuses
-URLs. Qwen3.6-35B-A3B reads pictures with its file's own projector.
+URLs. Qwen3.6-35B-A3B and Qwen3.8-27B read pictures with their repositories' own projectors.
 
 ## Image generation
 
@@ -296,7 +296,7 @@ The server reads `lamina-<model>.json` at its start. Setup's keys: [SETUP.md](SE
 | `tool_call_recovery`, `repeat_stop_tokens`, `reasoning_close_retry`, `reasoning_loop_recovery`, `engine_silence_s` | [above](#behaviour) |
 | `codex_compaction_cache`, `codex_thread_titles`, `env_to_user` | Codex's compaction and titles; opencode's `<env>` block moved to the first user message, so the system turn stays the same between sessions |
 | `idle_unload_s`, `min_free_vram_mib`, `before_load`, `lazy_load` | [sharing the GPU](#sharing-the-gpu) |
-| `mcp_servers`, `images`, `replicas`, `parallel` | MCP tools, image generation, replicas; `parallel`: the Qwen3.6 path's batch slots (`--batch`) |
+| `mcp_servers`, `images`, `replicas`, `parallel` | MCP tools, image generation, replicas; `parallel`: the batch slots of Qwen3.6 and Qwen3.8-27B (`--batch`, one GPU) |
 | `api_monitor`, `open_browser`, `prevent_sleep` | the request monitor at `/api-monitor` (the last 100 prompts and answers in memory); a browser at the start; Windows awake while busy |
 
 The web app's Model settings card changes `sampling`, `reasoning_budget_tokens`, `fit_max_tokens`,

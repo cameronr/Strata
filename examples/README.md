@@ -7,6 +7,8 @@ and data folder ([SETUP.md](../docs/SETUP.md)):
 - `iq3_s.json`: Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S (~53 GB of RAM taken).
 - `ud-q4_k_xl.json`: Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL (~81 GB of RAM taken).
 - `qwen36-ud-q4_k_xl.json`: Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL, on the engine's Qwen3.6 path.
+- `qwen38-27b-ud-q6_k_xl.json`: Qwen3.8-27B, unsloth's UD-Q6_K_XL, on the same path, its layers split over the fewest
+  GPUs that hold it (`--second-gpu auto`; the development PC's config names the 5070 Ti).
 
 `run-<model>.bat` starts each from the clone's folder, for models in setup's data folder (`../Lamina-data`). Their
 engine options: [SETUP.md](../docs/SETUP.md#engine-options); the server's keys: [USING.md](../docs/USING.md#the-config).
