@@ -1,0 +1,43 @@
+{
+  "args": [
+    "--native",
+    "../Lamina-data/models/qwen38-27b-UD-Q6_K_M/Qwen3.8-27B-UD-Q6_K_M.gguf",
+    "--main-gpu",
+    "RTX 5070 Ti",
+    "--second-gpu",
+    "auto",
+    "--max-context",
+    "262144",
+    "--prefill",
+    "1536",
+    "--kv",
+    "q8_0",
+    "--mtp",
+    "7",
+    "--spec-min-p",
+    "0.3",
+    "--draft-vocab",
+    "65536",
+    "--vision"
+  ],
+  "cwd": ".",
+  "model_name": "qwen3.8-27b-ud-q6_k_m",
+  "port": 8084,
+  "sampling": {
+    "temperature": 0.7,
+    "top_p": 0.95,
+    "top_k": 20,
+    "min_p": 0.0,
+    "presence_penalty": 0.0
+  },
+  "log": "./lamina-qwen38-27b-ud-q6_k_m.log",
+  "lib_dirs": [],
+  "vision": {
+    "exe": "./build-vision/bin/lamina-vision.exe",
+    "mmproj": "../Lamina-data/models/qwen38-27b-UD-Q6_K_M/mmproj-F16.gguf",
+    "model": "../Lamina-data/models/qwen38-27b-UD-Q6_K_M/Qwen3.8-27B-UD-Q6_K_M.gguf",
+    "gpu": false,
+    "threads": 16,
+    "max_tokens": 1024
+  }
+}

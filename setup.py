@@ -6,7 +6,7 @@ environment (.venv) and run this file in it. It asks nothing: the flags say what
     setup.bat --model iq3_s               Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S (84 GB of files)
     ./setup.sh --model ud-q4_k_xl         Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL (112 GB)
     setup.bat --model qwen36-ud-q4_k_xl   Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL (23 GB)
-    setup.bat --model qwen38-27b-ud-q6_k_xl   Qwen3.8-27B, unsloth's UD-Q6_K_XL (25 GB; its layers split over the GPUs)
+    setup.bat --model qwen38-27b-ud-q6_k_m    Qwen3.8-27B, unsloth's UD-Q6_K_M (23 GB; its layers split over two GPUs)
     setup.bat                             the engine only
     setup.bat --check [--model M]         what this PC has and what the model needs; nothing is changed
 
@@ -92,10 +92,10 @@ QWEN36 = [
 QWEN36_MMPROJ = File("qwen36", "mmproj-F16.gguf", "models/qwen36-UD-Q4_K_XL/mmproj-F16.gguf",
                      899283584, "71f3cbc1f7cc0f30d09d41cfa924c0060827ebc33bf15ace7e86661e856f0160")
 QWEN38_27B = [
-    File("qwen38_27b", "Qwen3.8-27B-UD-Q6_K_XL.gguf", "models/qwen38-27b-UD-Q6_K_XL/Qwen3.8-27B-UD-Q6_K_XL.gguf",
-         25299061664, "701d8fa9ed214ab21bfc130cd2a7df19ca89bbef7713e2dfb19f3c63696aa917"),
+    File("qwen38_27b", "Qwen3.8-27B-UD-Q6_K_M.gguf", "models/qwen38-27b-UD-Q6_K_M/Qwen3.8-27B-UD-Q6_K_M.gguf",
+         23088409504, "493301830a596b8ad56dc1329f80bbcb578c8e910da395feafdc9cd8263430bb"),
 ]
-QWEN38_27B_MMPROJ = File("qwen38_27b", "mmproj-F16.gguf", "models/qwen38-27b-UD-Q6_K_XL/mmproj-F16.gguf",
+QWEN38_27B_MMPROJ = File("qwen38_27b", "mmproj-F16.gguf", "models/qwen38-27b-UD-Q6_K_M/mmproj-F16.gguf",
                          927607488, "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e")
 # Qwen3.8-Flash-Next's image projector (the same for every quant). The CPU encoder reads it as Q8_0 (tools/mmproj_q8.py).
 FLASH_MMPROJ = File("ista", "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "models/mmproj/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
@@ -127,7 +127,7 @@ MODELS = {
     "iq3_s": Model("Qwen3.8-Flash-Next IQ3_S", IQ3_S, True, 8081, 53),
     "ud-q4_k_xl": Model("Qwen3.8-Flash-Next UD-Q4_K_XL", UD_Q4_K_XL, True, 8082, 81),
     "qwen36-ud-q4_k_xl": Model("Qwen3.6-35B-A3B UD-Q4_K_XL", QWEN36, False, 8083, 22, QWEN36_MMPROJ),
-    "qwen38-27b-ud-q6_k_xl": Model("Qwen3.8-27B UD-Q6_K_XL", QWEN38_27B, False, 8084, 2, QWEN38_27B_MMPROJ, 36),
+    "qwen38-27b-ud-q6_k_m": Model("Qwen3.8-27B UD-Q6_K_M", QWEN38_27B, False, 8084, 2, QWEN38_27B_MMPROJ, 36),
 }
 
 

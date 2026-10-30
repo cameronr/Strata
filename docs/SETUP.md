@@ -15,7 +15,7 @@ setup.bat --model iq3_s          (Windows)
 `setup.bat` and `setup.sh` make a Python environment, `.venv`, install the server's packages and CMake and Ninja into
 it, and run `setup.py` with the same arguments. The models: `iq3_s` (Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S),
 `ud-q4_k_xl` (Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL), `qwen36-ud-q4_k_xl` (Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL)
-and `qwen38-27b-ud-q6_k_xl` (Qwen3.8-27B, unsloth's UD-Q6_K_XL).
+and `qwen38-27b-ud-q6_k_m` (Qwen3.8-27B, unsloth's UD-Q6_K_M).
 Without `--model`, setup builds the engine only.
 
 | Option | |
@@ -126,19 +126,27 @@ keeping them.
 The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) and Qwen3.8-27B (`qwen35`, a dense model of the same
 family) on a path of its own (`src/qwen35`): `lamina` switches to it from the model file's header, so their configs
 name the file with `--native` like the others. It reads the GGUF as it is (no expert profile; the drafts come from the
-file's own MTP block, `--mtp N` of them) and keeps K and V in fp16: ~22 KB a cell for Qwen3.6, ~68 KB for the 27B.
+file's own MTP block). K and V are fp16 (~22 KB a cell for Qwen3.6, ~68 KB for the 27B), or with `--kv q8_0` 8 bits
+in llama.cpp's q8_0 rounding, about half: the 27B's full 262,144 cells then take ~9 GiB.
+
+The drafts: `--mtp N` at most a step; `--spec-min-p P` ends a step's drafts before one whose joint probability with the
+drafts before it, under the draft head, is below P; `--draft-vocab N` lets the draft head score only the first N token
+ids (a draft outside them is a rejected draft, nothing else). The 27B's example takes 7, 0.3 and 65,536: up to 8
+tokens a step on text that repeats its prompt, fewer where the drafts are unsure.
 
 With `--second-gpu` (GPUs named as for `--main-gpu`, comma-separated, or `auto`: every other GPU in CUDA's order; the
 examples have `auto`) the path splits the layers over the fewest of those GPUs, in order, that hold the whole model:
 each takes the layers that fit beside their K/V and its buffers, the last the rest with the output head and the MTP
 block, and each pass hands its activations from one GPU to the next. `--layer-split N,N,..` sets each GPU's layer
-count. Split, every Qwen3.6 expert is in VRAM and none takes RAM: on the development PC, over the RTX 3090 and the RTX
-5070 Ti (~4.7 GiB on the second), it generates 1.6-1.7x as fast and reads prompts 1.9-3.3x as fast as on the 3090 alone
-([COMPARISON.md](COMPARISON.md#qwen36-35b-a3b)). Where no split holds every expert, or on one GPU, the main GPU keeps
-the experts that fit in its VRAM and the CPU computes the rest: on a 24 GB GPU 212 of 256 a layer at the example's
-65,536 cells, every one at 8,192 (`--context` sets another). Qwen3.8-27B needs a split where one GPU does not hold it:
-its example's 98,304 cells take ~36 GB of VRAM (on the development PC the 3090 and the 5070 Ti, 46 and 18 layers), the
-trained 262,144 ~49 GB (its config: all three GPUs, 34, 20 and 10 layers).
+count. A prompt of several chunks (`--prefill`, the 27B's example 1,536 tokens) runs on the GPUs at once: the first
+takes the next chunk while the second runs this one. Split, every Qwen3.6 expert is in VRAM and none takes RAM: on the
+development PC, over the RTX 3090 and the RTX 5070 Ti (~4.7 GiB on the second), it generates 1.6-1.7x as fast and
+reads prompts 1.9-3.3x as fast as on the 3090 alone ([COMPARISON.md](COMPARISON.md#qwen36-35b-a3b)). Where no split
+holds every expert, or on one GPU, the main GPU keeps the experts that fit in its VRAM and the CPU computes the rest:
+on a 24 GB GPU 212 of 256 a layer at the example's 65,536 cells, every one at 8,192 (`--context` sets another).
+Qwen3.8-27B needs a split where one GPU does not hold it: its full 262,144 cells with K and V in q8_0 take ~36 GB of
+VRAM (on the development PC the 5070 Ti first with 26 layers, then the 3090 with 38 and the head:
+[COMPARISON.md](COMPARISON.md#qwen38-27b)).
 
 Not on this path yet: the prompt cache's checkpoints (a follow-up turn whose history differs from what the engine holds
 is read again from the start), `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU.

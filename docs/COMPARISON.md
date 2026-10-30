@@ -28,8 +28,8 @@ measurements.
   Q8_0 hyper-connection weights; IQ3_S with the 4-bit V cache its config runs (k8v4) 1.5-4.5x (with 8-bit KV
   0.8-1.4x).
 - [Qwen3.6-35B-A3B](#qwen36-35b-a3b), its layers split over both GPUs: generation 1-9% faster than llama.cpp's with
-  both GPUs, long prompts 2-8% slower. [Qwen3.8-27B](#qwen38-27b): llama.cpp writes code 19% faster and edits 1.9x as
-  fast (more drafts a pass), reads prompts 12-30% faster; Lamina thinks 15% faster.
+  both GPUs, long prompts 2-8% slower. [Qwen3.8-27B](#qwen38-27b) (UD-Q6_K_M, the full context on both GPUs): Lamina writes code 29%
+  faster than llama.cpp, thinks 48% faster, edits 23% faster and reads prompts 4-13% faster.
 
 ## The PC and the engines
 
@@ -232,33 +232,36 @@ coding request, the thinking task, the edit; 138 / 400 / 400 positions), where l
 
 ## Qwen3.8-27B
 
-The same path on the dense model of the family (GGUF architecture `qwen35`), unsloth's UD-Q6_K_XL (25.3 GB), measured
-on 2026-10-30: Lamina on the 3090 and the 5070 Ti at 98,304 cells (the example's context: layers 0-45 on the 3090,
-46-63 with the head and the MTP block on the 5070 Ti) and on all three GPUs at the trained 262,144 (the development PC's
-config: 34, 20 and 10 layers, the head and the MTP block on the 5060 Ti), 2 drafts, against mainline llama.cpp build
-11606 on the same file with this PC's 27B preset's settings (the 5070 Ti and the 3090, layer split 2,3, 256-token
-micro-batches, 8-bit KV, MTP drafts up to 8 at any probability) at 98,304 cells. The same requests through each
-server's API, greedy, the prompt cache off.
+The same path on the dense model of the family (GGUF architecture `qwen35`), unsloth's UD-Q6_K_M (23.1 GB) at its full
+262,144 cells on the two GPUs, measured on 2026-10-30. Lamina with the development PC's config
+(`examples/qwen38-27b-ud-q6_k_m.json`): the RTX 5070 Ti first with layers 0-26, the RTX 3090 the rest with the head
+and the MTP block, K and V in q8_0, 1,536-token prompt chunks run on both GPUs at once, up to 7 drafts a step while
+their joint probability under the draft head stays above 0.3, the draft head over the first 65,536 token ids. Mainline
+llama.cpp build 11606 with this PC's preset for the file: the same order and cells, layer split 2,3, q8_0 K and V,
+256-token micro-batches, MTP drafts up to 8 at any probability. The same requests through each server's API, greedy,
+the prompt cache off.
 
-| | llama.cpp, two GPUs | Lamina, two GPUs | Lamina, three GPUs, 262,144 cells |
-|---|---|---|---|
-| Generation: code, 28-token prompt (t/s) | 73.6 | 61.8 | 51.4 |
-| Generation: thinking (3,000 tokens) | 41.7 | 47.8 | 39.1 |
-| Edit: prompt / generation (t/s) | 1,385 / 117.5 | 1,235 / 60.8 | 1,195 / 51.2 |
-| 16K-token prompt / generation after it (t/s) | 1,482 / 56.8 | 1,158 / 48.4 | 1,111 / 42.0 |
-| 32K-token prompt / generation after it (t/s) | 1,380 / 52.3 | 1,059 / 43.9 | 1,007 / 37.0 |
+| | llama.cpp | Lamina |
+|---|---|---|
+| Generation: code, 28-token prompt (t/s) | 73.3 | 94.7 |
+| Generation: thinking (3,000 tokens) | 40.4 | 59.9 |
+| Edit: prompt / generation (t/s) | 1,360 / 119.5 | 1,412 / 146.8 |
+| 16K-token prompt / generation after it (t/s) | 1,451 / 58.4 | 1,634 / 71.1 |
+| 32K-token prompt / generation after it (t/s) | 1,352 / 50.7 | 1,514 / 59.0 |
+| 64K-token prompt / generation after it (t/s) | 1,175 / 40.9 | 1,277 / 44.2 |
 
-llama.cpp verifies up to 9 tokens a pass (5.1 on the code request, 8.7 on the edit, which quotes its prompt), Lamina 3:
-on this file each further token of its pass costs ~8.5 ms (the K-quant products at several columns), so 4 drafts write
-10% less than 2, and 6 drafts 28% less (code at 32K cells). On three GPUs the 5060 Ti, the slowest, runs a sixth of the
-layers and the head: generation 15-18% slower than on two.
+The verify windows' products are tensor-core kernels for the K-quant matrices, which cost about the same at 2-8 tokens
+as at one, so a step verifies up to 8 tokens (7.4 on the edit, which quotes its prompt; 4.3 on the code request).
+Llama.cpp reads a chunk's micro-batches on both GPUs at once too. With the 3090 first instead of the 5070 Ti (2,048-token
+chunks), Lamina's prompts read ~12% slower (the 5070 Ti, the faster at their products, takes fewer layers) and its
+generation is ~3% faster. VRAM: 13.9 GiB on the 5070 Ti (1.3 left free, the desktop taking 0.6), 21.9 on the 3090.
 
-Agreement with llama.cpp (`scratch/q36/parity36.sh` with `MODEL=27b`, 8,192 cells, both engines on the 3090 and the
-5070 Ti): along llama.cpp's own greedy text, the next-token distributions' mean KL against llama.cpp's CUDA backend is
-6.7e-5 / 3.7e-4 / 8.2e-6 (the coding request, the thinking task, the edit; 133 / 400 / 400 positions), closer than
-llama.cpp's CPU backend is to it (2.8e-4 / 1.7e-3 / 1.5e-5). The argmax agrees at 100% / 99.5% / 100% of the positions
-(the CPU backend's 100% / 98.5% / 100%), and the free runs write the same text but the thinking task's, which parts
-after 228 tokens at a 0.03-nat margin.
+Agreement with llama.cpp (`scratch/q36/parity36.sh` with `MODEL=27bm`, 8,192 cells, K and V in q8_0 in both engines):
+along llama.cpp's own greedy text, the next-token distributions' mean KL against llama.cpp's CUDA backend is 5.9e-5 /
+5.2e-4 / 8.9e-6 (the coding request, the thinking task, the edit; 133 / 400 / 400 positions), where llama.cpp's CPU
+backend is 2.4e-4 / 2.4e-3 / 7.3e-6 from it; the argmax agrees at 100% / 98.75% / 100% of the positions (the CPU
+backend's 98.5% / 98.0% / 100%). With its drafts Lamina's greedy text is its text without them for 400 of 400 tokens on
+the thinking task and the edit, 348 on the code request (where a near-tie parts them).
 
 ## Features
 

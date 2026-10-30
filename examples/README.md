@@ -8,8 +8,8 @@ and data folder ([SETUP.md](../docs/SETUP.md)):
 - `ud-q4_k_xl.json`: Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL (~81 GB of RAM taken).
 - `qwen36-ud-q4_k_xl.json`: Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL, on the engine's qwen35 path: its layers split over
   the fewest GPUs that hold every expert, else on the main GPU with the CPU computing the experts it lacks.
-- `qwen38-27b-ud-q6_k_xl.json`: Qwen3.8-27B, unsloth's UD-Q6_K_XL, on the same path, its layers split over the fewest
-  GPUs that hold it, at 98,304 cells (~36 GB of VRAM: a 24 GB and a 16 GB GPU).
+- `qwen38-27b-ud-q6_k_m.json`: Qwen3.8-27B, unsloth's UD-Q6_K_M, on the same path, its layers split over the fewest
+  GPUs that hold it at the full 262,144 cells, K and V in q8_0 (~36 GB of VRAM: a 24 GB and a 16 GB GPU).
 
 `run-<model>.bat` starts each from the clone's folder, for models in setup's data folder (`../Lamina-data`). Their
 engine options: [SETUP.md](../docs/SETUP.md#engine-options); the server's keys: [USING.md](../docs/USING.md#the-config).
@@ -17,9 +17,11 @@ engine options: [SETUP.md](../docs/SETUP.md#engine-options); the server's keys: 
 ## The development PC's own options
 
 The development PC's configs name their GPUs (`--second-gpu "RTX 5070 Ti,RTX 5060 Ti"`, where the examples take every
-other GPU with `auto`), its Qwen3.8-27B config takes the trained 262,144 cells over its three GPUs (~49 GB of VRAM), and
-its Flash-Next configs add three options measured for its hardware, which the examples leave out. Each pays only where
-a PC has the same trait: measure it through the server before keeping it.
+other GPU with `auto`), and its Flash-Next configs add three options measured for its hardware, which the examples
+leave out. Each pays only where a PC has the same trait: measure it through the server before keeping it. Its
+Qwen3.8-27B config puts the RTX 5070 Ti first (`--main-gpu`, which setup sets to a PC's own choice): that card reads
+prompts ~1.44x as fast as the RTX 3090 and takes the first 26 layers, the 3090 the other 38 with the head, and the
+prompt chunks run on both at once, so the prompts read ~11% faster than in the other order.
 
 - **`--arena-place`** (both): for RAM whose regions read at different rates, as unpaired DIMMs make (here two 32 GB and
   two 48 GB modules leave 32 GB on one channel), the engine times its RAM arena at the start and keeps the experts the
