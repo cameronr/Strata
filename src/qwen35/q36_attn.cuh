@@ -1,6 +1,7 @@
 // src/qwen35/q36_attn.cuh - the Qwen3.6 path's prompt attention on the tensor cores (flash attention, causal, the cache
-// in FP16): a block takes 64 query rows, its tokens' G query heads of one KV head (row r: token r / G, head r % G), and
-// walks the cells its last token sees in tiles of 32, double-buffered through cp.async.  Per tile:
+// in FP16 or q8_0 rows): a block takes 64 query rows, its tokens' G query heads of one KV head (row r: token r / G, head
+// r % G), and walks the cells its last token sees in tiles of 32, double-buffered through cp.async (q8_0: through
+// registers, scaled into FP16 tiles).  Per tile:
 //   scores   warp w: rows of m-tile w & 3, cells (w >> 2) * 16 .. +16; Q's FP16 fragments in registers, K through
 //            ldmatrix; mma m16n8k16, FP32 sums;
 //   softmax  the causal mask and the online max / sum, the two warps of an m-tile combined in shared memory; the
@@ -69,9 +70,42 @@ __device__ __forceinline__ void load_tile(__half* dst, const __half* src, int n)
     }
 }
 
-/// A prompt chunk's attention: T tokens at positions p0 + t, the cache (FP16, [HKV][ctx][256]) holding every cell up to
-/// p0 + T - 1, queries q and gates [T][H][256] (FP32).  grid (ceil(T / (64 / G)), HKV), block 256, shared sizeof(FaSmem).
-template <int G>
+// The cache in q8_0 rows (a cell's 256 values in int8, then its eight blocks' FP16 scales): a tile's 8-value chunks,
+// four a thread (blockDim 256), held in registers from their load until they go to the tile as FP16 (value times scale)
+constexpr int kQ8Row = kHD + 16;
+struct Q8Stage {
+    uint2 v[4];
+    __half d[4];
+};
+__device__ __forceinline__ void q8_load(Q8Stage& s, const uint8_t* src, int n) {
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const int i = (int) threadIdx.x + 256 * k, c = i >> 5, j = i & 31;
+        if (c < n) {
+            const uint8_t* row = src + (size_t) c * kQ8Row;
+            s.v[k] = *reinterpret_cast<const uint2*>(row + j * 8);
+            s.d[k] = reinterpret_cast<const __half*>(row + kHD)[j >> 2];
+        } else {
+            s.v[k] = make_uint2(0, 0);
+            s.d[k] = __float2half(0.f);
+        }
+    }
+}
+__device__ __forceinline__ void q8_store(__half* dst, const Q8Stage& s) {
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const int i = (int) threadIdx.x + 256 * k, c = i >> 5, j = i & 31;
+        const int8_t* b = reinterpret_cast<const int8_t*>(&s.v[k]);
+        const float d = __half2float(s.d[k]);
+        *reinterpret_cast<uint4*>(dst + kv_at(c, j)) =
+            make_uint4(h2(b[0] * d, b[1] * d), h2(b[2] * d, b[3] * d), h2(b[4] * d, b[5] * d), h2(b[6] * d, b[7] * d));
+    }
+}
+
+/// A prompt chunk's attention: T tokens at positions p0 + t, the cache (FP16, [HKV][ctx][256], or q8_0 rows with Q8)
+/// holding every cell up to p0 + T - 1, queries q and gates [T][H][256] (FP32).  grid (ceil(T / (64 / G)), HKV), block
+/// 256, shared sizeof(FaSmem).  With Q8 the next tile waits in registers through the current one's products.
+template <int G, bool Q8>
 __global__ void __launch_bounds__(256) k_fa_prompt(const float* __restrict__ q, const __half* __restrict__ kc,
                                                    const __half* __restrict__ vc, const float* __restrict__ gate,
                                                    float* __restrict__ out, int T, int H, int ctx, int p0, float scale) {
@@ -106,23 +140,41 @@ __global__ void __launch_bounds__(256) k_fa_prompt(const float* __restrict__ q, 
     const int n_tiles = (n_cells + kBc - 1) / kBc;
     const __half* kh = kc + (size_t) kvh * ctx * kHD;
     const __half* vh = vc + (size_t) kvh * ctx * kHD;
+    const uint8_t* kq = reinterpret_cast<const uint8_t*>(kc) + (size_t) kvh * ctx * kQ8Row;
+    const uint8_t* vq = reinterpret_cast<const uint8_t*>(vc) + (size_t) kvh * ctx * kQ8Row;
     float mA = -INFINITY, mB = -INFINITY, lA = 0.f, lB = 0.f;
     float o[16][4];
 #pragma unroll
     for (int n = 0; n < 16; ++n) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.f;
-    load_tile(sm.k[0], kh, min(kBc, n_cells));
-    load_tile(sm.v[0], vh, min(kBc, n_cells));
-    cp_commit();
+    Q8Stage sk, sv;
+    if constexpr (Q8) {
+        q8_load(sk, kq, min(kBc, n_cells));
+        q8_load(sv, vq, min(kBc, n_cells));
+        q8_store(sm.k[0], sk);
+        q8_store(sm.v[0], sv);
+    } else {
+        load_tile(sm.k[0], kh, min(kBc, n_cells));
+        load_tile(sm.v[0], vh, min(kBc, n_cells));
+        cp_commit();
+    }
     const int li = lane >> 3, lr = lane & 7;   // ldmatrix: this lane's matrix and row in it
     for (int it = 0; it < n_tiles; ++it) {
         const int st = it & 1, base = it * kBc;
-        if (it + 1 < n_tiles) {
-            const int nb = base + kBc;
-            load_tile(sm.k[st ^ 1], kh + (size_t) nb * kHD, min(kBc, n_cells - nb));
-            load_tile(sm.v[st ^ 1], vh + (size_t) nb * kHD, min(kBc, n_cells - nb));
+        if constexpr (Q8) {
+            if (it + 1 < n_tiles) {
+                const int nb = base + kBc;
+                q8_load(sk, kq + (size_t) nb * kQ8Row, min(kBc, n_cells - nb));
+                q8_load(sv, vq + (size_t) nb * kQ8Row, min(kBc, n_cells - nb));
+            }
+        } else {
+            if (it + 1 < n_tiles) {
+                const int nb = base + kBc;
+                load_tile(sm.k[st ^ 1], kh + (size_t) nb * kHD, min(kBc, n_cells - nb));
+                load_tile(sm.v[st ^ 1], vh + (size_t) nb * kHD, min(kBc, n_cells - nb));
+            }
+            cp_commit();
+            cp_wait<1>();
         }
-        cp_commit();
-        cp_wait<1>();
         __syncthreads();
         // scores: n-tiles 0 and 1 of this warp's 16 cells
         float s[2][4];
@@ -208,6 +260,12 @@ __global__ void __launch_bounds__(256) k_fa_prompt(const float* __restrict__ q, 
                 ldsm4t(b, vt + kv_at(16 * k + ((li & 1) << 3) + lr, ((hf * 128 + n2 * 16) >> 3) + (li >> 1)));
                 mma16816(o[2 * n2], a, b[0], b[1]);
                 mma16816(o[2 * n2 + 1], a, b[2], b[3]);
+            }
+        }
+        if constexpr (Q8) {   // the next tile, into the stage the last iteration read (all done since the barrier above)
+            if (it + 1 < n_tiles) {
+                q8_store(sm.k[st ^ 1], sk);
+                q8_store(sm.v[st ^ 1], sv);
             }
         }
         __syncthreads();   // the stage's K, V and probabilities are read before they are written again

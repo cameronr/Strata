@@ -1387,6 +1387,19 @@ __global__ void native_quantize_q8_1_il_kernel(const float* __restrict__ x, Q81B
     if (e % Q8K == 0) dl[std::size_t(b) * cp + c] = __low2float(ds);
 }
 
+// The interleaved copy of a q8_1 image another kernel wrote, as the kernel above lays it out: a thread an int (4 values)
+__global__ void native_q8_1_il_from_kernel(const Q81Block* __restrict__ y, int* __restrict__ bm, int* __restrict__ pm,
+                                           float* __restrict__ dl, int nb, int n_ints, int cp) {
+    const int i = int(blockIdx.x) * QUANT_THREADS + int(threadIdx.x);
+    if (i >= n_ints) return;
+    const int blk = i / 8, p = i % 8;   // the q8_1 block (column c's block b at c * nb + b) and its int
+    const int c = blk / nb, b = blk - c * nb;
+    const int v = reinterpret_cast<const int*>(y[blk].qs)[p];
+    bm[std::size_t(b * 8 + p) * cp + c] = v;
+    pm[std::size_t(p * nb + b) * cp + c] = v;
+    if (p == 0) dl[std::size_t(b) * cp + c] = __low2float(y[blk].ds);
+}
+
 void validate_shape(int n_in, int ncols, int block_elems = Q8K) {
     if (n_in <= 0 || n_in % block_elems != 0) {
         throw std::invalid_argument("native MMVQ requires n_in > 0 and divisible by its block element count");
@@ -1752,6 +1765,23 @@ void native_quantize_q8_1_il(const float* x, void* x_q8_1, void* x_il, int n_in,
     launch_check();
 }
 
+void native_q8_1_il_from(const void* x_q8_1, void* x_il, int n_in, int ncols, void* stream) {
+    validate_shape(n_in, ncols);
+    if (ncols < 2) throw std::invalid_argument("native_q8_1_il_from requires 2 <= ncols <= 8");
+    validate_pointer(x_q8_1);
+    validate_pointer(x_il);
+    validate_stream(stream);
+    const int nb = n_in / Q8K, cp = native_q8_1_il_cp(ncols);
+    auto* bm = static_cast<int8_t*>(x_il);
+    auto* pm = bm + std::size_t(nb) * 8 * cp * 4;
+    auto* dl = reinterpret_cast<float*>(pm + std::size_t(nb) * 8 * cp * 4);
+    const int n_ints = n_in / 4 * ncols;
+    const unsigned blocks = unsigned((n_ints + QUANT_THREADS - 1) / QUANT_THREADS);
+    native_q8_1_il_from_kernel<<<blocks, QUANT_THREADS, 0, static_cast<cudaStream_t>(stream)>>>(
+        static_cast<const Q81Block*>(x_q8_1), reinterpret_cast<int*>(bm), reinterpret_cast<int*>(pm), dl, nb, n_ints, cp);
+    launch_check();
+}
+
 namespace {
 // Rows a warp at 1-4 columns ([ncols - 1]) by the row count, in classes around the model's shapes: below 2048 (the
 // shared expert's 640, the keys' 512), 4096 (the output projections' 2560), 8192 (the gate projection's 6144), 12288
@@ -1783,8 +1813,9 @@ void native_mmvq_il_tune(int rows, bool one) {
 }
 
 void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, const void* x_il, float* y, int n_in,
-                    int n_out, int ncols, void* stream) {
-    if (ncols >= 2 && !g_tune_rows && native_mma(ggml_type, weights, x_il, y, n_in, n_out, ncols, stream)) return;
+                    int n_out, int ncols, void* stream, bool tensor_cores) {
+    if (ncols >= 2 && tensor_cores && !g_tune_rows && native_mma(ggml_type, weights, x_il, y, n_in, n_out, ncols, stream))
+        return;
     const bool il = ggml_type == 23 || ggml_type == 12 || ggml_type == 13 || ggml_type == 14 || ggml_type == 8;
     const int r = g_tune_rows && (ncols > 1 || g_tune_one) ? g_tune_rows : il_rows(ggml_type, ncols, n_out);
     if (r == 0 || (!il && !iq_mmvq_il_supported(ggml_type))) {

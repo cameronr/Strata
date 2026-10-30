@@ -1,9 +1,10 @@
 // src/kernels/mmvq_il_parity.cu - native_mmvq_il (1 column from its q8_1 blocks, 2..8 from the interleaved copy)
 // against native_mmvq, bitwise, on synthetic matrices of the model files' dense formats and shapes, with every rows a
-// warp; the interleaving quantizer's q8_1 blocks against native_quantize_q8_1's. Where the tensor-core kernels take a
-// shape (native_mma), native_mmvq_il's table path is theirs: within kMmaTol of native_mmvq (float rounding), and each
-// column bitwise the same at every column count they take.  --bench times both inside CUDA graphs (weights cycled
-// past the L2).
+// warp; the interleaving quantizer's q8_1 blocks against native_quantize_q8_1's, and native_q8_1_il_from's copy against
+// its interleaved one. Where the tensor-core kernels take a shape (native_mma), native_mmvq_il's table path is theirs:
+// within kMmaTol of native_mmvq (float rounding), and each column bitwise the same at every column count they take.
+// --bench times both inside CUDA graphs (weights cycled past the L2); --bench27 Qwen3.8-27B's dense shapes at 1-8
+// columns: native_mmvq, native_mmvq_il without the tensor cores and with them.
 #include "strata/kernels/native_mma.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 
@@ -56,7 +57,7 @@ void* dev_weights(const Fmt& f, int n_in, int n_out) {
 
 struct Act {
     float* x = nullptr;
-    void *q_ref = nullptr, *q = nullptr, *il = nullptr;
+    void *q_ref = nullptr, *q = nullptr, *il = nullptr, *il2 = nullptr;
     int n_in = 0;
 };
 Act make_act(int n_in) {
@@ -72,6 +73,7 @@ Act make_act(int n_in) {
     CK(cudaMalloc(&a.q_ref, native_q8_1_bytes(n_in, 8)));
     CK(cudaMalloc(&a.q, native_q8_1_bytes(n_in, 8)));
     CK(cudaMalloc(&a.il, native_q8_1_il_bytes(n_in, 8)));
+    CK(cudaMalloc(&a.il2, native_q8_1_il_bytes(n_in, 8)));
     CK(cudaDeviceSynchronize());
     return a;
 }
@@ -108,8 +110,19 @@ int check_shape(const Fmt& f, const Act& a, int n_out) {
     std::vector<uint32_t> mma_cols;   // the tensor-core path's columns at the first column count it took
     for (int nc = 1; nc <= 8; ++nc) {
         native_quantize_q8_1(a.x, a.q_ref, n_in, nc, g_s);
-        if (nc >= 2) native_quantize_q8_1_il(a.x, a.q, a.il, n_in, nc, g_s);
-        else native_quantize_q8_1(a.x, a.q, n_in, nc, g_s);
+        if (nc >= 2) {
+            CK(cudaMemsetAsync(a.il, 0, native_q8_1_il_bytes(n_in, nc), g_s));
+            CK(cudaMemsetAsync(a.il2, 0, native_q8_1_il_bytes(n_in, nc), g_s));
+            native_quantize_q8_1_il(a.x, a.q, a.il, n_in, nc, g_s);
+            native_q8_1_il_from(a.q_ref, a.il2, n_in, nc, g_s);
+            CK(cudaStreamSynchronize(g_s));
+            if (fetch<uint8_t>(a.il, native_q8_1_il_bytes(n_in, nc)) != fetch<uint8_t>(a.il2, native_q8_1_il_bytes(n_in, nc))) {
+                ++bad;
+                std::printf("  %s %d->%d, %d columns: native_q8_1_il_from's copy differs\n", f.name, n_in, n_out, nc);
+            }
+        } else {
+            native_quantize_q8_1(a.x, a.q, n_in, nc, g_s);
+        }
         CK(cudaMemsetAsync(y0, 0xff, (size_t) 8 * n_out * 4, g_s));
         native_mmvq(f.type, w, a.q_ref, y0, n_in, n_out, nc, g_s);
         CK(cudaMemsetAsync(y2, 0xee, (size_t) 8 * n_out * 4, g_s));
@@ -226,11 +239,53 @@ void bench_shape(const Fmt& f, const Act& a, int n_out) {
     cudaFree(y);
 }
 
+// Qwen3.8-27B's dense shapes: us at 1-8 columns of native_mmvq, then native_mmvq_il without and with the tensor cores
+void bench27_shape(const Fmt& f, const Act& a, int n_out) {
+    const int n_in = a.n_in;
+    const double mb = (double) native_mmvq_weight_bytes(f.type, n_in, n_out) / 1e6;
+    const int copies = std::max(4, (int) (24.0 / mb) + 1);
+    std::vector<void*> w((size_t) copies);
+    for (auto& p : w) p = dev_weights(f, n_in, n_out);
+    float* y;
+    CK(cudaMalloc(&y, (size_t) 8 * n_out * 4));
+    std::printf("%-5s %5d -> %5d (%5.2f MB)\n", f.name, n_in, n_out, mb);
+    for (int arm = 0; arm < 3; ++arm) {
+        std::printf("  %-9s", arm == 0 ? "mmvq" : arm == 1 ? "il exact" : "il mma");
+        for (int nc = 1; nc <= 8; ++nc) {
+            native_quantize_q8_1(a.x, a.q_ref, n_in, nc, g_s);
+            if (nc >= 2) native_quantize_q8_1_il(a.x, a.q, a.il, n_in, nc, g_s);
+            const double t = time_calls([&](int r) {
+                void* wr = w[(size_t) (r % copies)];
+                if (arm == 0 || nc == 1) native_mmvq(f.type, wr, a.q_ref, y, n_in, n_out, nc, g_s);
+                else native_mmvq_il(f.type, wr, a.q, a.il, y, n_in, n_out, nc, g_s, arm == 2);
+            });
+            std::printf(" %6.1f", t);
+        }
+        std::printf("\n");
+    }
+    for (auto p : w) cudaFree(p);
+    cudaFree(y);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const bool bench = argc > 1 && std::strcmp(argv[1], "--bench") == 0;
     CK(cudaStreamCreateWithFlags(&g_s, cudaStreamNonBlocking));
+    if (argc > 1 && std::strcmp(argv[1], "--bench27") == 0) {
+        Act a5120 = make_act(5120), a6144 = make_act(6144), a17408 = make_act(17408);
+        std::printf("us at 1..8 columns\n");
+        for (const Fmt& f : kFmts) {
+            if (f.type != 14 && f.type != 13 && f.type != 8) continue;   // the file's Q6_K, Q5_K and Q8_0
+            bench27_shape(f, a5120, 17408);   // ffn_gate, ffn_up
+            bench27_shape(f, a17408, 5120);   // ffn_down
+            bench27_shape(f, a5120, 10240);   // GDN qkv
+            bench27_shape(f, a5120, 12288);   // attention q (with its gate)
+            bench27_shape(f, a5120, 6144);    // GDN z
+            bench27_shape(f, a6144, 5120);    // ssm_out, attention output
+        }
+        return 0;
+    }
     Act a2560 = make_act(2560), a6144 = make_act(6144), a640 = make_act(640);
     if (bench) {
         for (const Fmt& f : kFmts) {
