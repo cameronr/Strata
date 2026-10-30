@@ -1,0 +1,258 @@
+// include/lamina/kernels/cpu/pool.hpp - P2.S3: the CPU expert pool.
+//
+// A layer runs TEN experts against ONE activation, and the expert kernel is DRAM-bound (Memory/LEDGER.md L9:
+// 42.55 GB/s on 6 cores, tracking core count almost exactly).  So the pool's job is not to be clever - it is
+// to keep every physical core reading expert bytes for the whole layer, and to be cheap enough that ten
+// dispatches per layer cost less than one expert.
+//
+// WHY A FLAT BATCH AND NOT A RING.  P2.S3 describes a "lock-free SPMC ring", which is what you need when
+// jobs arrive while others are still being computed.  Here they cannot: the host must SUM all ten outputs
+// before the next layer starts, so a layer is a barrier by construction and the queue never holds more than
+// one batch.  A ring would add a wrap-around to get wrong and buy nothing.  What is kept from the phase is
+// the part that matters: `head`/`done` are single fetch_add counters, one claim per worker, no lock.
+//
+// THE PHASE PROTOCOL, because this is where a pool usually goes wrong.  One atomic word holds the phase's
+// epoch, whether it is open, and how many workers are parked.  The host writes a phase's jobs while the
+// previous phase is closed, then opens the next epoch; a worker joins with a compare-exchange on the whole
+// word, so it can only join the phase it saw open.  The host closes a phase once `done == n` AND every
+// worker that joined has parked again.  Waiting only for `done` is not enough: a worker can still be inside
+// the drain loop after its last `done` increment, and the host resetting `head` underneath it would let it
+// claim a job from the NEXT batch.  Closing is what makes a late worker harmless: one that notices a phase
+// only after the host finished it (it was asleep, or descheduled) finds it closed and waits for the next.
+//
+// IDLE WORKERS SLEEP.  A parked worker spins for `kIdleSpin`, then blocks on the word (`std::atomic::wait`:
+// WaitOnAddress, a futex) until the host opens a phase; the host wakes them only when one sleeps.  Generation
+// opens phases every few hundred microseconds, and a round's longest gap (head, drafts, the first layer) is
+// a few ms, so they sleep only between requests and while a prompt runs on the GPUs.
+#pragma once
+
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/native_expert.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace lamina::kernels::cpu {
+
+/// One expert evaluation.  `act` is SHARED and read-only across the whole batch - that sharing is the point
+/// of `s2_expert_vnni_q` and it is what saves 480 redundant activation conversions per token.
+struct ExpertJob {
+    const uint8_t* blob = nullptr;   ///< one 1,382,400-byte expert
+    const ActQ* act = nullptr;       ///< the layer's quantized activation, shared
+    float* out = nullptr;            ///< H floats, written by exactly one worker
+    float weight = 1.0f;             ///< the router weight; applied by the HOST, not here
+    int slot = -1;                   ///< the job's index, for diagnostics
+};
+
+/// Plan v0.3 P6: one expert for the `nt` tokens of a verify window that were routed to it.  Every token's output
+/// is bitwise the single-token job's.
+struct ExpertJobMulti {
+    const uint8_t* blob = nullptr;
+    int nt = 0;
+    const ActQ* act[MAXT] = {};
+    float* out[MAXT] = {};
+    /// Plan v0.3 P6: a native pack's activations (the layer's `vec_dot_type`), one per token.
+    const void* nact[MAXT] = {};
+};
+
+/// Each PHYSICAL core's logical processors (SMT siblings together), in the OS's order.  The pool runs one thread
+/// per physical core, so a worker is never scheduled onto an SMT sibling of another worker.  On the 6-core/12-thread
+/// machine this project measures on, `hardware_concurrency()/2` workers on logical processors 0..5 would put every
+/// worker on a sibling pair and halve the useful bandwidth - which is exactly the kind of error that shows up as
+/// "the CPU path is slower than the model says" with no clue why.
+std::vector<std::vector<int>> physical_cores();
+
+class ExpertPool;
+
+/// Where the host loop and the pool's workers run - one logical processor each, one thread per physical core - and
+/// how they move off the processors that take interrupts.  A GPU's copies and launches interrupt the CPU when they
+/// complete (~10-40 us each in the ISR and a DPC, thousands a second during generation), on processors Windows picks
+/// and moves as the load shifts (the power plan's interrupt steering; here the first few).  So `tick`, called on the
+/// host thread between windows, reads each processor's interrupt and DPC time once a second, and a thread whose
+/// processor spent over 5% there two seconds in a row moves to a quiet processor: a free core's, else its own core's
+/// other one.  Without the counters (not Windows) the threads stay where they started.
+class CorePlacement {
+public:
+    /// The start: the host on the last physical core, the workers on the others; with `spare_first` (a second GPU,
+    /// whose work raises most of the interrupts) and more than four cores, the first core stays free: where Windows
+    /// sends interrupts first, and a place to move to.
+    explicit CorePlacement(bool spare_first);
+    int host() const { return host_; }
+    /// The workers' logical processors, by worker (the pool pins worker i to `workers()[i]`).
+    const std::vector<int>& workers() const { return workers_; }
+    /// At most once a second: samples each processor's interrupt and DPC time and moves the threads whose processors
+    /// took them (`pool`'s workers; the calling thread for the host's).  Returns what moved, or an empty string.
+    std::string tick(ExpertPool& pool);
+    int64_t moves = 0;
+
+private:
+    int quiet_processor(int from, const std::vector<double>& load) const;
+    std::vector<std::vector<int>> cores_;
+    std::vector<int> core_of_;     // logical processor -> physical core, -1 when unknown
+    int host_ = -1;
+    std::vector<int> workers_;
+    std::vector<uint64_t> busy_;   // each processor's interrupt and DPC time at the last sample (100 ns units)
+    std::vector<int> hot_;         // the samples in a row a processor spent over 5% there
+    std::chrono::steady_clock::time_point at_{};
+};
+
+/// **THE RESERVATION IS A FICTION UNLESS THE HOST IS ACTUALLY PUT THERE.**
+///
+/// `CorePlacement` keeps the workers off the host's core so that the host loop can spin on `cudaEventQuery`
+/// without stealing a worker's cycles.  Nothing in the pool can enforce the other half of that, so this is it:
+/// the host loop calls this on entry and restores on exit.
+///
+/// MEASURED, and this is why it exists: the pool runs at **36.32 GB/s on 5 workers with nothing else running**
+/// - exactly 5/6 of L9's 44.14 on 6 - and at **26.9 GB/s inside the host loop**, where the unpinned spinning
+/// host is free to land on a worker's core or its SMT sibling.  That 1.35x is not the kernel.
+///
+/// Returns the PREVIOUS affinity mask, or -1 if the platform refused; pass it to `restore_thread_affinity`.
+long long pin_current_thread(int core);
+void restore_thread_affinity(long long previous);
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324)   // the alignas(64) members pad the class on purpose (one cache line each)
+#endif
+class ExpertPool {
+public:
+    /// Worker i is pinned to `cores[i]` (none of `cores`: `CorePlacement(false).workers()`); `n_workers <= 0` means
+    /// one on each.  Each owns one `ExpertScratch`, so nothing in the token path allocates.
+    ///
+    /// **`host_works` PUTS THE HOST THREAD INTO THE DRAIN (R2.2's FIRST HALF).**
+    ///
+    /// The pool keeps a core for the host loop so the doorbell spin cannot steal a worker's cycles - but
+    /// during `run()` the host does not spin, it waits, so that core is idle for the whole drain. Measured on the
+    /// 6-core machine this project targets: the engine's pool drains at **33.7 GB/s** (663.6 MB of expert
+    /// blobs in 19.71 ms/token) where the same kernel on 5 workers should reach 5/6 x 44.14 = 36.8 and the
+    /// machine measures 44.14 GB/s on all six. So the sixth core is being paid for and not used.
+    ///
+    /// With `host_works`, `run()` claims jobs itself instead of spinning on `done_`, and the pool is six
+    /// threads on six cores. `false` is the A/B arm and exists so the change is measurable rather than
+    /// asserted - the counter it moves is `pool phases ... drain`, which is host-side and needs no profiler.
+    explicit ExpertPool(int n_workers = 0, bool pin = true, bool host_works = true, std::vector<int> cores = {});
+    ~ExpertPool();
+    ExpertPool(const ExpertPool&) = delete;
+    ExpertPool& operator=(const ExpertPool&) = delete;
+
+    int workers() const { return n_; }
+    /// Moves worker `i` to logical processor `core` (CorePlacement::tick).
+    void pin_worker(int i, int core);
+    /// Whether the host thread also drains.  Reported at startup, because "the engine adapts to the machine it
+    /// is on" is only true if the engine says which adaptation it took.
+    bool host_works() const { return host_works_; }
+
+    /// Publish `n` jobs, then block until every one is done AND the phase is closed.
+    /// `jobs` must outlive the call (it does, and the workers never touch it afterwards).
+    void run(ExpertJob* jobs, int n);
+
+    /// Plan v0.3 P4: the same outputs as `run`, bitwise, with every expert split by rows across all threads
+    /// (gate/up rows, then the intermediate's quantization, then down rows).  With fewer experts than threads -
+    /// the case once the VRAM tier takes half of them - `run` leaves cores idle and each expert streams at one
+    /// core's bandwidth; this streams every expert at all of them.  At most `kMaxSplit` experts.
+    void run_split(ExpertJob* jobs, int n);
+    static constexpr int kMaxSplit = 16;
+    /// Plan v0.3 P6: a native pack's layer for multi-token jobs (at most `kMaxSplitMulti`; ggml-cpu arithmetic,
+    /// `nact` activations), the rows of each expert read once for all of its tokens.  `first`, when given, runs
+    /// once on the host: after the workers have started on the first phase, before it joins them (or alone when
+    /// there are no jobs).
+    void run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*) = nullptr,
+                                void* ctx = nullptr);
+    static constexpr int kMaxSplitMulti = 96;
+    /// The same layer as ONE phase (mode 7, LAMINA_POOL_FUSED=1, opt-in): every expert's gate/up parts, then every
+    /// expert's down parts; the thread that finishes an expert's last gate/up part quantizes its h, and that
+    /// expert's down parts wait for it.  No barrier between the halves and no serial quantization on the host in
+    /// between.  The same bytes as `run_split_multi_native`.  (After Hardin22/Strata-DualGPU 11b1f25.)
+    void run_fused_native(const NativeFmt& f, ExpertJobMulti* jobs, int n, void (*first)(void*) = nullptr,
+                          void* ctx = nullptr);
+    /// The native runs' phases, accumulated ms: gate/up rows, the intermediate quantization, down rows.
+    double ms_multi_gu = 0, ms_multi_q = 0, ms_multi_down = 0;
+    int64_t multi_bytes = 0;
+
+    /// How long a parked worker spins before it sleeps.
+    static constexpr std::chrono::milliseconds kIdleSpin{50};
+    /// How many times a worker has gone to sleep (each worker counts once per idle stretch).
+    uint32_t sleeps() const { return sleeps_.load(std::memory_order_relaxed); }
+
+    /// **WHERE `run()` SPENDS ITS TIME, in milliseconds accumulated over its lifetime**: the drain, and closing
+    /// the phase (the joined workers parking again).  Without the split there is no way to tell a pool that is
+    /// slow at the WORK from one that is slow at the SYNCHRONISATION, and those need opposite fixes.
+    ///
+    /// Only the host thread touches these, in `run()`, so they need no atomics.
+    void phase_ms(double& drain, double& close) const {
+        drain = ms_drain_;
+        close = ms_close_;
+    }
+
+private:
+    void worker(int id);
+    void drain(int id, ExpertScratch& scratch);
+    void run_phase(int mode, int n_tasks, void (*first)(void*) = nullptr, void* ctx = nullptr);
+    void open_phase();
+    void close_phase();
+
+    int n_ = 0;
+    bool host_works_ = true;
+    ExpertJob* jobs_ = nullptr;
+    int njobs_ = 0;
+    /// The host's own scratch when `host_works_`.  A separate object rather than a share of `scratch_[i]`,
+    /// because a worker may own any index and the two must not be able to collide.
+    ExpertScratch host_scratch_;
+    // `run()`'s phases, accumulated.  Host-thread only; see `phase_ms`.
+    double ms_drain_ = 0.0;
+    double ms_close_ = 0.0;
+    // ---- EACH ATOMIC GETS ITS OWN CACHE LINE, AND THE PARK LOOP WRITES NOTHING SHARED.  (Review finding C3.)
+    //
+    // Adjacent atomics that workers and the host contend on invalidate each other on every access, and a
+    // diagnostic counter the park loop once incremented on every iteration hammered the very line the host
+    // writes to publish work.  `alignas(64)` keeps them apart; the park loop only reads `state_` (a worker
+    // writes it once to join a phase and once to park again, and `sleepers_` only when it goes to sleep).
+    alignas(64) std::atomic<uint32_t> head_{0};
+    alignas(64) std::atomic<uint32_t> done_{0};
+    /// epoch << 32 | kClosed (bit 31) | parked workers
+    alignas(64) std::atomic<uint64_t> state_{0};
+    alignas(64) std::atomic<uint32_t> sleepers_{0};
+    std::atomic<uint32_t> sleeps_{0};
+    alignas(64) std::atomic<bool> stop_{false};
+    std::vector<std::thread> threads_;
+    std::vector<ExpertScratch> scratch_;   // one per worker: no allocation, no false sharing of the hot data
+    // run_split state: mode 0 = whole experts, 1 = gate/up row parts, 2 = down row parts
+    int mode_ = 0;
+    int parts_a_ = 1, parts_b_ = 1;
+    struct SplitBuf {
+        alignas(64) float ff[FF];
+        ActQ a2;
+    };
+    std::vector<SplitBuf> split_;
+    // the native runs' state: mode 5 = gate/up row parts, 6 = down row parts, 7 = both in one phase
+    ExpertJobMulti* mjobs_ = nullptr;
+    int64_t mrows_ = 0;     // rows of the current multi phase across all its experts (n * n_ff, then n * n_embd)
+    int mtasks_ = 1;        // equal row ranges the phase is cut into
+    struct SplitBufMulti {
+        alignas(64) float ff[MAXT][FF];
+        ActQ a2[MAXT];
+        alignas(64) uint8_t hq[MAXT][kNativeHBytes];   // plan v0.3 P6: native down activations
+    };
+    const NativeFmt* nfmt_ = nullptr;
+    std::vector<SplitBufMulti> split_multi_;
+    // run_fused_native state (mode 7): per expert, its gate/up parts done and whether its h is quantized
+    struct FusedState {
+        alignas(64) std::atomic<int> gu_done{0};
+        std::atomic<int> ready{0};
+    };
+    std::unique_ptr<FusedState[]> fstate_;
+    int fn_ = 0, fa_ = 1, fb_ = 1;   // experts, gate/up parts and down parts per expert
+    void native_gu_part(int e, int r0, int r1);
+    void native_quant_part(int e);
+    void native_down_part(int e, int r0, int r1);
+};
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+}  // namespace lamina::kernels::cpu

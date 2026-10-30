@@ -1,15 +1,15 @@
 // src/core/expert_source.cpp - the adapter.  See the header for the three clauses of the contract.
-#include "strata/core/expert_source.hpp"
-#include "strata/core/second_gpu.hpp"
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "lamina/core/expert_source.hpp"
+#include "lamina/core/second_gpu.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
 
-#include "strata/core/pinned.hpp"
-#include "strata/platform/memory.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
+#include "lamina/core/pinned.hpp"
+#include "lamina/platform/memory.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
 
 #include <cuda_runtime.h>
 
@@ -37,14 +37,14 @@
 #include <unistd.h>
 #endif
 
-namespace strata::core {
+namespace lamina::core {
 
 // ================================ THE ADAPTER ================================
 
 
 void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32_t* ids, int64_t n_tok, int64_t k,
                                 float* out) {
-    using namespace strata::kernels::cpu;
+    using namespace lamina::kernels::cpu;
     if (d.failed) return;
     if (n_tok < 1 || n_tok > MAXT) {
         d.failed = true;
@@ -57,7 +57,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     if (d.nact_multi.size() < (size_t) MAXT * kNativeActBytes) d.nact_multi.resize((size_t) MAXT * kNativeActBytes);
     if (d.job_of.size() != (size_t) d.n_expert) d.job_of.assign((size_t) d.n_expert, (int16_t) -1);
     if (d.jobs_multi.size() < (size_t) (n_tok * k)) d.jobs_multi.resize((size_t) (MAXT * k));
-    static const bool ptrace = std::getenv("STRATA_POOL_TRACE") != nullptr;
+    static const bool ptrace = std::getenv("LAMINA_POOL_TRACE") != nullptr;
     auto pt = [&](const char* what, long long a = -1) {
         if (ptrace) { std::fprintf(stderr, "pool trace: layer %lld %s %lld\n", (long long) d.layers, what, a); std::fflush(stderr); }
     };
@@ -296,10 +296,10 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         GpuPlanSink& S = *s.d->plan;
         // the layer's gate/up activations as the tiers' kernels take them: Q8_K rows under --expert-math exact on a
         // K-quant layer, else q8_1
-        const auto& nf = strata::kernels::cpu::expert_layout().fmt[(size_t) s.d->layers];
-        const bool xk = strata::kernels::gpu_expert_act(nf.gu_act) == 15;
+        const auto& nf = lamina::kernels::cpu::expert_layout().fmt[(size_t) s.d->layers];
+        const bool xk = lamina::kernels::gpu_expert_act(nf.gu_act) == 15;
         const uint8_t* xa = xk ? S.xk : S.x1;
-        const int64_t xs = xk ? S.xk_stride : (int64_t) (strata::kernels::cpu::H / 32) * 36;
+        const int64_t xs = xk ? S.xk_stride : (int64_t) (lamina::kernels::cpu::H / 32) * 36;
         for (int t = 0; t < s.d->n_tiers && s.ok; ++t) {   // (the last tier first measured within 1.4% either way)
             if (s.n_groups[t] <= 0) continue;
             s.ok = xa != nullptr && s.d->tiers[t].gpu->submit(s.d->layers, xa, xs, s.n_tok, s.k, s.slots[t],
@@ -312,8 +312,8 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     for (int t = 0; t < NT; ++t) shares = shares || n2g[t] > 0;
     if (!shares) submit2 = nullptr;
     pt("run", njobs);
-    // STRATA_POOL_FUSED=1 (opt-in): the layer's gate/up and down rows as one batch, no barrier between them
-    static const bool pool_fused = [] { const char* v = std::getenv("STRATA_POOL_FUSED"); return v != nullptr && std::atoi(v) != 0; }();
+    // LAMINA_POOL_FUSED=1 (opt-in): the layer's gate/up and down rows as one batch, no barrier between them
+    static const bool pool_fused = [] { const char* v = std::getenv("LAMINA_POOL_FUSED"); return v != nullptr && std::atoi(v) != 0; }();
     if (pool_fused)
         d.pool->run_fused_native(lay.fmt[(size_t) d.layers], d.jobs_multi.data(), njobs, submit2, &s2);
     else
@@ -343,7 +343,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
 void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids, const float* w, int64_t n_tok,
                            int64_t k) {
     if (d.failed) return;
-    const uint64_t bb = strata::kernels::cpu::expert_layout().blob_bytes(layer);
+    const uint64_t bb = lamina::kernels::cpu::expert_layout().blob_bytes(layer);
     int room = 0;   // the prefetch slots the tiers' budgets take
     for (int t = 0; t < d.n_tiers; ++t)
         room += (int) (std::min)((uint64_t) d.tiers[t].gpu->prefetch_slots(), d.tiers[t].prefetch_bytes / bb);
@@ -403,22 +403,22 @@ struct GgufSpan {
 
 /// Where each layer's gate, up and down tensors are (3 per layer), found by name in whichever shard holds them
 /// and checked against the pack's formats, so a pack and a model that do not belong together are refused.
-bool locate_experts_gguf(const std::vector<std::string>& shards, const strata::kernels::cpu::ExpertLayout& lay,
+bool locate_experts_gguf(const std::vector<std::string>& shards, const lamina::kernels::cpu::ExpertLayout& lay,
                          std::vector<GgufSpan>& out, std::string& err) {
     static const char* roles[3] = {"gate", "up", "down"};
     out.assign((size_t) (3 * lay.n_layers), GgufSpan{});
     try {
-        const strata::GgufModel model(shards);
+        const lamina::GgufModel model(shards);
         for (int64_t l = 0; l < lay.n_layers; ++l) {
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, lay.bytes[(size_t) l] - fm.down_off};
             for (int r = 0; r < 3; ++r) {
                 const std::string name = "blk." + std::to_string(l) + ".ffn_" + roles[r] + "_exps.weight";
                 size_t s = 0;
-                const strata::TensorInfo* t = model.find(name, &s);
+                const lamina::TensorInfo* t = model.find(name, &s);
                 int be = 0, bb = 0;
                 if (t == nullptr || (int) t->type != (r < 2 ? fm.gu_type : fm.d_type) ||
-                    !strata::block_geometry(t->type, be, bb) ||
+                    !lamina::block_geometry(t->type, be, bb) ||
                     t->elements() / (uint64_t) be * (uint64_t) bb != per[r] * (uint64_t) lay.n_expert) {
                     err = "ArenaExpertSource: " + name + " is missing from the model or differs from the pack's "
                           "native_experts.txt";
@@ -438,7 +438,7 @@ bool locate_experts_gguf(const std::vector<std::string>& shards, const strata::k
 // `skipped` bytes in all).  `ready` (or null): called before a layer is read, until its place in `layer_base` exists
 // (false: stop, the load fails).
 LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::vector<GgufSpan>& spans,
-                            const std::vector<uint8_t*>& layer_base, const strata::kernels::cpu::ExpertLayout& lay,
+                            const std::vector<uint8_t*>& layer_base, const lamina::kernels::cpu::ExpertLayout& lay,
                             int threads, const std::function<void(int64_t)>& done = nullptr,
                             const std::vector<int32_t>& idx = {}, uint64_t skipped = 0,
                             const std::function<bool(int64_t)>& ready = nullptr, bool uncached = false) {
@@ -448,10 +448,10 @@ LoadStats load_experts_gguf(const std::vector<std::string>& shards, const std::v
     std::atomic<int64_t> next{0};
     std::atomic<bool> bad{false};
 #if !defined(_WIN32)
-    // Linux: a role tensor's slices read with preadv straight into their places in the blobs, STRATA_LOAD_BATCH
+    // Linux: a role tensor's slices read with preadv straight into their places in the blobs, LAMINA_LOAD_BATCH
     // experts (16) a call - one large forward read, as the staged copy made, without the staging buffer and its copy
     static const int batch = [] {
-        const char* v = std::getenv("STRATA_LOAD_BATCH");
+        const char* v = std::getenv("LAMINA_LOAD_BATCH");
         return v != nullptr && std::atoi(v) > 0 ? std::min(std::atoi(v), 512) : 16;
     }();
     auto worker = [&]() {
@@ -640,7 +640,7 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
         return false;
     }
     // plan v0.3 P6: the layout (the pack's per-layer blobs) was loaded by the driver
-    const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
+    const lamina::kernels::cpu::ExpertLayout& lay = lamina::kernels::cpu::expert_layout();
     if (lay.n_layers != n_layers || lay.n_expert != n_expert) {
         err = "ArenaExpertSource: the expert layout was loaded for a different geometry";
         return false;
@@ -683,9 +683,9 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
     std::string tail_note;
     bool anon = false;
 #if !defined(_WIN32)
-    // STRATA_PIN_AFTER_COPY=0 keeps the cudaHostAlloc blocks (the A/B arm)
+    // LAMINA_PIN_AFTER_COPY=0 keeps the cudaHostAlloc blocks (the A/B arm)
     static const bool pin_after = [] {
-        const char* v = std::getenv("STRATA_PIN_AFTER_COPY");
+        const char* v = std::getenv("LAMINA_PIN_AFTER_COPY");
         return v == nullptr || std::atoi(v) != 0;
     }();
     if (pin_after) {
@@ -719,7 +719,7 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
                     placed(n_layers);
                     return;
                 }
-                tail_note = strata::platform::lock_resident(tail_, tail_bytes_).note;
+                tail_note = lamina::platform::lock_resident(tail_, tail_bytes_).note;
                 uint8_t* at = (uint8_t*) tail_;
                 for (int64_t m = l; m < n_layers; ++m) {
                     layer_base_[(size_t) m] = at;
@@ -765,7 +765,7 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
         placed_cv.wait(lk, [&] { return n_placed > l; });
         return !reserve_failed;
     };
-    if (const char* v = std::getenv("STRATA_LOAD_THREADS"); v != nullptr && std::atoi(v) > 0) threads = std::atoi(v);
+    if (const char* v = std::getenv("LAMINA_LOAD_THREADS"); v != nullptr && std::atoi(v) > 0) threads = std::atoi(v);
     // the anonymous arena: each layer page-locked by the thread that read it, as soon as it is in place (the
     // registrations overlap the other layers' reads, and the pages are not left to the swap meanwhile)
     std::vector<char> reg_ok((size_t) n_layers, 0);
@@ -815,13 +815,13 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
         if (l < n_layers) {
             anon_lock_ = layer_base_[(size_t) l];
             anon_lock_bytes_ = (uint64_t) ((uint8_t*) anon_ + anon_bytes_ - anon_lock_);
-            tail_note = strata::platform::lock_resident(anon_lock_, anon_lock_bytes_).note;
+            tail_note = lamina::platform::lock_resident(anon_lock_, anon_lock_bytes_).note;
         }
     }
 #endif
-    // STRATA_LOAD_VERIFY=1: every blob read again through std::ifstream (not the load's own reads) and compared
+    // LAMINA_LOAD_VERIFY=1: every blob read again through std::ifstream (not the load's own reads) and compared
     // with the arena's bytes - a test, a minute or two
-    if (const char* v = std::getenv("STRATA_LOAD_VERIFY"); v != nullptr && std::atoi(v) != 0) {
+    if (const char* v = std::getenv("LAMINA_LOAD_VERIFY"); v != nullptr && std::atoi(v) != 0) {
         std::vector<uint8_t> want_b;
         int64_t checked = 0;
         for (int64_t l = 0; l < n_layers; ++l) {
@@ -841,14 +841,14 @@ bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, st
                 }
                 if (std::memcmp(want_b.data(), layer_base_[(size_t) l] + (uint64_t) at_e * b, (size_t) b) != 0) {
                     close();
-                    err = "ArenaExpertSource: STRATA_LOAD_VERIFY: layer " + std::to_string(l) + " expert " +
+                    err = "ArenaExpertSource: LAMINA_LOAD_VERIFY: layer " + std::to_string(l) + " expert " +
                           std::to_string(e) + " differs from the file";
                     return false;
                 }
                 ++checked;
             }
         }
-        std::fprintf(stderr, "ArenaExpertSource: STRATA_LOAD_VERIFY: %lld blobs equal to the file\n", (long long) checked);
+        std::fprintf(stderr, "ArenaExpertSource: LAMINA_LOAD_VERIFY: %lld blobs equal to the file\n", (long long) checked);
     }
     note_ = std::to_string(pinned_layers_) + " of " + std::to_string(n_layers) + " layers pinned (" +
             std::to_string(pinned_total >> 30) + (anon ? " GiB, page-locked as each layer loaded)" : " GiB, a cudaHostAlloc block each)");
@@ -888,7 +888,7 @@ void ArenaExpertSource::close() {
     for (const auto& r : registered_) (void) cudaHostUnregister(r.first);
     registered_.clear();
     if (anon_lock_ != nullptr) {
-        strata::platform::unlock_resident(anon_lock_, anon_lock_bytes_);
+        lamina::platform::unlock_resident(anon_lock_, anon_lock_bytes_);
         anon_lock_ = nullptr;
         anon_lock_bytes_ = 0;
     }
@@ -900,7 +900,7 @@ void ArenaExpertSource::close() {
 #endif
     pinned_layers_ = 0;
     if (tail_ != nullptr) {
-        strata::platform::unlock_resident(tail_, tail_bytes_);
+        lamina::platform::unlock_resident(tail_, tail_bytes_);
         release_pageable(tail_, tail_bytes_);
         tail_ = nullptr;
         tail_bytes_ = 0;
@@ -934,7 +934,7 @@ const uint8_t* ArenaExpertSource::device_alias(int64_t layer, int64_t expert) co
     const int64_t at = idx_.empty() ? expert : idx_[i];
     // (place() moves blobs between mapped blocks only)
     return layer_dev_[blk_.empty() ? (size_t) layer : (size_t) blk_[i]] +
-           (uint64_t) at * strata::kernels::cpu::expert_layout().blob_bytes(layer);
+           (uint64_t) at * lamina::kernels::cpu::expert_layout().blob_bytes(layer);
 }
 
 const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
@@ -945,11 +945,11 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
     reads_.fetch_add(1, std::memory_order_relaxed);
     // Pointer arithmetic into resident memory: no fault, no copy, no mapping.
     return layer_base_[blk_.empty() ? (size_t) layer : (size_t) blk_[i]] +
-           (uint64_t) at * strata::kernels::cpu::expert_layout().blob_bytes(layer);
+           (uint64_t) at * lamina::kernels::cpu::expert_layout().blob_bytes(layer);
 }
 
 bool ArenaExpertSource::read_file_blob(int64_t layer, int64_t expert, uint8_t* dst, std::string& err) const {
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     if (layer < 0 || layer >= lay.n_layers || expert < 0 || expert >= lay.n_expert ||
         spans_.size() != (size_t) (3 * lay.n_layers)) {
         err = "ArenaExpertSource: no model to read an expert from";
@@ -989,4 +989,4 @@ bool ArenaExpertSource::read_file_blob(int64_t layer, int64_t expert, uint8_t* d
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

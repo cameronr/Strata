@@ -238,7 +238,7 @@ the job (`keep`), stops it for the job (`unload`: the next request starts it aga
 
 MCP servers named in the config's `mcp_servers` (Claude Desktop's format; or a file with `--mcp-config`) give the web
 app's chat their tools: the server starts them (or connects to them over Streamable HTTP), lists them at `GET /mcp`, and
-runs the calls the model makes. Only requests that ask for them get them (`"strata_mcp": true`, which the web app
+runs the calls the model makes. Only requests that ask for them get them (`"lamina_mcp": true`, which the web app
 sends); other clients see the plain API. `--offline` starts none.
 
 ## Sharing the GPU
@@ -272,14 +272,14 @@ them (or `"replicas": [{"gpus": [0, 1]}, {"gpus": [2, 3]}]`). Each engine pins i
 ## From other devices
 
 The server listens on this PC only (`127.0.0.1`). `"host": "0.0.0.0"` in the config (or `--host`) opens it to the
-network, with an API key: `"api_key": "a-long-secret"` (or the `STRATA_API_KEY` variable; several keys
+network, with an API key: `"api_key": "a-long-secret"` (or the `LAMINA_API_KEY` variable; several keys
 comma-separated or as a list), which clients then send as their API key. The server window prints this PC's addresses;
 on Windows the firewall blocks them until lamina-server is allowed on private networks. Through a tunnel or a proxy, set the
 key first, and add the address the page is reached at to `"trusted_origins"` for the web app's settings and MCP tools.
 
 - **Browsers (CORS)**: off by default; `"cors_origins": ["https://chat.example.com"]` lets those pages call `/v1/*`.
 - **Host names**: without an API key the server answers only `Host` names it knows (localhost, IP addresses, this PC's
-  name when it listens beyond it), against DNS rebinding; `"allowed_hosts"` (or `STRATA_ALLOWED_HOSTS`) adds others.
+  name when it listens beyond it), against DNS rebinding; `"allowed_hosts"` (or `LAMINA_ALLOWED_HOSTS`) adds others.
 - **Web pages without a key**: a browser's `POST` to `/v1/*` from a page other than the server's own, localhost, an
   allowed host or a trusted origin gets 403; clients that send no `Origin` (curl, the SDKs) are not affected.
 

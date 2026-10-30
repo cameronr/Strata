@@ -1,12 +1,12 @@
 // q36_kernels.cuh - decode kernels of the Qwen3.6 engine (q36_engine.cu), written to give the SAME BITS as the shared
 // kernels they replace (native_small_mmvq_kernel, k_moe_out, k_add_rms, k_group, native_quantize_q8_1) with a layout that
 // keeps more bytes in flight and fewer launches.  Every kernel here is checked bit for bit against the old one on the
-// real activations (STRATA_Q36_VERIFY=1, --no-graph).
+// real activations (LAMINA_Q36_VERIFY=1, --no-graph).
 #pragma once
 
-#include "strata/kernels/dp4a.hpp"
-#include "strata/kernels/q8_1_finite.hpp"
-#include "strata/kernels/warp.cuh"
+#include "lamina/kernels/dp4a.hpp"
+#include "lamina/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/warp.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -17,8 +17,8 @@
 
 namespace q36k {
 
-using strata::kernels::warp_max;
-using strata::kernels::warp_sum;
+using lamina::kernels::warp_max;
+using lamina::kernels::warp_sum;
 
 struct QB {   // a q8_1 activation block (what native_quantize_q8_1 writes)
     half2 ds;
@@ -54,14 +54,14 @@ __device__ __forceinline__ float fexp_fm(float a) { return expf(a); }
 __device__ __forceinline__ void q8_store(QB* __restrict__ y, int i, float v, int lane) {
     const float amax = warp_max(fabsf(v));
     const float sum = warp_sum(v);
-    const float d = strata::kernels::q8_1_finite(fdiv_fm(amax, 127.0f));
-    int8_t q = 0;   // strata::kernels::q8_1_quant with the division of the fast-math TU
+    const float d = lamina::kernels::q8_1_finite(fdiv_fm(amax, 127.0f));
+    int8_t q = 0;   // lamina::kernels::q8_1_quant with the division of the fast-math TU
     if (amax != 0.0f) {
         const float qf = roundf(fdiv_fm(v, d));
         q = (int8_t) (qf > 127.0f ? 127.0f : qf < -127.0f ? -127.0f : qf);
     }
     y[i >> 5].qs[lane] = q;
-    if (lane == 0) y[i >> 5].ds = strata::kernels::q8_1_ds(d, sum);
+    if (lane == 0) y[i >> 5].ds = lamina::kernels::q8_1_ds(d, sum);
 }
 
 /// A Q8_0 row (GGUF blocks of 34 bytes, or the qs / d planes with PK) against NC activation columns, with the arithmetic of
@@ -109,8 +109,8 @@ __device__ __forceinline__ void q8_row_dot(const uint8_t* __restrict__ w, const 
                 const QB* xb = x + (size_t) c * nb + kb0 + 8 * p + 32 * j;
                 const int* u = reinterpret_cast<const int*>(xb->qs);
                 int sumi = 0;
-                sumi = STRATA_DP4A(v0[p][j], u[kqs], sumi);
-                sumi = STRATA_DP4A(v1[p][j], u[kqs + 1], sumi);
+                sumi = LAMINA_DP4A(v0[p][j], u[kqs], sumi);
+                sumi = LAMINA_DP4A(v1[p][j], u[kqs + 1], sumi);
                 const float d1 = __low2float(xb->ds);
                 t += d0[p][j] * d1 * float(sumi);
             }

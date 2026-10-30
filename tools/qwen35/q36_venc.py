@@ -1,7 +1,7 @@
-"""q36_venc.py EXE MMPROJ MODEL IMG [IMG ...] : drive strata-vision (ENC protocol), print each picture's header + stats."""
+"""q36_venc.py EXE MMPROJ MODEL IMG [IMG ...] : drive lamina-vision (ENC protocol), print each picture's header + stats."""
 import subprocess, sys, struct, os, time
 exe, mm, model, *imgs = sys.argv[1:]
-args = [exe, "--mmproj", mm, "--model", model] + [a for a in os.environ.get("STRATA_VARGS", os.environ.get("VARGS", "")).split() if a]
+args = [exe, "--mmproj", mm, "--model", model] + [a for a in os.environ.get("LAMINA_VARGS", os.environ.get("VARGS", "")).split() if a]
 p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 print(p.stdout.readline().strip())
 for img in imgs:

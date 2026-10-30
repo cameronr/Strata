@@ -6,8 +6,8 @@
 // at a few counts also max |diff| / max |value| and both paths against an FP64 reference on sampled tokens.
 //   gr_upmix_parity            the checks
 //   gr_upmix_parity --bench    and the timings of the pair and the fused kernel at T = 256 / 2048
-#include "strata/prefill/gemm.hpp"
-#include "strata/prefill/kernels.hpp"
+#include "lamina/prefill/gemm.hpp"
+#include "lamina/prefill/kernels.hpp"
 
 #include <cuda_runtime.h>
 
@@ -110,12 +110,12 @@ struct Result {
 };
 
 // T tokens through both paths; `detail` prints the differences and the FP64 comparison
-Result check(strata::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inputs& in, Outputs& ref, Outputs& got,
+Result check(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inputs& in, Outputs& ref, Outputs& got,
              int64_t T, bool detail) {
     Result res;
     gm.bf16(in.d_lo16, in.d_wu, gated, T, D, LR);
-    strata::prefill::gr_mix_r(in.d_R, in.d_rs, in.d_w, gated, ref.mixed, ref.bf, T, st, ref.h);
-    strata::prefill::gr_upmix(in.d_lo16, in.d_wu, in.d_R, in.d_rs, in.d_w, got.mixed, got.bf, T, st, got.h);
+    lamina::prefill::gr_mix_r(in.d_R, in.d_rs, in.d_w, gated, ref.mixed, ref.bf, T, st, ref.h);
+    lamina::prefill::gr_upmix(in.d_lo16, in.d_wu, in.d_R, in.d_rs, in.d_w, got.mixed, got.bf, T, st, got.h);
     if (!ck(cudaStreamSynchronize(st), "run")) { res.bad = true; return res; }
     const size_t n = (size_t) T * N;
     std::vector<float> a(n), b(n);
@@ -166,7 +166,7 @@ float median(std::vector<float> v) {
     return v[v.size() / 2];
 }
 
-void bench(strata::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inputs& in, Outputs& o, int64_t T) {
+void bench(lamina::prefill::Gemm& gm, cudaStream_t st, float* gated, const Inputs& in, Outputs& o, int64_t T) {
     cudaEvent_t e0, e1, em;
     cudaEventCreate(&e0);
     cudaEventCreate(&e1);
@@ -177,7 +177,7 @@ void bench(strata::prefill::Gemm& gm, cudaStream_t st, float* gated, const Input
         for (int k = 0; k < 2; ++k) {
             if ((k == 0) == fused_first) {
                 cudaEventRecord(e0, st);
-                strata::prefill::gr_upmix(in.d_lo16, in.d_wu, in.d_R, in.d_rs, in.d_w, nullptr, o.bf, T, st, o.h);
+                lamina::prefill::gr_upmix(in.d_lo16, in.d_wu, in.d_R, in.d_rs, in.d_w, nullptr, o.bf, T, st, o.h);
                 cudaEventRecord(e1, st);
                 cudaEventSynchronize(e1);
                 float ms;
@@ -187,7 +187,7 @@ void bench(strata::prefill::Gemm& gm, cudaStream_t st, float* gated, const Input
                 cudaEventRecord(e0, st);
                 gm.bf16(in.d_lo16, in.d_wu, gated, T, D, LR);
                 cudaEventRecord(em, st);
-                strata::prefill::gr_mix_r(in.d_R, in.d_rs, in.d_w, gated, nullptr, o.bf, T, st, o.h);
+                lamina::prefill::gr_mix_r(in.d_R, in.d_rs, in.d_w, gated, nullptr, o.bf, T, st, o.h);
                 cudaEventRecord(e1, st);
                 cudaEventSynchronize(e1);
                 float ms, msg;
@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
     const bool do_bench = argc > 1 && std::string(argv[1]) == "--bench";
     cudaStream_t st = nullptr;
     if (!ck(cudaStreamCreate(&st), "stream")) return 1;
-    strata::prefill::Gemm gm;
+    lamina::prefill::Gemm gm;
     std::string err;
     if (!gm.init(st, err)) { std::printf("FAIL: %s\n", err.c_str()); return 1; }
     constexpr size_t GEMM_WS = 32u << 20;   // the prompt path's cuBLAS workspace (prefill.cpp)

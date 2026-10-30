@@ -1,4 +1,4 @@
-"""tools/image/sdcpp_native/apply.py - put Strata's native Qwen-Image-2.1 DiT runner into a stable-diffusion.cpp
+"""tools/image/sdcpp_native/apply.py - put Lamina's native Qwen-Image-2.1 DiT runner into a stable-diffusion.cpp
 checkout at the pinned commit (tools/image/qimage.py SD_CPP_COMMIT).  Idempotent; the stock runner stays the
 default: sd-cli uses the native one only with --model-args qwen_image_2_1_native=1 (serve/images.py adds it when the
 config's "native" is true), and only in CUDA / HIP builds.
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-MARK = "// strata: native Qwen-Image-2.1 runner"
+MARK = "// lamina: native Qwen-Image-2.1 runner"
 
 BUILDER_OLD = """            if (version == VERSION_QWEN_IMAGE_2_1) {
                 result.diffusion = std::make_shared<Qwen::QwenImage21Runner>(ctx.backends.runtime_backend(SDBackendModule::DIFFUSION),

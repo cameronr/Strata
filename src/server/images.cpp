@@ -656,7 +656,7 @@ ImageGen::ImageGen(const json& cfg_, std::string log_) : cfg(cfg_), log(std::mov
     model = or_else(jget(cfg, "model_name"), std::string(kModelName));
     const json& out = jget(cfg, "out_dir");
     if (truthy(out) && !out.is_string()) throw ConfigTypeError("TypeError", path_type_error(out));
-    dir = truthy(out) ? u8_path(path_str(out.get<std::string>())) : make_temp_dir(u8_path(temp_dir()), "strata-images-");
+    dir = truthy(out) ? u8_path(path_str(out.get<std::string>())) : make_temp_dir(u8_path(temp_dir()), "lamina-images-");
     fs::create_directories(dir);
     keep_files = py_int(or_else(jget(cfg, "keep_files"), 64));
 }
@@ -868,7 +868,7 @@ json ImageGen::response(const std::vector<std::string>& images, const Job& job, 
             {"model", model},
             {"output_format", "png"},
             {"size", std::to_string(job.width) + "x" + std::to_string(job.height)},
-            {"strata", figures}};
+            {"lamina", figures}};
 }
 
 json ImageGen::status() const {

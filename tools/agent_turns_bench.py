@@ -1,6 +1,6 @@
 """Decode A/B on coding-agent turns over this repository: arms restarted per round, per-turn ratios.
 
-    python tools/agent_turns_bench.py lamina-iq3_s.json base: hcq8:STRATA_HC_Q8=2 [--rounds 2]
+    python tools/agent_turns_bench.py lamina-iq3_s.json base: hcq8:LAMINA_HC_Q8=2 [--rounds 2]
 
 The workload is five simulated coding-agent sessions over this repository's own files (README, the server, setup.py, the
 expert cache, the hyper-connection kernels, the tokenizer): a system prompt, four tools, a task (three in English, two
@@ -69,7 +69,7 @@ SESSIONS = [
      "Explain precisely how the expert cache decides which experts stay in VRAM during decode, then propose and "
      "implement a small improvement to its eviction policy with a measurement plan.",
      [("read_file", "docs/HOW_IT_WORKS.md", "Let me read the design overview first."),
-      ("read_file", "include/strata/core/expert_cache.hpp", "Now the cache's interface."),
+      ("read_file", "include/lamina/core/expert_cache.hpp", "Now the cache's interface."),
       ("read_file", "src/core/expert_cache.cpp", "And its implementation."),
       ("grep", "adapt_every", "Searching for the adaptive swap logic."),
       ("read_file", "src/core/expert_source.cpp", "The dispatch that consults the cache is in expert_source.cpp.")]),
@@ -84,15 +84,15 @@ SESSIONS = [
     ("cuda-kernel",
      "The hyper-connection read kernels are latency bound on small batches. Read them, explain where the time goes, "
      "and write a faster variant for 1-4 tokens that keeps the same results bit for bit.",
-     [("read_file", "include/strata/kernels/fused_gr.hpp", "First the kernel interface."),
+     [("read_file", "include/lamina/kernels/fused_gr.hpp", "First the kernel interface."),
       ("read_file", "src/kernels/cuda/fused_gr.cu", "Now the kernels themselves."),
       ("grep", "fused_gr_read_multi", "Where are they called from?"),
       ("read_file", "src/core/verify.cpp", "The verify window calls them; reading it.")]),
     ("tokenizer-fr",
      "Écris une suite de tests pytest pour le tokenizer Python (encodage, décodage, tokens spéciaux, texte multilingue, "
      "cas limites), puis corrige les bugs que les tests révèlent. Réponds en français.",
-     [("read_file", "tools/strata_tokenizer.py", "Je lis d'abord le tokenizer."),
-      ("grep", "strata_tokenizer", "Je cherche qui l'utilise."),
+     [("read_file", "tools/lamina_tokenizer.py", "Je lis d'abord le tokenizer."),
+      ("grep", "lamina_tokenizer", "Je cherche qui l'utilise."),
       ("read_file", "src/server/frontend.cpp", "Le frontend l'appelle ; je le lis pour voir les usages réels."),
       ("read_file", "src/server/frontend.hpp", "Je regarde aussi son en-tête."),
       ("read_file", "chat.py", "Et le client en ligne de commande.")]),

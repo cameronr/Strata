@@ -1,17 +1,17 @@
-// src/core/second_gpu.cpp - see include/strata/core/second_gpu.hpp.
-#include "strata/core/second_gpu.hpp"
+// src/core/second_gpu.cpp - see include/lamina/core/second_gpu.hpp.
+#include "lamina/core/second_gpu.hpp"
 
-#include "strata/core/cuda_host.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/iq_kernels.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
 
 #include <immintrin.h>
 
 #include <cstring>
 #include <exception>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 // the plan block: [groups of part 0, of part 1, ring, pad] [starts, part 0: cap+1] [part 1: cap+1] [dst: cap]
@@ -75,7 +75,7 @@ bool SecondGpu::init(int device, int main_device, int64_t n_embd, int64_t n_ff, 
     run("mapped staging", cudaHostGetDevicePointer((void**) &m_plan_, h_plan_, 0));
     run("device buffers", cudaMalloc((void**) &d_xq_, xb));
     run("device buffers", cudaMalloc((void**) &d_plan_, pb));
-    run("device buffers", cudaMalloc((void**) &d_scratch_, strata::kernels::native_expert_scratch_bytes(cap_, n_ff)));
+    run("device buffers", cudaMalloc((void**) &d_scratch_, lamina::kernels::native_expert_scratch_bytes(cap_, n_ff)));
     run("device buffers", cudaMalloc((void**) &d_rows_, ob));
     run("device buffers", cudaMalloc((void**) &d_count_, sizeof(unsigned)));
     run("device buffers", cudaMemset(d_count_, 0, sizeof(unsigned)));
@@ -141,7 +141,7 @@ bool SecondGpu::graph_for(int gu_type, int d_type, int gu_act, int d_act, int gr
             exec = gr.exec;
             return true;
         }
-    const strata::kernels::NativeExpertLayout L = strata::kernels::native_expert_layout(
+    const lamina::kernels::NativeExpertLayout L = lamina::kernels::native_expert_layout(
         gu_type, d_type, n_embd_, n_ff_, gu_act, d_act);
     const PlanLayout P(cap_);
     const auto* pi = (const int32_t*) d_plan_;
@@ -155,15 +155,15 @@ bool SecondGpu::graph_for(int gu_type, int d_type, int gu_act, int d_act, int gr
         if (prep) {
             // kernels copy the plan and the activations (a copy node costs ~15 us on this link); the grouped kernels
             // read the group count from the plan and skip the groups past it
-            strata::kernels::copy_i32_from_mapped((int32_t*) d_plan_, (const int32_t*) m_plan_, (int64_t) P.bytes / 4,
+            lamina::kernels::copy_i32_from_mapped((int32_t*) d_plan_, (const int32_t*) m_plan_, (int64_t) P.bytes / 4,
                                                   s_);
             const int64_t act_bytes = L.gu_act == 15 ? (n_embd_ / 256) * 292 : (n_embd_ / 32) * 36;
-            strata::kernels::copy_from_mapped((float*) d_xq_, (const float*) m_x_, max_t_ * act_bytes / 4, s_);
+            lamina::kernels::copy_from_mapped((float*) d_xq_, (const float*) m_x_, max_t_ * act_bytes / 4, s_);
         }
         const int64_t xq_stride = L.gu_act == 15 ? (n_embd_ / 256) * 292 : (n_embd_ / 32) * 36;
-        strata::kernels::native_expert_grouped(L, p64 + part * cap_, pi + P.starts[part], pi + part, pi + P.dst,
+        lamina::kernels::native_expert_grouped(L, p64 + part * cap_, pi + P.starts[part], pi + part, pi + P.dst,
                                                pi + P.tok, groups, cap_, d_xq_, xq_stride, d_scratch_, d_rows_, s_);
-        strata::kernels::native_expert_rows_out(d_rows_, pi + part, pi + P.starts[part], pi + P.dst, n_embd_, cap_,
+        lamina::kernels::native_expert_rows_out(d_rows_, pi + part, pi + P.starts[part], pi + P.dst, n_embd_, cap_,
                                                 (float* const*) (p64 + 2 * cap_),
                                                 (uint32_t* const*) (p64 + 2 * cap_ + 1 + part), pi + 2, d_count_, s_);
     } catch (const std::exception& ex) {
@@ -222,8 +222,8 @@ bool SecondGpu::submit(int64_t layer, const uint8_t* x, int64_t x_stride, int n_
     p64[2 * cap_] = (unsigned long long) out;
     p64[2 * cap_ + 1] = ng[1] == 0 ? (unsigned long long) flag : 0;   // the last launch raises it
     p64[2 * cap_ + 2] = ng[1] > 0 ? (unsigned long long) flag : 0;
-    const auto& f = strata::kernels::cpu::expert_layout().fmt[(size_t) layer];
-    const int gu_act = strata::kernels::gpu_expert_act(f.gu_act), d_act = strata::kernels::gpu_expert_act(f.d_act);
+    const auto& f = lamina::kernels::cpu::expert_layout().fmt[(size_t) layer];
+    const int gu_act = lamina::kernels::gpu_expert_act(f.gu_act), d_act = lamina::kernels::gpu_expert_act(f.d_act);
     const int64_t act_bytes = gu_act == 15 ? (n_embd_ / 256) * 292 : (n_embd_ / 32) * 36;
     for (int t = 0; t < n_tok; ++t)
         std::memcpy(h_x_ + (size_t) t * act_bytes, x + (size_t) t * x_stride, (size_t) act_bytes);
@@ -253,4 +253,4 @@ bool SecondGpu::healthy(std::string& err) const {
     return false;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

@@ -1,11 +1,11 @@
-#include "strata/core/vmm.hpp"
+#include "lamina/core/vmm.hpp"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
 
 #include <mutex>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 struct Api {
@@ -148,5 +148,5 @@ VmmChunk VmmRange::unmap(int64_t i) {
     return h;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core
 

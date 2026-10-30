@@ -4,7 +4,7 @@ general.file_type 7 (MOSTLY_Q8_0).  The CPU image encoder reads a Q8_0 projector
 gguf-py's Q8_0 is ggml's reference rounding: every tensor comes out byte for byte llama-quantize's, the metadata
 the same (in the source's order; llama-quantize moves the file type keys to the end and orders the tensors otherwise).
 
-    python tools/mmproj_q8.py <mmproj-BF16.gguf> <out-Q8_0.gguf>   (STRATA_GGUF_PY: gguf-py's folder, tools/_paths.py)
+    python tools/mmproj_q8.py <mmproj-BF16.gguf> <out-Q8_0.gguf>   (LAMINA_GGUF_PY: gguf-py's folder, tools/_paths.py)
 """
 import os
 import sys
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("STRATA_GGUF_PY") or str(Path(__file__).resolve().parents[1] / "third_party/llama.cpp/gguf-py"))
+sys.path.insert(0, os.environ.get("LAMINA_GGUF_PY") or str(Path(__file__).resolve().parents[1] / "third_party/llama.cpp/gguf-py"))
 import gguf  # noqa: E402
 
 FILE_TYPE_Q8_0 = 7

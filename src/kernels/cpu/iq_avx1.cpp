@@ -1,4 +1,4 @@
-// src/kernels/cpu/iq_avx1.cpp - the i-quant expert rows for CPUs without AVX2 (STRATA_ISA_FLOOR=avx:
+// src/kernels/cpu/iq_avx1.cpp - the i-quant expert rows for CPUs without AVX2 (LAMINA_ISA_FLOOR=avx:
 // Sandy/Ivy Bridge, Xeon E5 v1/v2, Bulldozer).  See iq_avx1.hpp.
 //
 // iq_avx2.cpp's multi-token scheme in 128-bit lanes: each 32-value chunk is decoded once per verify window
@@ -18,7 +18,7 @@
 // This file is compiled for SSE4.2 + AVX with AVX2/FMA/F16C explicitly off (CMakeLists.txt), and the engine
 // calls it only behind cpu_avx1_ok().  No static constructors at namespace scope (#391): its tables
 // (iq_common.inc, iq_avx2.cpp's too) are constexpr.
-#include "strata/kernels/cpu/iq_avx1.hpp"
+#include "lamina/kernels/cpu/iq_avx1.hpp"
 
 #include "ggml.h"
 
@@ -39,7 +39,7 @@
 #error "iq_avx1.cpp must be compiled without FMA/F16C: it runs on CPUs (Sandy/Ivy Bridge) that lack them"
 #endif
 
-namespace strata::kernels::cpu {
+namespace lamina::kernels::cpu {
 namespace {
 
 // fp16 -> fp32 without F16C (expert.cpp's h2f: the conversion written out, subnormals included).
@@ -414,4 +414,4 @@ void q8k_quant_avx1(const float* x, void* vy, int64_t k) {
     }
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace lamina::kernels::cpu

@@ -5,26 +5,26 @@
 // the per-token kernels it stands in for, on random inputs that include -0.0, denormals and large values.  The
 // prompt path's batched PLE and GDN arithmetic is held to the same standard; its attention kernel, which sums in
 // another order, is checked against the decode kernel within a tolerance.
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/kv_q8.hpp"
-#include "strata/kernels/native_moe.hpp"
-#include "strata/kernels/native_ple_postops.hpp"
-#include "strata/kernels/native_qsa.hpp"
-#include "strata/kernels/native_qsa_indexer.hpp"
-#include "strata/kernels/native_rope.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/sampler.hpp"
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
-#include "strata/kernels/shared_expert.hpp"
-#include "strata/kernels/verify_kernels.hpp"
-#include "strata/prefill/kernels.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/kv_q4.hpp"
+#include "lamina/kernels/kv_q8.hpp"
+#include "lamina/kernels/native_moe.hpp"
+#include "lamina/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/native_qsa.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
+#include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/sampler.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/shared_expert.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
+#include "lamina/prefill/kernels.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
@@ -40,8 +40,8 @@
 
 namespace {
 // the rope tests' rotation: an unscaled base of 5e6
-const strata::kernels::RopeScaling kTestRope = [] {
-    strata::kernels::RopeScaling r;
+const lamina::kernels::RopeScaling kTestRope = [] {
+    lamina::kernels::RopeScaling r;
     r.freq_base = 5e6;
     return r;
 }();
@@ -162,11 +162,11 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
 
             // old: copy all rows, add the hits, combine per token
             std::memcpy(h_map, host_zeroed.data(), host.size() * sizeof(float));
-            strata::kernels::copy_from_mapped(d_parts, m_map, rows * N, s);
-            strata::kernels::moe_hit_add(d_parts, d_hit, d_dst, d_count, rows, N, s);
-            if (gated) strata::kernels::shared_expert_gate_rows(d_shg, d_g, N, n_tok, s);
+            lamina::kernels::copy_from_mapped(d_parts, m_map, rows * N, s);
+            lamina::kernels::moe_hit_add(d_parts, d_hit, d_dst, d_count, rows, N, s);
+            if (gated) lamina::kernels::shared_expert_gate_rows(d_shg, d_g, N, n_tok, s);
             for (int t = 0; t < n_tok; ++t)
-                strata::kernels::native_moe_combine(d_parts + t * K * N, d_w + t * K, (gated ? d_shg : d_sh) + t * N,
+                lamina::kernels::native_moe_combine(d_parts + t * K * N, d_w + t * K, (gated ? d_shg : d_sh) + t * N,
                                                     d_out_old + t * N, N, K, s);
             check(cudaStreamSynchronize(s), "old path");
             // new
@@ -175,10 +175,10 @@ int test_gather_combine(std::mt19937& rng, cudaStream_t s) {
             const bool second = rep >= 4;
             if (second && rep >= 6)
                 for (int part = 0; part < 3; ++part)
-                    strata::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s, part);
+                    lamina::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s, part);
             else if (second)
-                strata::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s);
-            strata::kernels::native_moe_gather_combine(d_hit, m_map, d_dst, d_count + 1,
+                lamina::kernels::fetch_listed_rows(m_list, m_map, d_hit, d_list, (int) rows, N, s);
+            lamina::kernels::native_moe_gather_combine(d_hit, m_map, d_dst, d_count + 1,
                                                        rep % 2 == 0 ? nullptr : d_dst + split, d_count + 2,
                                                        second ? d_list + 4 : nullptr, second ? d_list : nullptr, d_w,
                                                        d_sh, gated ? d_glog : nullptr, d_out_new, N, K, n_tok, s);
@@ -259,7 +259,7 @@ int test_hit_plan(std::mt19937& rng, cudaStream_t s) {
             up(d_ids, ids);
             up(d_res, res);
             check(cudaMemset(d_plan, 0xff, (size_t) words * 4), "memset");
-            strata::kernels::verify_hit_plan(d_ids, n, K, d_res, NE, d_sp, d_plan, cap, ptr_off, s);
+            lamina::kernels::verify_hit_plan(d_ids, n, K, d_res, NE, d_sp, d_plan, cap, ptr_off, s);
             check(cudaStreamSynchronize(s), "hit plan");
             const std::vector<int32_t> pl = down(d_plan, (size_t) words);
             const int groups = (int) ptr.size(), entries = (int) dst.size();
@@ -312,11 +312,11 @@ int test_mmvf_multi(std::mt19937& rng, cudaStream_t s) {
                   *d_a2 = dev<float>(ny2), *d_c2 = dev<float>(ny2);
             up(d_x, x);
             for (int t = 0; t < n_tok; ++t) {
-                strata::kernels::bf16_gemv_fp32_mmvf(d_x + t * n_in, d_w, d_a + t * n_out, n_in, n_out, s);
-                strata::kernels::bf16_gemv_fp32_mmvf(d_x + t * n_in, d_w2, d_a2 + t * n_out2, n_in, n_out2, s);
+                lamina::kernels::bf16_gemv_fp32_mmvf(d_x + t * n_in, d_w, d_a + t * n_out, n_in, n_out, s);
+                lamina::kernels::bf16_gemv_fp32_mmvf(d_x + t * n_in, d_w2, d_a2 + t * n_out2, n_in, n_out2, s);
             }
-            strata::kernels::bf16_gemv_fp32_mmvf_multi(d_x, d_w, d_b, n_in, n_out, n_tok, s);
-            strata::kernels::bf16_gemv_fp32_mmvf_multi(d_x, d_w, d_c, n_in, n_out, n_tok, s, d_w2, d_c2, n_out2);
+            lamina::kernels::bf16_gemv_fp32_mmvf_multi(d_x, d_w, d_b, n_in, n_out, n_tok, s);
+            lamina::kernels::bf16_gemv_fp32_mmvf_multi(d_x, d_w, d_c, n_in, n_out, n_tok, s, d_w2, d_c2, n_out2);
             check(cudaStreamSynchronize(s), "mmvf");
             const int b = bitwise_diff(down(d_a, ny), down(d_b, ny), "mmvf_multi") +
                           bitwise_diff(down(d_a, ny), down(d_c, ny), "mmvf_multi, two matrices") +
@@ -347,8 +347,8 @@ int test_router_multi(std::mt19937& rng, cudaStream_t s) {
         int32_t *d_ia = dev<int32_t>((size_t) n_tok * 10), *d_ib = dev<int32_t>((size_t) n_tok * 10);
         up(d_l, logits);
         for (int t = 0; t < n_tok; ++t)
-            strata::kernels::native_router_top10(d_l + t * 512, d_ia + t * 10, d_wa + t * 10, s);
-        strata::kernels::native_router_top10_multi(d_l, d_ib, d_wb, n_tok, s);
+            lamina::kernels::native_router_top10(d_l + t * 512, d_ia + t * 10, d_wa + t * 10, s);
+        lamina::kernels::native_router_top10_multi(d_l, d_ib, d_wb, n_tok, s);
         check(cudaStreamSynchronize(s), "router");
         int b = bitwise_diff(down(d_wa, (size_t) n_tok * 10), down(d_wb, (size_t) n_tok * 10), "router weights");
         if (down(d_ia, (size_t) n_tok * 10) != down(d_ib, (size_t) n_tok * 10)) {
@@ -418,17 +418,17 @@ int test_verify_router(std::mt19937& rng, cudaStream_t s) {
                 *h_seq[p] = 5;
             }
             // the kernels verify_router stands in for
-            strata::kernels::bf16_gemv_fp32_mmvf_multi(d_x, d_w, d_logits[0], N, NE, n_tok, s);
-            strata::kernels::native_router_top10_multi(d_logits[0], d_ids[0], d_wts[0], n_tok, s);
-            strata::kernels::doorbell_publish(d_x, d_ids[0], d_wts[0], (int64_t) n_tok * N, (int64_t) n_tok * K, m_x[0],
+            lamina::kernels::bf16_gemv_fp32_mmvf_multi(d_x, d_w, d_logits[0], N, NE, n_tok, s);
+            lamina::kernels::native_router_top10_multi(d_logits[0], d_ids[0], d_wts[0], n_tok, s);
+            lamina::kernels::doorbell_publish(d_x, d_ids[0], d_wts[0], (int64_t) n_tok * N, (int64_t) n_tok * K, m_x[0],
                                               m_ids[0], m_w[0], m_seq[0], s);
-            strata::kernels::verify_hit_plan(d_ids[0], n_tok * K, K, d_res, NE, d_sp, d_plan[0], cap, ptr_off, s);
-            strata::kernels::VerifyRouterArgs a;
+            lamina::kernels::verify_hit_plan(d_ids[0], n_tok * K, K, d_res, NE, d_sp, d_plan[0], cap, ptr_off, s);
+            lamina::kernels::VerifyRouterArgs a;
             a.x = d_x; a.w = d_w; a.logits = d_logits[1]; a.ids = d_ids[1]; a.weights = d_wts[1];
             a.x_out = m_x[1]; a.ids_out = m_ids[1]; a.w_out = m_w[1]; a.seq = m_seq[1]; a.ring = 6;
             a.res = d_res; a.slot_ptr = d_sp; a.plan = d_plan[1]; a.cap = (int) cap; a.ptr_off = (int) ptr_off;
             a.counter = d_counter; a.n_tok = n_tok; a.n_embd = N; a.n_expert = NE;
-            strata::kernels::verify_router(a, s);
+            lamina::kernels::verify_router(a, s);
             check(cudaStreamSynchronize(s), "router");
             const size_t nk = (size_t) n_tok * K;
             int b = bitwise_diff(down(d_logits[0], (size_t) n_tok * NE), down(d_logits[1], (size_t) n_tok * NE), "logits");
@@ -455,8 +455,8 @@ int test_verify_router(std::mt19937& rng, cudaStream_t s) {
             for (auto& v : bias) v = std::normal_distribution<float>(0.0f, 0.5f)(rng);
             up(d_bias, bias);
             a.bias = d_bias;
-            strata::kernels::verify_router(a, s);
-            strata::kernels::verify_router_bias_update(d_logits[0], d_logits[1], n_tok, d_bias, s);
+            lamina::kernels::verify_router(a, s);
+            lamina::kernels::verify_router_bias_update(d_logits[0], d_logits[1], n_tok, d_bias, s);
             check(cudaStreamSynchronize(s), "router bias");
             const std::vector<float> plain = down(d_logits[0], (size_t) n_tok * NE);
             std::vector<float> want((size_t) n_tok * NE), fixed((size_t) NE);
@@ -492,9 +492,9 @@ int test_verify_router(std::mt19937& rng, cudaStream_t s) {
 int test_router_rows(std::mt19937& rng, cudaStream_t s) {
     const int N = 2560, NE = 512, FF = 640;
     const size_t row1 = N / 32 * 36, stride = 2928;
-    strata::kernels::cpu::NativeFmt f;
+    lamina::kernels::cpu::NativeFmt f;
     std::string ferr;
-    if (!strata::kernels::cpu::native_fmt(18, 20, N, FF, f, ferr) || f.act_bytes != (size_t) (N / 256 * 292)) {
+    if (!lamina::kernels::cpu::native_fmt(18, 20, N, FF, f, ferr) || f.act_bytes != (size_t) (N / 256 * 292)) {
         std::fprintf(stderr, "router_rows: %s\n", ferr.empty() ? "IQ3_XXS's activation is not Q8_K" : ferr.c_str());
         return 1;
     }
@@ -542,14 +542,14 @@ int test_router_rows(std::mt19937& rng, cudaStream_t s) {
             std::memset(h_q1, 0xcd, 8 * row1);
             std::memset(h_xk, 0xcd, 8 * stride);
             std::memset(h_x, 0xcd, (size_t) 8 * N * 4);
-            strata::kernels::VerifyRouterArgs a;
+            lamina::kernels::VerifyRouterArgs a;
             a.x = d_x; a.w = d_w; a.logits = d_logits; a.ids = d_ids; a.weights = d_wts;
             a.xq1 = d_q1; a.xq1_out = m_q1;
             a.xk_out = rep == 3 ? nullptr : m_xk; a.xk_stride = (int) stride;
             a.x_out = rep == 3 ? m_x : nullptr;   // a layer the pool takes as floats
             a.seq = m_seq; a.ring = 1; a.counter = d_counter; a.n_tok = n_tok; a.n_embd = N; a.n_expert = NE;
-            strata::kernels::verify_router(a, s);
-            strata::kernels::quantize_q8_1_rows(d_x, n_tok, N, d_ref, s);
+            lamina::kernels::verify_router(a, s);
+            lamina::kernels::quantize_q8_1_rows(d_x, n_tok, N, d_ref, s);
             check(cudaStreamSynchronize(s), "router rows");
             int b = 0;
             const std::vector<uint8_t> ref = down(d_ref, (size_t) n_tok * row1);
@@ -565,8 +565,8 @@ int test_router_rows(std::mt19937& rng, cudaStream_t s) {
                     break;
                 }
             for (int t = 0; t < n_tok && rep != 3; ++t) {
-                std::vector<uint8_t> want(strata::kernels::cpu::kNativeActBytes, 0);
-                strata::kernels::cpu::native_quant_act(f, x.data() + (size_t) t * N, want.data());
+                std::vector<uint8_t> want(lamina::kernels::cpu::kNativeActBytes, 0);
+                lamina::kernels::cpu::native_quant_act(f, x.data() + (size_t) t * N, want.data());
                 const uint8_t* got = h_xk + (size_t) t * stride;
                 for (size_t i = 0; i < f.act_bytes; ++i)
                     if (got[i] != want[i]) {
@@ -646,7 +646,7 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
     up(d_wu, wu);
     up(d_wi, wi);
     up(d_wn, wn);
-    const size_t sb = strata::kernels::fused_gr_scratch_bytes();
+    const size_t sb = lamina::kernels::fused_gr_scratch_bytes();
     float* d_scratch = (float*) dev<uint8_t>(sb);
     check(cudaMemset(d_scratch, 0, sb), "memset");
     int bad = 0, off = 0;
@@ -683,10 +683,10 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
             up(d_ema, ema0);
             up(d_wn2, wn2);
             up(d_eg, eg);
-            std::vector<strata::kernels::FusedGrArgs> args[2];
+            std::vector<lamina::kernels::FusedGrArgs> args[2];
             for (int p = 0; p < 2; ++p)
                 for (int t = 0; t < n_tok; ++t) {
-                    strata::kernels::FusedGrArgs a;
+                    lamina::kernels::FusedGrArgs a;
                     a.R = d[p][0] + t * D; a.R_out = d[p][0] + t * D; a.apply = apply;
                     a.bo_prev = d_bo + t * N; a.inj_prev = d_inj + t * HC;
                     a.w_norm = d_wn; a.w_down = d_wd; a.w_up = d_wu; a.w_inject = inject ? d_wi : nullptr;
@@ -697,8 +697,8 @@ int test_gr_read(std::mt19937& rng, cudaStream_t s, bool q8) {
                     if (p == 0) { a.gate_ema = d_ema; a.est_norm = d_wn2; a.est_gates = d_eg; a.est = d_est + t * N; }
                     args[p].push_back(a);
                 }
-            strata::kernels::fused_gr_read_multi(args[0].data(), n_tok, d_scratch, s);
-            for (int t = 0; t < n_tok; ++t) strata::kernels::fused_gr_read_multi(&args[1][(size_t) t], 1, d_scratch, s);
+            lamina::kernels::fused_gr_read_multi(args[0].data(), n_tok, d_scratch, s);
+            for (int t = 0; t < n_tok; ++t) lamina::kernels::fused_gr_read_multi(&args[1][(size_t) t], 1, d_scratch, s);
             check(cudaStreamSynchronize(s), "gr read");
             const std::vector<float> ema1 = down(d_ema, (size_t) D), est = down(d_est, (size_t) (n_tok * N));
             const char* names[5] = {"R", "lo", "rs", "inject", "mixed"};
@@ -829,9 +829,9 @@ int test_rope_tokens(std::mt19937& rng, cudaStream_t s) {
                 up(d_b, x);
                 up(d_pos, pos);
                 for (int t = 0; t < n_tok; ++t)
-                    strata::kernels::native_rope_apply(d_a + (size_t) t * heads * head_dim, d_a + (size_t) t * heads * head_dim,
+                    lamina::kernels::native_rope_apply(d_a + (size_t) t * heads * head_dim, d_a + (size_t) t * heads * head_dim,
                                                        heads, head_dim, 64, kTestRope, d_pos + t * NH, s);
-                strata::kernels::native_rope_apply_tokens(d_b, d_b, n_tok * heads, head_dim, 64, kTestRope, d_pos, heads,
+                lamina::kernels::native_rope_apply_tokens(d_b, d_b, n_tok * heads, head_dim, 64, kTestRope, d_pos, heads,
                                                           NH, s);
                 check(cudaStreamSynchronize(s), "rope");
                 bad += bitwise_diff(down(d_a, x.size()), down(d_b, x.size()), "rope_tokens");
@@ -875,12 +875,12 @@ int test_norm_rope(std::mt19937& rng, cudaStream_t s) {
                 up(d_b, half);
                 up(d_x, x);
                 up(d_pos, pos);
-                strata::kernels::native_qsa_rms_norm_weighted(d_a, d_gamma, d_a, head_dim, rows, 1e-6f, s);
-                strata::kernels::native_rope_apply_tokens(d_a, d_a, rows, head_dim, 64, kTestRope, d_pos, heads, NH,
+                lamina::kernels::native_qsa_rms_norm_weighted(d_a, d_gamma, d_a, head_dim, rows, 1e-6f, s);
+                lamina::kernels::native_rope_apply_tokens(d_a, d_a, rows, head_dim, 64, kTestRope, d_pos, heads, NH,
                                                           s);
-                strata::kernels::native_qsa_norm_rope_tokens(d_b, head_dim, d_gamma, d_b, head_dim, rows, 1e-6f, 64,
+                lamina::kernels::native_qsa_norm_rope_tokens(d_b, head_dim, d_gamma, d_b, head_dim, rows, 1e-6f, 64,
                                                              kTestRope, d_pos, heads, NH, s);
-                strata::kernels::native_qsa_norm_rope_tokens(d_x, 2 * head_dim, d_gamma, d_c, head_dim, rows, 1e-6f, 64,
+                lamina::kernels::native_qsa_norm_rope_tokens(d_x, 2 * head_dim, d_gamma, d_c, head_dim, rows, 1e-6f, 64,
                                                              kTestRope, d_pos, heads, NH, s);
                 check(cudaStreamSynchronize(s), "norm_rope");
                 const int b = bitwise_diff(down(d_a, half.size()), down(d_b, half.size()), "norm_rope") +
@@ -901,9 +901,9 @@ int test_norm_rope(std::mt19937& rng, cudaStream_t s) {
 
 // ---- the int8 KV append: kv_append_q8_step per token  vs  kv_append_q8_steps
 int test_kv_append(std::mt19937& rng, cudaStream_t s) {
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const int cells = 4096, pages = cells / (int) sh.page_size, per_tok = (int) (sh.n_head_kv * sh.head_dim);
-    const size_t codes = (size_t) cells * per_tok, scales = codes / strata::kernels::KV_Q8_GROUP;
+    const size_t codes = (size_t) cells * per_tok, scales = codes / lamina::kernels::KV_Q8_GROUP;
     std::vector<int32_t> table((size_t) pages);
     for (int i = 0; i < pages; ++i) table[(size_t) i] = pages - 1 - i;   // a permuted page table
     int32_t* d_table = dev<int32_t>(table.size());
@@ -914,8 +914,8 @@ int test_kv_append(std::mt19937& rng, cudaStream_t s) {
         std::vector<float> k((size_t) n_tok * per_tok), v((size_t) n_tok * per_tok);
         for (auto& x : k) x = edgy(rng);
         for (auto& x : v) x = edgy(rng);
-        std::vector<int32_t> steps((size_t) n_tok * strata::kernels::kStepCount, 0);
-        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * strata::kernels::kStepCount + strata::kernels::kStepPos] = p0 + t;
+        std::vector<int32_t> steps((size_t) n_tok * lamina::kernels::kStepCount, 0);
+        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
         float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
         int32_t* d_steps = dev<int32_t>(steps.size());
         up(d_k, k);
@@ -931,11 +931,11 @@ int test_kv_append(std::mt19937& rng, cudaStream_t s) {
                 check(cudaMemset(sc[p][kv], 0, scales * 2), "memset");
             }
         for (int t = 0; t < n_tok; ++t)
-            strata::kernels::kv_append_q8_step(q[0][0], q[0][1], sc[0][0], sc[0][1], d_table,
-                                               d_steps + t * strata::kernels::kStepCount, d_k + (size_t) t * per_tok,
+            lamina::kernels::kv_append_q8_step(q[0][0], q[0][1], sc[0][0], sc[0][1], d_table,
+                                               d_steps + t * lamina::kernels::kStepCount, d_k + (size_t) t * per_tok,
                                                d_v + (size_t) t * per_tok, sh, s);
-        strata::kernels::kv_append_q8_steps(q[1][0], q[1][1], sc[1][0], sc[1][1], d_table, d_steps,
-                                            strata::kernels::kStepCount, d_k, d_v, n_tok, sh, s);
+        lamina::kernels::kv_append_q8_steps(q[1][0], q[1][1], sc[1][0], sc[1][1], d_table, d_steps,
+                                            lamina::kernels::kStepCount, d_k, d_v, n_tok, sh, s);
         check(cudaStreamSynchronize(s), "kv append");
         for (int kv = 0; kv < 2; ++kv) {
             if (down(q[0][kv], codes) != down(q[1][kv], codes) || down(sc[0][kv], scales) != down(sc[1][kv], scales)) {
@@ -978,8 +978,8 @@ void q4_row_host(const float* in, uint8_t* codes, uint16_t* scales) {
             const float v = x[32 * b + j];
             if (std::fabs(v) > a || (std::fabs(v) == a && v > m)) { a = std::fabs(v); m = v; }
         }
-        scales[b] = strata::kernels::f16_from_f32(m / -8.0f);
-        const float d = strata::kernels::f32_from_f16(scales[b]);
+        scales[b] = lamina::kernels::f16_from_f32(m / -8.0f);
+        const float d = lamina::kernels::f32_from_f16(scales[b]);
         int q[32];
         for (int j = 0; j < 32; ++j)
             q[j] = d != 0.0f ? std::min(15, std::max(0, (int) std::nearbyint(x[32 * b + j] / d) + 8)) : 8;
@@ -989,7 +989,7 @@ void q4_row_host(const float* in, uint8_t* codes, uint16_t* scales) {
 
 // ---- the 4-bit appends (the verify window's and the prompt path's) against the host, and the INT8 append of K alone
 int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const int NKV = (int) sh.n_head_kv, HD = (int) sh.head_dim, cells = 4096, pages = cells / (int) sh.page_size;
     const int per_tok = NKV * HD;
     const size_t rows = (size_t) cells * NKV;
@@ -1010,8 +1010,8 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
         std::vector<float> k((size_t) n_tok * per_tok), v((size_t) n_tok * per_tok);
         for (auto& x : k) x = edgy(rng);
         for (auto& x : v) x = edgy(rng);
-        std::vector<int32_t> steps((size_t) n_tok * strata::kernels::kStepCount, 0);
-        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * strata::kernels::kStepCount + strata::kernels::kStepPos] = p0 + t;
+        std::vector<int32_t> steps((size_t) n_tok * lamina::kernels::kStepCount, 0);
+        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
         float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
         int32_t* d_steps = dev<int32_t>(steps.size());
         up(d_k, k); up(d_v, v); up(d_steps, steps);
@@ -1021,9 +1021,9 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
                 check(cudaMemset(d_s[f][kv], 0, rows * 16), "memset");
             }
         if (n_tok <= 8)
-            strata::kernels::kv_append_q4_steps(d_c[0][0], d_s[0][0], d_c[0][1], d_s[0][1], d_table, d_steps,
-                                                strata::kernels::kStepCount, d_k, d_v, n_tok, sh, s);
-        strata::kernels::kv_append_q4_rows(d_c[1][0], d_s[1][0], d_c[1][1], d_s[1][1], d_table, p0, n_tok, d_k, d_v,
+            lamina::kernels::kv_append_q4_steps(d_c[0][0], d_s[0][0], d_c[0][1], d_s[0][1], d_table, d_steps,
+                                                lamina::kernels::kStepCount, d_k, d_v, n_tok, sh, s);
+        lamina::kernels::kv_append_q4_rows(d_c[1][0], d_s[1][0], d_c[1][1], d_s[1][1], d_table, p0, n_tok, d_k, d_v,
                                            per_tok, sh, s);
         check(cudaStreamSynchronize(s), "q4 append");
         std::vector<uint8_t> hc(rows * 128, 0);
@@ -1051,12 +1051,12 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
     // k8v4's INT8 half: K alone equals a both-sides append's K and leaves V untouched
     {
         const int n_tok = 5, p0 = 777;
-        const size_t codes = rows * HD, scales = codes / strata::kernels::KV_Q8_GROUP;
+        const size_t codes = rows * HD, scales = codes / lamina::kernels::KV_Q8_GROUP;
         std::vector<float> k((size_t) n_tok * per_tok), v((size_t) n_tok * per_tok);
         for (auto& x : k) x = edgy(rng);
         for (auto& x : v) x = edgy(rng);
-        std::vector<int32_t> steps((size_t) n_tok * strata::kernels::kStepCount, 0);
-        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * strata::kernels::kStepCount + strata::kernels::kStepPos] = p0 + t;
+        std::vector<int32_t> steps((size_t) n_tok * lamina::kernels::kStepCount, 0);
+        for (int t = 0; t < n_tok; ++t) steps[(size_t) t * lamina::kernels::kStepCount + lamina::kernels::kStepPos] = p0 + t;
         float *d_k = dev<float>(k.size()), *d_v = dev<float>(v.size());
         int32_t* d_steps = dev<int32_t>(steps.size());
         up(d_k, k); up(d_v, v); up(d_steps, steps);
@@ -1064,9 +1064,9 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
         uint16_t *s0 = dev<uint16_t>(scales), *s1 = dev<uint16_t>(scales), *sv = dev<uint16_t>(scales);
         for (void* x : {(void*) q0, (void*) q1, (void*) qv}) check(cudaMemset(x, 0, codes), "memset");
         for (void* x : {(void*) s0, (void*) s1, (void*) sv}) check(cudaMemset(x, 0, scales * 2), "memset");
-        strata::kernels::kv_append_q8_steps(q0, qv, s0, sv, d_table, d_steps, strata::kernels::kStepCount, d_k, d_v,
+        lamina::kernels::kv_append_q8_steps(q0, qv, s0, sv, d_table, d_steps, lamina::kernels::kStepCount, d_k, d_v,
                                             n_tok, sh, s);
-        strata::kernels::kv_append_q8_steps(q1, nullptr, s1, nullptr, d_table, d_steps, strata::kernels::kStepCount,
+        lamina::kernels::kv_append_q8_steps(q1, nullptr, s1, nullptr, d_table, d_steps, lamina::kernels::kStepCount,
                                             d_k, d_v, n_tok, sh, s, 1);
         check(cudaStreamSynchronize(s), "k8 append");
         if (down(q0, codes) != down(q1, codes) || down(s0, scales) != down(s1, scales)) {
@@ -1091,7 +1091,7 @@ int test_kv_q4(std::mt19937& rng, cudaStream_t s) {
 // ---- the indexer append: one call per token  vs  native_qsa_indexer_append_multi (blocks completed inside the
 // window, the first cell, and rejected tokens' -1 positions)
 int test_indexer_append(std::mt19937& rng, cudaStream_t s) {
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const int D = 128, max_cells = 4096;
     const size_t pooled_n = (size_t) (max_cells / 4 + 1) * D;
     std::vector<float> gamma((size_t) D);
@@ -1127,13 +1127,13 @@ int test_indexer_append(std::mt19937& rng, cudaStream_t s) {
                     up(bufs[p][2], pooled);
                     up(bp[p], std::vector<int32_t>{-7});
                 }
-                const strata::kernels::QsaIndexerBuffers ib0{bufs[0][0], bufs[0][1], bufs[0][2], bp[0]};
-                const strata::kernels::QsaIndexerBuffers ib1{bufs[1][0], bufs[1][1], bufs[1][2], bp[1]};
+                const lamina::kernels::QsaIndexerBuffers ib0{bufs[0][0], bufs[0][1], bufs[0][2], bp[0]};
+                const lamina::kernels::QsaIndexerBuffers ib1{bufs[1][0], bufs[1][1], bufs[1][2], bp[1]};
                 for (int t = 0; t < n_tok; ++t)
-                    strata::kernels::native_qsa_indexer_append(d_raw + (size_t) t * D, d_pos + t, 0, d_gamma, 1e-6f, ib0, sh,
+                    lamina::kernels::native_qsa_indexer_append(d_raw + (size_t) t * D, d_pos + t, 0, d_gamma, 1e-6f, ib0, sh,
                                                                max_cells, kTestRope, s);
                 float* d_snap = dev<float>(tail.size());
-                strata::kernels::native_qsa_indexer_append_multi(d_raw, d_pos, 1, n_tok, 0, d_gamma, 1e-6f, ib1, sh,
+                lamina::kernels::native_qsa_indexer_append_multi(d_raw, d_pos, 1, n_tok, 0, d_gamma, 1e-6f, ib1, sh,
                                                                  max_cells, kTestRope, s, d_snap);
                 check(cudaStreamSynchronize(s), "indexer");
                 if (down(d_snap, tail.size()) != tail) {
@@ -1183,7 +1183,7 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
     float *d_nk = dev<float>(D), *d_nq = dev<float>(D), *d_nc = dev<float>(D);
     uint16_t* d_taps = dev<uint16_t>(taps.size());
     up(d_nk, nk); up(d_nq, nq); up(d_nc, nc); up(d_taps, taps);
-    strata::kernels::PleWeights w;
+    lamina::kernels::PleWeights w;
     w.norm_key = d_nk; w.norm_query = d_nq; w.norm_conv = d_nc; w.conv1d_f16 = d_taps;
     int bad = 0;
     for (int n_tok : {1, 2, 5, 9, 10, 23}) {
@@ -1201,10 +1201,10 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
         float *k1 = dev<float>(D), *q1 = dev<float>(D), *g1 = dev<float>(H), *gd1 = dev<float>(D), *c1 = dev<float>(D);
         up(h0, hist);
         for (int t = 0; t < n_tok; ++t) {
-            const strata::kernels::NativePlePostopsBuffers b{k1, q1, g1, gd1, q1, c1, r0 + (size_t) t * D};
-            strata::kernels::native_ple_postops(d_key + (size_t) t * D, d_hidden + (size_t) t * D,
+            const lamina::kernels::NativePlePostopsBuffers b{k1, q1, g1, gd1, q1, c1, r0 + (size_t) t * D};
+            lamina::kernels::native_ple_postops(d_key + (size_t) t * D, d_hidden + (size_t) t * D,
                                                 d_value + (size_t) t * N, h0, w, b, s);
-            strata::kernels::ple_history_advance(h0, q1, s);
+            lamina::kernels::ple_history_advance(h0, q1, s);
             check(cudaMemcpyAsync(s0 + (size_t) t * hist.size(), h0, hist.size() * 4, cudaMemcpyDeviceToDevice, s),
                   "ple snapshot");
         }
@@ -1213,7 +1213,7 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
               *q2 = dev<float>(key.size()), *g2 = dev<float>((size_t) n_tok * H), *gd2 = dev<float>(key.size()),
               *s2 = dev<float>((size_t) n_tok * hist.size());
         up(h2, hist);
-        strata::kernels::native_ple_postops_tokens(d_key, d_hidden, d_value, h2, w, {k2, q2, g2, gd2, q2, r2}, n_tok, s,
+        lamina::kernels::native_ple_postops_tokens(d_key, d_hidden, d_value, h2, w, {k2, q2, g2, gd2, q2, r2}, n_tok, s,
                                                    s2);
         check(cudaStreamSynchronize(s), "ple tokens");
         const int br = bitwise_diff(down(r0, hidden.size()), down(r2, hidden.size()), "result");
@@ -1235,11 +1235,11 @@ int test_ple_tokens(std::mt19937& rng, cudaStream_t s) {
 // ---- the decode attention (split, merged, gated)  vs  the prompt path's kernels, and both against FP64 (FP16, INT8,
 // k8v4 and q4_0 pools; 1-2051 cells)
 int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const int HD = (int) sh.head_dim, NH = (int) sh.n_head, NKV = (int) sh.n_head_kv;
     const int cells = 4096, pages = cells / (int) sh.page_size;
-    const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, sh);
-    const size_t n_codes = (size_t) cells * NKV * HD, n_scales = n_codes / strata::kernels::KV_Q8_GROUP;
+    const int64_t cap = lamina::kernels::qsa_selection_width(lamina::kernels::kTopkMaxCells, sh);
+    const size_t n_codes = (size_t) cells * NKV * HD, n_scales = n_codes / lamina::kernels::KV_Q8_GROUP;
     std::vector<int32_t> table((size_t) pages);
     for (int i = 0; i < pages; ++i) table[(size_t) i] = (i * 3 + 1) % pages;   // a permuted page table
     int32_t* d_table = dev<int32_t>(table.size());
@@ -1264,7 +1264,7 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
              *d_vh = dev<uint16_t>(n_codes);
     up(d_kq, kq); up(d_vq, vq); up(d_ks, ks); up(d_vs, vs); up(d_kh, kh); up(d_vh, vh);
     // 4-bit pools: any code bytes, a scale per 32 values
-    const size_t n_q4 = n_codes / 2, n_s4 = n_codes / strata::kernels::KV_Q4_GROUP;
+    const size_t n_q4 = n_codes / 2, n_s4 = n_codes / lamina::kernels::KV_Q4_GROUP;
     std::vector<uint8_t> kq4(n_q4), vq4(n_q4);
     for (auto* v : {&kq4, &vq4})
         for (auto& c : *v) c = (uint8_t) (rng() & 0xFF);
@@ -1276,14 +1276,14 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
     up(d_kq4, kq4); up(d_vq4, vq4); up(d_ks4, ks4); up(d_vs4, vs4);
     const std::vector<int> widths = {1, 5, 64, 65, 700, 2051};
     const int n_q = (int) widths.size();
-    std::vector<int32_t> ids((size_t) n_q * cap, 0), steps((size_t) n_q * strata::kernels::kStepCount, 0);
+    std::vector<int32_t> ids((size_t) n_q * cap, 0), steps((size_t) n_q * lamina::kernels::kStepCount, 0);
     for (int i = 0; i < n_q; ++i) {
         std::vector<int32_t> all(cells);
         for (int c = 0; c < cells; ++c) all[(size_t) c] = c;
         std::shuffle(all.begin(), all.end(), rng);
         std::sort(all.begin(), all.begin() + widths[(size_t) i]);
         std::copy(all.begin(), all.begin() + widths[(size_t) i], ids.begin() + (size_t) i * cap);
-        steps[(size_t) i * strata::kernels::kStepCount + strata::kernels::kStepWidth] = widths[(size_t) i];
+        steps[(size_t) i * lamina::kernels::kStepCount + lamina::kernels::kStepWidth] = widths[(size_t) i];
     }
     std::vector<float> q((size_t) n_q * NH * HD), qf((size_t) n_q * NH * 2 * HD);   // qf: queries, then gate logits
     for (auto& x : q) x = 3.0f * std::normal_distribution<float>(0.0f, 1.0f)(rng);
@@ -1291,11 +1291,11 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
     int32_t *d_ids = dev<int32_t>(ids.size()), *d_steps = dev<int32_t>(steps.size());
     float *d_q = dev<float>(q.size()), *d_a = dev<float>(q.size()), *d_b = dev<float>(q.size());
     float *d_qf = dev<float>(qf.size()), *d_g = dev<float>(q.size()), *d_c = dev<float>(q.size());
-    const uint64_t scr = strata::kernels::qsa_decode_attn_scratch_floats(cap, sh);
+    const uint64_t scr = lamina::kernels::qsa_decode_attn_scratch_floats(cap, sh);
     float* d_scratch = dev<float>((size_t) n_q * scr);
     up(d_ids, ids); up(d_steps, steps); up(d_q, q); up(d_qf, qf);
     check(cudaDeviceSynchronize(), "attn inputs");
-    const int64_t SC = strata::kernels::kStepCount;
+    const int64_t SC = lamina::kernels::kStepCount;
     int bad = 0, gate_bad = 0, ref_bad = 0;
     double worst = 0.0, worst_ref = 0.0;
     static const char* const kNames[4] = {"FP16", "INT8", "k8v4", "q4_0"};
@@ -1303,33 +1303,33 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
     auto row_values = [&](int fmt, int kv, size_t row, double* out) {
         const bool q4 = fmt == 3 || (fmt == 2 && kv == 1);
         for (int d = 0; d < HD; ++d) {
-            if (fmt == 0) out[d] = strata::kernels::f32_from_f16((kv ? vh : kh)[row * HD + d]);
+            if (fmt == 0) out[d] = lamina::kernels::f32_from_f16((kv ? vh : kh)[row * HD + d]);
             else if (!q4)
                 out[d] = (double) (kv ? vq : kq)[row * HD + d] *
-                         strata::kernels::f32_from_f16((kv ? vs : ks)[row * (HD / 64) + d / 64]);
+                         lamina::kernels::f32_from_f16((kv ? vs : ks)[row * (HD / 64) + d / 64]);
             else {
                 const uint8_t b = (kv ? vq4 : kq4)[row * (HD / 2) + (d / 32) * 16 + d % 16];
                 const int code = (d % 32) < 16 ? (b & 15) : (b >> 4);
-                out[d] = (double) (code - 8) * strata::kernels::f32_from_f16((kv ? vs4 : ks4)[row * (HD / 32) + d / 32]);
+                out[d] = (double) (code - 8) * lamina::kernels::f32_from_f16((kv ? vs4 : ks4)[row * (HD / 32) + d / 32]);
             }
         }
     };
     for (int fmt = 0; fmt < 4; ++fmt) {
         const char* name = kNames[fmt];
-        strata::kernels::QsaAttnPools pools;
+        lamina::kernels::QsaAttnPools pools;
         pools.page_table = d_table;
         if (fmt == 1) { pools.k_q = d_kq; pools.v_q = d_vq; pools.k_scale = d_ks; pools.v_scale = d_vs; }
         else if (fmt == 2) { pools.k_q = d_kq; pools.k_scale = d_ks; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4; }
         else if (fmt == 3) { pools.k_q4 = d_kq4; pools.k_q4s = d_ks4; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4; }
         else { pools.k_pool = d_kh; pools.v_pool = d_vh; }
-        strata::kernels::qsa_prefill_attn(d_q, pools, d_ids, d_steps, cap, sh, d_b, n_q, s);
+        lamina::kernels::qsa_prefill_attn(d_q, pools, d_ids, d_steps, cap, sh, d_b, n_q, s);
         for (int alone = 0; alone < 2; ++alone) {   // the queries in one call, and each alone (the most splits)
             if (alone)
                 for (int i = 0; i < n_q; ++i)
-                    strata::kernels::qsa_decode_attn_batch(d_q + (size_t) i * NH * HD, pools, d_ids + (size_t) i * cap,
+                    lamina::kernels::qsa_decode_attn_batch(d_q + (size_t) i * NH * HD, pools, d_ids + (size_t) i * cap,
                                                            d_steps + i * SC, cap, sh, d_scratch,
                                                            d_a + (size_t) i * NH * HD, 1, s);
-            else strata::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
+            else lamina::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
             check(cudaStreamSynchronize(s), "decode attn");
             const std::vector<float> a = down(d_a, q.size()), b = down(d_b, q.size());
             for (int r = 0; r < n_q * NH; ++r) {   // relative to the largest value of the head's output row
@@ -1398,9 +1398,9 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
                 }
         }
         // the gate in the merge against native_qsa_gate_apply on the ungated output
-        strata::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
-        strata::kernels::native_qsa_gate_apply(d_a, d_qf, d_c, n_q * NH, HD, s);
-        strata::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_g, n_q, s, d_qf);
+        lamina::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
+        lamina::kernels::native_qsa_gate_apply(d_a, d_qf, d_c, n_q * NH, HD, s);
+        lamina::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_g, n_q, s, d_qf);
         check(cudaStreamSynchronize(s), "gated attn");
         const std::vector<float> g = down(d_g, q.size()), c = down(d_c, q.size());
         if (std::memcmp(g.data(), c.data(), g.size() * 4) != 0) {
@@ -1423,10 +1423,10 @@ int test_decode_attn(std::mt19937& rng, cudaStream_t s) {
 // ---- K and V appended in each format, then both attention forms, against FP64 attention over the unquantized values:
 // the formats' own rounding is all that is left (each format's error, and INT8's for scale)
 int test_kv_roundtrip(std::mt19937& rng, cudaStream_t s) {
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const int HD = (int) sh.head_dim, NH = (int) sh.n_head, NKV = (int) sh.n_head_kv, cells = 2048;
     const int pages = cells / (int) sh.page_size, per_tok = NKV * HD;
-    const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, sh);
+    const int64_t cap = lamina::kernels::qsa_selection_width(lamina::kernels::kTopkMaxCells, sh);
     const size_t rows = (size_t) cells * NKV;
     std::vector<int32_t> table((size_t) pages);
     for (int i = 0; i < pages; ++i) table[(size_t) i] = i;
@@ -1447,16 +1447,16 @@ int test_kv_roundtrip(std::mt19937& rng, cudaStream_t s) {
     uint16_t *d_ks4 = dev<uint16_t>(rows * 8), *d_vs4 = dev<uint16_t>(rows * 8);
     const int n_q = 3;
     const int widths[n_q] = {1, 300, 2048};
-    std::vector<int32_t> ids((size_t) n_q * cap, 0), steps((size_t) n_q * strata::kernels::kStepCount, 0);
+    std::vector<int32_t> ids((size_t) n_q * cap, 0), steps((size_t) n_q * lamina::kernels::kStepCount, 0);
     for (int i = 0; i < n_q; ++i) {
         for (int c = 0; c < widths[i]; ++c) ids[(size_t) i * cap + c] = cells - widths[i] + c;
-        steps[(size_t) i * strata::kernels::kStepCount + strata::kernels::kStepWidth] = widths[i];
+        steps[(size_t) i * lamina::kernels::kStepCount + lamina::kernels::kStepWidth] = widths[i];
     }
     std::vector<float> q((size_t) n_q * NH * HD);
     for (auto& x : q) x = 0.3f * nd(rng);
     int32_t *d_ids = dev<int32_t>(ids.size()), *d_steps = dev<int32_t>(steps.size());
     float *d_q = dev<float>(q.size()), *d_a = dev<float>(q.size()), *d_b = dev<float>(q.size());
-    float* d_scratch = dev<float>((size_t) n_q * strata::kernels::qsa_decode_attn_scratch_floats(cap, sh));
+    float* d_scratch = dev<float>((size_t) n_q * lamina::kernels::qsa_decode_attn_scratch_floats(cap, sh));
     up(d_ids, ids); up(d_steps, steps); up(d_q, q);
     // FP64 over the values as appended
     std::vector<double> ref(q.size());
@@ -1486,23 +1486,23 @@ int test_kv_roundtrip(std::mt19937& rng, cudaStream_t s) {
     double err[3][2] = {};
     int bad = 0;
     for (int fmt = 0; fmt < 3; ++fmt) {
-        strata::kernels::QsaAttnPools pools;
+        lamina::kernels::QsaAttnPools pools;
         pools.page_table = d_table;
         if (fmt == 0) {
-            strata::prefill::kv_append(d_k, d_v, cells, 0, d_table, sh.page_size, nullptr, nullptr, d_kq, d_vq, d_ks,
+            lamina::prefill::kv_append(d_k, d_v, cells, 0, d_table, sh.page_size, nullptr, nullptr, d_kq, d_vq, d_ks,
                                        d_vs, s);
             pools.k_q = d_kq; pools.v_q = d_vq; pools.k_scale = d_ks; pools.v_scale = d_vs;
         } else if (fmt == 1) {
-            strata::prefill::kv_append(d_k, d_v, cells, 0, d_table, sh.page_size, nullptr, nullptr, d_kq, nullptr, d_ks,
+            lamina::prefill::kv_append(d_k, d_v, cells, 0, d_table, sh.page_size, nullptr, nullptr, d_kq, nullptr, d_ks,
                                        nullptr, s, 1);
-            strata::kernels::kv_append_q4_rows(nullptr, nullptr, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh, s);
+            lamina::kernels::kv_append_q4_rows(nullptr, nullptr, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh, s);
             pools.k_q = d_kq; pools.k_scale = d_ks; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4;
         } else {
-            strata::kernels::kv_append_q4_rows(d_kq4, d_ks4, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh, s);
+            lamina::kernels::kv_append_q4_rows(d_kq4, d_ks4, d_vq4, d_vs4, d_table, 0, cells, d_k, d_v, per_tok, sh, s);
             pools.k_q4 = d_kq4; pools.k_q4s = d_ks4; pools.v_q4 = d_vq4; pools.v_q4s = d_vs4;
         }
-        strata::kernels::qsa_prefill_attn(d_q, pools, d_ids, d_steps, cap, sh, d_b, n_q, s);
-        strata::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
+        lamina::kernels::qsa_prefill_attn(d_q, pools, d_ids, d_steps, cap, sh, d_b, n_q, s);
+        lamina::kernels::qsa_decode_attn_batch(d_q, pools, d_ids, d_steps, cap, sh, d_scratch, d_a, n_q, s);
         check(cudaStreamSynchronize(s), "roundtrip attn");
         const std::vector<float> a = down(d_a, q.size()), b = down(d_b, q.size());
         for (int form = 0; form < 2; ++form) {   // RMS error over RMS of the reference
@@ -1574,16 +1574,16 @@ int test_prefill_gdn(std::mt19937& rng, cudaStream_t s) {
         for (size_t i = 0; i < counts.size(); ++i) {
             const size_t t0 = i * 8;
             const int n = counts[i];
-            strata::kernels::gdn_conv_l2_multi(d_hist[0], d_qkv + t0 * C, d_w, d_h[0] + t0 * C, C, 2 * HK, eps, n, s);
-            strata::kernels::gdn_conv_commit(d_hist[0], d_qkv + t0 * C, C, d_counts + i, s);
-            strata::kernels::gdn_step_norm_multi(d_state[0], d_h[0] + t0 * C, C, d_gate + t0 * HV, d_beta + t0 * HV,
+            lamina::kernels::gdn_conv_l2_multi(d_hist[0], d_qkv + t0 * C, d_w, d_h[0] + t0 * C, C, 2 * HK, eps, n, s);
+            lamina::kernels::gdn_conv_commit(d_hist[0], d_qkv + t0 * C, C, d_counts + i, s);
+            lamina::kernels::gdn_step_norm_multi(d_state[0], d_h[0] + t0 * C, C, d_gate + t0 * HV, d_beta + t0 * HV,
                                                  d_z + t0 * ZV, d_gamma, eps, d_y[0] + t0 * ZV, HK, HV, n, d_counts + i, s);
         }
         // the prompt path, all T at once
-        strata::prefill::gdn_conv(d_hist[1], d_qkv, d_w, d_h[1], T, eps, s);
-        strata::prefill::gdn_scan(d_state[1], d_h[1], d_gate, d_beta, d_y[1], T, s);
-        strata::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16, T, s);   // the engine's: FP16 only
-        strata::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16b, T, s, true);   // and FP32, in place
+        lamina::prefill::gdn_conv(d_hist[1], d_qkv, d_w, d_h[1], T, eps, s);
+        lamina::prefill::gdn_scan(d_state[1], d_h[1], d_gate, d_beta, d_y[1], T, s);
+        lamina::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16, T, s);   // the engine's: FP16 only
+        lamina::prefill::gdn_out_norm(d_y[1], d_z, d_gamma, eps, d_y16b, T, s, true);   // and FP32, in place
         check(cudaStreamSynchronize(s), "prefill gdn");
         const bool y16_same = down(d_y16, z.size()) == down(d_y16b, z.size());
         if (!y16_same) std::fprintf(stderr, "  FP16 y: the norm's two forms differ\n");
@@ -1628,7 +1628,7 @@ int test_prefill_gdn(std::mt19937& rng, cudaStream_t s) {
 // vocabularies with ties at the maximum (the lowest index wins), NaN, -inf, a row with no value above -inf, and
 // launches repeated on one scratch (each must leave its counters at zero)
 int test_argmax(std::mt19937& rng, cudaStream_t s) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     int bad = 0;
     std::normal_distribution<float> nd(0.0f, 4.0f);
     uint8_t* sa = dev<uint8_t>(argmax_rows_scratch_bytes(8));   // one scratch for every row count, as in the engine

@@ -6,7 +6,7 @@
 //
 // The bench measures the speculation model's `extra_use_cost`: the CPU time of each extra token routed to an
 // expert, as a fraction of reading the expert once (tools/spec_economics.py assumes 0.2).
-#include "strata/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -15,7 +15,7 @@
 #include <random>
 #include <vector>
 
-namespace c = strata::kernels::cpu;
+namespace c = lamina::kernels::cpu;
 
 namespace {
 // the pool's path: the gate/up rows, the second activation quantization, the down rows (what the engine's expert

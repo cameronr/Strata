@@ -1,4 +1,4 @@
-"""harness.py - drives strata-q36 / `strata` (qwen35moe) --serve over the engine protocol, for the q36-vp gates.
+"""harness.py - drives lamina-q36 / `lamina` (qwen35moe) --serve over the engine protocol, for the q36-vp gates.
 
     Eng(exe, args)            starts `exe --serve args`, waits for READY (INFO lines kept)
     .solo(ids, n, keys, emb)  GEN / GENI one request -> (tokens, DONE line)

@@ -1,7 +1,7 @@
 // src/qwen35/q36ref.cu - NEW-MODELS-PLAN.md phase T1: the reference path for Qwen3.6-35B-A3B (GGUF architecture
 // qwen35moe), exactness first.  One GPU, the whole model resident in VRAM (UD-Q4_K_XL: 21.3 GiB on a 32 GB card),
 // one token at a time (the prompt too), fp32 activations, every weight read in its GGUF form.  Two kernel sets:
-// --kernels plain, this file's own plain kernels (the reference), and --kernels strata (default), Strata's native
+// --kernels plain, this file's own plain kernels (the reference), and --kernels lamina (default), Lamina's native
 // MMVQ for the quantized matmuls (dense and routed experts) and its fused GDN step with the SiLU-gated norm - the
 // engine's kernels on the new family's shapes.  No expert cache, no MTP, no graphs: checked against llama.cpp
 // (per-layer hidden states, greedy tokens, teacher-forced KL: tools/qwen35/).
@@ -22,18 +22,18 @@
 //            + sigmoid(w_shexp_gate . h2) * W_down_s (silu(W_gate_s h2) * W_up_s h2);  x += moe
 //   logits = W_output (rms(x) * output_norm)
 //
-// Usage: strata-q36ref --model Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --tokens 248045,846,198,... [--n 64] [--ctx 4096]
-//                      [--dump-layers FILE] [--dump-logits FILE] [--act q8|f32] [--kernels strata|plain]
+// Usage: lamina-q36ref --model Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --tokens 248045,846,198,... [--n 64] [--ctx 4096]
+//                      [--dump-layers FILE] [--dump-logits FILE] [--act q8|f32] [--kernels lamina|plain]
 //                      [--force IDS] [--dump-full-logits F]
 //   prints the greedy ids ("gen: id id ..."); --dump-layers writes every processed position's 40 layer outputs (f32,
 //   [pos][layer][2048]); --dump-logits writes each greedy step's top-2 (id, logit) pairs for the near-tie report;
 //   --force feeds the given continuation instead of the greedy ids and --dump-full-logits writes every step's
 //   logits (f32, [step][vocab]) for the teacher-forced KL check (tools/qwen35/kl.py).
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/core/family_layout.hpp"
-#include "strata/kernels/fused_gdn.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_router.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/family_layout.hpp"
+#include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_router.hpp"
 
 #include <cuda_runtime.h>
 
@@ -354,7 +354,7 @@ struct Tensor {
 
 size_t row_bytes_of(int type, int64_t n) {
     int be = 0, bb = 0;
-    if (!strata::block_geometry((uint32_t) type, be, bb)) return 0;
+    if (!lamina::block_geometry((uint32_t) type, be, bb)) return 0;
     return (size_t) (n / be) * (size_t) bb;
 }
 
@@ -387,11 +387,11 @@ bool g_act_q8 = true;
 float* g_act_buf = nullptr;
 constexpr size_t kActBuf = 1 << 16;
 
-// --kernels strata (the default): the quantized matmuls run on Strata's native MMVQ (llama.cpp's pinned MMVQ: q8_1
-// activations, one launch per routed expert) and the GDN step on Strata's fused kernels (conv + SiLU + L2, then the
+// --kernels lamina (the default): the quantized matmuls run on Lamina's native MMVQ (llama.cpp's pinned MMVQ: q8_1
+// activations, one launch per routed expert) and the GDN step on Lamina's fused kernels (conv + SiLU + L2, then the
 // step with the SiLU-gated norm); --kernels plain keeps every op on this file's own kernels (the reference).  The
-// Strata kernels run on a blocking stream, so they and the null-stream work here stay in order.
-bool g_strata = true;
+// Lamina kernels run on a blocking stream, so they and the null-stream work here stay in order.
+bool g_lamina = true;
 cudaStream_t g_st = nullptr;
 void* g_q8 = nullptr;
 std::vector<int> g_ids_host;   // the routed experts of the current layer (the native expert path launches per id)
@@ -399,17 +399,17 @@ std::vector<int> g_ids_host;   // the routed experts of the current layer (the n
 void gemv(const Tensor& w, const float* x, float* y, const int* ids = nullptr, int n_sel = 1, size_t x_stride = 0) {
     const size_t eb = w.shape.size() == 3 ? w.row_bytes * (size_t) w.shape[1] : 0;
     const bool quant = w.type == T_Q8_0 || w.type == T_Q4_K || w.type == T_Q5_K || w.type == T_Q6_K;
-    if (quant && g_strata) {
+    if (quant && g_lamina) {
         const int n_in = (int) w.shape[0], n_out = (int) w.shape[1], cols = x_stride ? n_sel : 1;
         if (x_stride && x_stride != (size_t) n_in) {
             std::fprintf(stderr, "q36ref: the native path wants contiguous input columns\n");
             std::exit(1);
         }
-        strata::kernels::native_quantize_q8_1(x, g_q8, n_in, cols, g_st);
-        const size_t qb = strata::kernels::native_q8_1_bytes(n_in, 1);
+        lamina::kernels::native_quantize_q8_1(x, g_q8, n_in, cols, g_st);
+        const size_t qb = lamina::kernels::native_q8_1_bytes(n_in, 1);
         for (int sel = 0; sel < n_sel; ++sel) {
             const uint8_t* we = w.d + (ids ? (size_t) g_ids_host[(size_t) sel] * eb : 0);
-            strata::kernels::native_mmvq(w.type, we, (const char*) g_q8 + (x_stride ? (size_t) sel * qb : 0),
+            lamina::kernels::native_mmvq(w.type, we, (const char*) g_q8 + (x_stride ? (size_t) sel * qb : 0),
                                          y + (size_t) sel * n_out, n_in, n_out, 1, g_st);
         }
         CK(cudaGetLastError());
@@ -434,7 +434,7 @@ void gemv(const Tensor& w, const float* x, float* y, const int* ids = nullptr, i
     case T_Q5_K: gemv_t<T_Q5_K>(w, eb, ids, n_sel, x, x_stride, y); break;
     case T_Q6_K: gemv_t<T_Q6_K>(w, eb, ids, n_sel, x, x_stride, y); break;
     default:
-        std::fprintf(stderr, "q36ref: no kernel for ggml type %d (%s)\n", w.type, strata::ggml_type_name((uint32_t) w.type));
+        std::fprintf(stderr, "q36ref: no kernel for ggml type %d (%s)\n", w.type, lamina::ggml_type_name((uint32_t) w.type));
         std::exit(1);
     }
     CK(cudaGetLastError());
@@ -442,7 +442,7 @@ void gemv(const Tensor& w, const float* x, float* y, const int* ids = nullptr, i
 
 /// A 1-D tensor as f32 on the device (F32 as is, BF16 widened at load).
 struct Model {
-    strata::core::ModelGeometry g;
+    lamina::core::ModelGeometry g;
     int64_t top_k = 8;
     float eps = 1e-6f, rope_base = 1e7f;
     int n_rot = 64;
@@ -478,23 +478,23 @@ float h2f_host(uint16_t h) {
 
 bool load(const std::string& path, Model& m, std::string& err) {
     const auto t0 = std::chrono::steady_clock::now();
-    const strata::GgufModel gm = strata::GgufModel::open(path);
-    if (!strata::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
-    if (m.g.family != strata::ModelFamily::Qwen35Moe) {
+    const lamina::GgufModel gm = lamina::GgufModel::open(path);
+    if (!lamina::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
+    if (m.g.family != lamina::ModelFamily::Qwen35Moe) {
         err = "this reference path is for Qwen3.6-35B-A3B (qwen35moe) only";
         return false;
     }
     size_t checked = 0;
-    if (!strata::core::check_gguf_layout(gm, m.g, err, &checked)) return false;
+    if (!lamina::core::check_gguf_layout(gm, m.g, err, &checked)) return false;
     const std::string p = "qwen35moe.";
-    if (const strata::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
-    if (const strata::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
-    if (const strata::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
+    if (const lamina::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
+    if (const lamina::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
+    if (const lamina::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
     uint64_t bytes = 0;
     for (size_t s = 0; s < gm.size(); ++s) {
-        const strata::GgufFile& f = gm.shard(s);
-        for (const strata::TensorInfo& ti : f.tensors()) {
-            const uint64_t nb = strata::tensor_payload_bytes(ti);
+        const lamina::GgufFile& f = gm.shard(s);
+        for (const lamina::TensorInfo& ti : f.tensors()) {
+            const uint64_t nb = lamina::tensor_payload_bytes(ti);
             const uint8_t* src = f.tensor_data(ti);
             // the MTP block (blk.40) is not run by this path: not loaded
             if (ti.name.rfind("blk." + std::to_string(m.g.n_layers) + ".", 0) == 0) continue;
@@ -571,9 +571,9 @@ void init_state(const Model& m, State& s) {
     CK(cudaMalloc(&s.ids, K * sizeof(int)));
     g_act_buf = dalloc(kActBuf);
     CK(cudaStreamCreate(&g_st));   // blocking: ordered with this file's null-stream launches and copies
-    CK(cudaMalloc(&g_q8, strata::kernels::native_q8_1_bytes((int) kActBuf, 1)));
+    CK(cudaMalloc(&g_q8, lamina::kernels::native_q8_1_bytes((int) kActBuf, 1)));
     for (int64_t l = 0; l < g.n_layers; ++l) {
-        if (strata::core::is_qsa_layer(g, l)) {
+        if (lamina::core::is_qsa_layer(g, l)) {
             s.conv_state.push_back(nullptr);
             s.S.push_back(nullptr);
             s.kc.push_back(dalloc((size_t) g.n_head_kv * s.ctx * g.head_dim));
@@ -613,19 +613,19 @@ void forward(const Model& m, State& s, int tok, float* layers) {
     embed(m, s, tok);
     for (int64_t l = 0; l < g.n_layers; ++l) {
         k_rms<<<1, kThreads>>>(s.x, m.F(L(l, "attn_norm.weight")), s.h, N, m.eps);
-        if (!strata::core::is_qsa_layer(g, l)) {
+        if (!lamina::core::is_qsa_layer(g, l)) {
             const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, D = (int) g.ssm_state_size;
             const int C = (int) g.ssm_conv_channels;
             gemv(m.W(L(l, "attn_qkv.weight")), s.h, s.qkv);
             gemv(m.W(L(l, "attn_gate.weight")), s.h, s.z);
             gemv(m.W(L(l, "ssm_beta.weight")), s.h, s.beta);
             gemv(m.W(L(l, "ssm_alpha.weight")), s.h, s.alpha);
-            if (g_strata && D == 128 && g.ssm_d_conv == 4) {
-                // Strata's fused GDN (its own state layouts: conv history [channel][3], S [row][head][col])
-                strata::kernels::fused_gdn_conv_l2(s.conv_state[l], s.qkv, m.F(L(l, "ssm_conv1d.weight")), s.conv_out,
+            if (g_lamina && D == 128 && g.ssm_d_conv == 4) {
+                // Lamina's fused GDN (its own state layouts: conv history [channel][3], S [row][head][col])
+                lamina::kernels::fused_gdn_conv_l2(s.conv_state[l], s.qkv, m.F(L(l, "ssm_conv1d.weight")), s.conv_out,
                                                    C, 2 * HK, m.eps, g_st);
                 k_gdn_gb<<<1, 64, 0, g_st>>>(s.alpha, m.F(L(l, "ssm_dt.bias")), m.F(L(l, "ssm_a")), s.beta, HV);
-                strata::kernels::fused_gdn_step_norm_silu(s.S[l], s.conv_out, s.conv_out + HK * D,
+                lamina::kernels::fused_gdn_step_norm_silu(s.S[l], s.conv_out, s.conv_out + HK * D,
                                                           s.conv_out + 2 * HK * D, s.alpha, s.beta, s.z,
                                                           m.F(L(l, "ssm_norm.weight")), m.eps, s.gdn_out, HK, HV, g_st);
             } else {
@@ -654,9 +654,9 @@ void forward(const Model& m, State& s, int tok, float* layers) {
         k_rms<<<1, kThreads>>>(s.x, m.F(L(l, "post_attention_norm.weight")), s.h, N, m.eps);
         // router: softmax over every expert, top-k, renormalised (host side: exact and simple)
         gemv(m.W(L(l, "ffn_gate_inp.weight")), s.h, s.router);
-        if (g_strata && strata::kernels::native_router_topk_supported((int) g.n_expert, K)) {
-            // Strata's router (llama.cpp's topk-moe contract) for 256 / 8; the ids come back for the per-expert launches
-            strata::kernels::native_router_topk(s.router, s.ids, s.wts, (int) g.n_expert, K, 1, g_st);
+        if (g_lamina && lamina::kernels::native_router_topk_supported((int) g.n_expert, K)) {
+            // Lamina's router (llama.cpp's topk-moe contract) for 256 / 8; the ids come back for the per-expert launches
+            lamina::kernels::native_router_topk(s.router, s.ids, s.wts, (int) g.n_expert, K, 1, g_st);
             g_ids_host.resize((size_t) K);
             CK(cudaMemcpy(g_ids_host.data(), s.ids, K * sizeof(int), cudaMemcpyDeviceToHost));
         } else {
@@ -747,8 +747,8 @@ int main(int argc, char** argv) {
         else if (a == "--force") force = next();
         else if (a == "--kernels") {
             const std::string v = next();
-            if (v != "strata" && v != "plain") { std::fprintf(stderr, "q36ref: --kernels strata or plain\n"); return 2; }
-            g_strata = v == "strata";
+            if (v != "lamina" && v != "plain") { std::fprintf(stderr, "q36ref: --kernels lamina or plain\n"); return 2; }
+            g_lamina = v == "lamina";
         }
         else if (a == "--dump-full-logits") dump_full = next();
         else if (a == "--act") {
@@ -757,8 +757,8 @@ int main(int argc, char** argv) {
             g_act_q8 = v == "q8";
         }
         else {
-            std::fprintf(stderr, "usage: strata-q36ref --model GGUF --tokens ID,ID,... | --tokens-file F [--n 64] [--ctx 4096] "
-                                 "[--dump-layers FILE] [--dump-logits FILE] [--act q8|f32] [--kernels strata|plain] "
+            std::fprintf(stderr, "usage: lamina-q36ref --model GGUF --tokens ID,ID,... | --tokens-file F [--n 64] [--ctx 4096] "
+                                 "[--dump-layers FILE] [--dump-logits FILE] [--act q8|f32] [--kernels lamina|plain] "
                                  "[--force ID,ID,...] [--dump-full-logits FILE]\n");
             return 2;
         }

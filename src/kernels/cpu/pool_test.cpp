@@ -18,9 +18,9 @@
 //      wakes then must not join it: the host may already be writing the next phase.  Thousands of batches, with
 //      idle gaps either side of `kIdleSpin` and one-expert batches after the long ones, every output bitwise
 //      against a serial run of the same kernels.
-#include "strata/kernels/cpu/pool.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#if defined(STRATA_NATIVE_EXPERTS)
+#include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#if defined(LAMINA_NATIVE_EXPERTS)
 #include "ggml.h"
 #endif
 
@@ -36,7 +36,7 @@
 #include <thread>
 #include <vector>
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = lamina::kernels::cpu;
 
 namespace {
 
@@ -142,7 +142,7 @@ StressStats stress_run(cpu::ExpertPool& pool, std::mt19937& rng, int iters) {
     return s;
 }
 
-#if defined(STRATA_NATIVE_EXPERTS)
+#if defined(LAMINA_NATIVE_EXPERTS)
 /// `run_split_multi_native` (or `run_fused_native`: both halves in one phase): one layer's experts in GGUF formats,
 /// split by rows, several tokens per expert.
 StressStats stress_native(cpu::ExpertPool& pool, std::mt19937& rng, int iters, ggml_type gu, ggml_type dn, bool fused,
@@ -234,7 +234,7 @@ int stress(int iters) {
     } else {
         std::printf("  run(): SKIPPED, the CPU lacks %s\n", cpu::cpu_features().reason());
     }
-#if defined(STRATA_NATIVE_EXPERTS)
+#if defined(LAMINA_NATIVE_EXPERTS)
     const struct { ggml_type gu, dn; bool fused; const char* name; } fmts[] = {
         {GGML_TYPE_Q4_K, GGML_TYPE_Q5_1, false, "native rows, Q4_K / Q5_1"},             // ggml-cpu's dot products
         {GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ4_NL, false, "native rows, IQ3_XXS / IQ4_NL"},   // + the AVX-512 i-quant kernel
@@ -254,7 +254,7 @@ int stress(int iters) {
         bad += s.differ != 0 || s.long_gaps == 0 || pool.sleeps() == z0;
     }
 #else
-    std::printf("  native rows: SKIPPED, built without STRATA_NATIVE_EXPERTS\n");
+    std::printf("  native rows: SKIPPED, built without LAMINA_NATIVE_EXPERTS\n");
 #endif
     std::printf("\npool stress: %d failures\n", bad);
     return bad ? 1 : 0;

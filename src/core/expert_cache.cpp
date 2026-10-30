@@ -1,5 +1,5 @@
 // src/core/expert_cache.cpp - R4's slot storage and residency table.  Read the header first.
-#include "strata/core/expert_cache.hpp"
+#include "lamina/core/expert_cache.hpp"
 
 #include <cuda_runtime.h>
 #include <cuda.h>   // #533: the virtual memory management types (the functions come through the runtime's entry points)
@@ -12,7 +12,7 @@
 #include <utility>
 #include <cstring>
 
-namespace strata::core {
+namespace lamina::core {
 
 // See the header.  NVIDIA's DGX Spark Porting Guide (section 5.5, "Memory reporting on UMA systems") recommends the same:
 // not to rely on cudaMemGetInfo alone but to count the memory the OS can reclaim.  Swap is not counted here (unlike
@@ -42,14 +42,14 @@ size_t device_free_bytes() {
             while (std::fgets(line, sizeof line, m))
                 if (std::sscanf(line, "MemAvailable: %llu kB", &kb) == 1) break;
             std::fclose(m);
-            // STRATA_UMA_HEADROOM_GIB: a whole number of GiB, 0..1024; anything else keeps the default 6 (said once)
+            // LAMINA_UMA_HEADROOM_GIB: a whole number of GiB, 0..1024; anything else keeps the default 6 (said once)
             static const long gib = [] {
-                const char* h = std::getenv("STRATA_UMA_HEADROOM_GIB");
+                const char* h = std::getenv("LAMINA_UMA_HEADROOM_GIB");
                 if (h == nullptr) return 6L;
                 char* end = nullptr;
                 const long v = std::strtol(h, &end, 10);
                 if (end != h && *end == '\0' && v >= 0 && v <= 1024) return v;
-                std::fprintf(stderr, "lamina: STRATA_UMA_HEADROOM_GIB=%s is not a whole number of GiB (0-1024): using 6\n", h);
+                std::fprintf(stderr, "lamina: LAMINA_UMA_HEADROOM_GIB=%s is not a whole number of GiB (0-1024): using 6\n", h);
                 return 6L;
             }();
             const unsigned long long head = (unsigned long long) gib << 30;
@@ -746,4 +746,4 @@ bool ExpertCache::verify_slot(int32_t slot, const uint8_t* host_blob, std::strin
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

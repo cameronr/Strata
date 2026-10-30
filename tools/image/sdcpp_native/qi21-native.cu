@@ -1,4 +1,4 @@
-// qi21-native.cu - Strata's native kernels for the Qwen-Image-2.1 DiT inside stable-diffusion.cpp (CUDA and HIP).
+// qi21-native.cu - Lamina's native kernels for the Qwen-Image-2.1 DiT inside stable-diffusion.cpp (CUDA and HIP).
 //
 // Copied into ggml/src/ggml-cuda/ by tools/image/sdcpp_native/apply.py, so ggml-cuda and ggml-hip compile it with
 // their own toolchain and vendor headers.  The host side (qwen_image_2_1_native.hpp) runs the GEMMs as ggml graphs
@@ -549,16 +549,16 @@ void* qi21_stream(ggml_backend_t backend) {
 }
 
 // 1 when this backend's GPU runs qi21_attn_wmma (an RDNA3 / gfx11 or RDNA4 / gfx12 card in a HIP build;
-// STRATA_QI_GFX12_ATTN=0 keeps ggml's attention on gfx12, where this kernel is not measured yet)
+// LAMINA_QI_GFX12_ATTN=0 keeps ggml's attention on gfx12, where this kernel is not measured yet)
 int qi21_has_wmma_attn(ggml_backend_t backend) {
 #if defined(GGML_USE_HIP)
     const int dev = static_cast<ggml_backend_cuda_context*>(backend->context)->device;
     const int cc = ggml_cuda_info().devices[dev].cc;
     if (GGML_CUDA_CC_IS_RDNA3(cc)) return 1;
-    const char* g12 = getenv("STRATA_QI_GFX12_ATTN");
+    const char* g12 = getenv("LAMINA_QI_GFX12_ATTN");
     return GGML_CUDA_CC_IS_RDNA4(cc) && g12 != nullptr && g12[0] == '1' ? 1 : 0;
 #else
-    // NVIDIA Ampere or newer: the mma.sync kernel (STRATA_QI_GGML_ATTN=1 in the runner keeps ggml's)
+    // NVIDIA Ampere or newer: the mma.sync kernel (LAMINA_QI_GGML_ATTN=1 in the runner keeps ggml's)
     const int dev = static_cast<ggml_backend_cuda_context*>(backend->context)->device;
     return GGML_CUDA_CC_IS_NVIDIA(ggml_cuda_info().devices[dev].cc) &&
                    ggml_cuda_info().devices[dev].cc >= GGML_CUDA_CC_AMPERE ? 1 : 0;
@@ -598,7 +598,7 @@ int qi21_res_ln_mod(void* stream, float* x, const float* h, const float* g, floa
 int qi21_qkv_post(void* stream, const float* q, const float* k, const float* v, int ld, const float* wq, const float* wk,
                   const float* pe, void* qo, void* qlo, int q_f16, int q_tstride, void* ko, void* vo, int kv_tstride,
                   int kv_off, int T, int H, float eps) {
-    if (qlo == nullptr && H % 8 == 0 && ld % 4 == 0 && getenv("STRATA_QI_OLD_QKV") == nullptr) {
+    if (qlo == nullptr && H % 8 == 0 && ld % 4 == 0 && getenv("LAMINA_QI_OLD_QKV") == nullptr) {
         const dim3 gw(T, H / 8);
         if (q_f16)
             k_qkv_post_w<half><<<gw, 256, 0, qi_s(stream)>>>(q, k, v, ld, wq, wk, pe, static_cast<half*>(qo), q_tstride,

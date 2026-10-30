@@ -1,12 +1,12 @@
-// src/prefill/split.cpp - see include/strata/prefill/split.hpp.
-#include "strata/prefill/split.hpp"
+// src/prefill/split.cpp - see include/lamina/prefill/split.hpp.
+#include "lamina/prefill/split.hpp"
 
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/core/cuda_host.hpp"
-#include "strata/core/geometry.hpp"
-#include "strata/core/layer.hpp"
-#include "strata/core/layout.hpp"
-#include "strata/core/native_head.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/core/geometry.hpp"
+#include "lamina/core/layer.hpp"
+#include "lamina/core/layout.hpp"
+#include "lamina/core/native_head.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -17,7 +17,7 @@
 #include <mutex>
 #include <thread>
 
-namespace strata::prefill {
+namespace lamina::prefill {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -85,7 +85,7 @@ struct PromptSplit::Impl {
     core::MtpDrafter* mtp = nullptr;
     int64_t at = 0, max_chunk = 0;
     int dev = -1, main = 0;
-    strata::kernels::QsaShapes s;
+    lamina::kernels::QsaShapes s;
     // the dense weights of the layers from `at` on and the draft layer's prompt-K/V weights: the main GPU's rows, the
     // copies' layout, and the second GPU's table of its copies
     std::vector<Tensor> tensors;
@@ -404,7 +404,7 @@ bool PromptSplit::init(Prefill& first, const core::WeightTable& wt, const core::
         t.bytes[0] = ref.data != nullptr ? ref.bytes : 0;
         if (ref.native_data != nullptr) {
             int be = 0, bb = 0;
-            if (!strata::block_geometry((uint32_t) ref.native_type, be, bb) || be <= 0 || (ref.ne0 * ref.ne1) % be != 0) {
+            if (!lamina::block_geometry((uint32_t) ref.native_type, be, bb) || be <= 0 || (ref.ne0 * ref.ne1) % be != 0) {
                 err = "--prompt-split: " + name + " has a native type without a block geometry";
                 return false;
             }
@@ -696,4 +696,4 @@ bool PromptSplit::finish(std::string& err) {
     return ok;
 }
 
-}  // namespace strata::prefill
+}  // namespace lamina::prefill

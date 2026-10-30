@@ -6,8 +6,8 @@
 // the AVX-512 kernels': codes 0..3 against the int8 activation per 32-value chunk, times the weight scale and the
 // chunk scale, minus the weight scale times the chunk's `hx` (the -1 code offset); the quantizer is the scalar rule,
 // bit for bit.
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include <immintrin.h>
 
@@ -15,17 +15,17 @@
 #include <cstdlib>
 #include <cstring>
 
-// STRATA_AVXVNNI (CMake: the compiler has the AVX-VNNI intrinsics), as in iq_avx2.cpp
-#if !defined(STRATA_AVXVNNI)
-#define STRATA_AVXVNNI 0
+// LAMINA_AVXVNNI (CMake: the compiler has the AVX-VNNI intrinsics), as in iq_avx2.cpp
+#if !defined(LAMINA_AVXVNNI)
+#define LAMINA_AVXVNNI 0
 #endif
-#if STRATA_AVXVNNI && (defined(__GNUC__) || defined(__clang__))
-#define STRATA_AVXVNNI_FN __attribute__((target("avxvnni")))
+#if LAMINA_AVXVNNI && (defined(__GNUC__) || defined(__clang__))
+#define LAMINA_AVXVNNI_FN __attribute__((target("avxvnni")))
 #else
-#define STRATA_AVXVNNI_FN
+#define LAMINA_AVXVNNI_FN
 #endif
 
-namespace strata::kernels::cpu {
+namespace lamina::kernels::cpu {
 namespace {
 
 inline float h2f(const uint8_t* p) {
@@ -50,19 +50,19 @@ inline void unpack64(const uint8_t* codes, __m256i& lo, __m256i& hi) {
 
 // ---- the row kernel, twice: the AVX2 form and the AVX-VNNI one (q2_avx2_rows.inl)
 namespace plain {
-#define STRATA_ROWS_VNNI 0
-#define STRATA_ROWS_FN
+#define LAMINA_ROWS_VNNI 0
+#define LAMINA_ROWS_FN
 #include "q2_avx2_rows.inl"
 }  // namespace plain
-#if STRATA_AVXVNNI
+#if LAMINA_AVXVNNI
 namespace vnni {
-#define STRATA_ROWS_VNNI 1
-#define STRATA_ROWS_FN STRATA_AVXVNNI_FN
+#define LAMINA_ROWS_VNNI 1
+#define LAMINA_ROWS_FN LAMINA_AVXVNNI_FN
 #include "q2_avx2_rows.inl"
 }  // namespace vnni
 #endif
 
-// ================================ the "bit-plane" row dot (opt-in: STRATA_Q2_BITPLANE=1) ================================
+// ================================ the "bit-plane" row dot (opt-in: LAMINA_Q2_BITPLANE=1) ================================
 //
 // The kernel above spends, per 32-value chunk and token, a maddubs, a madd, a convert, a scalar d*scale product
 // broadcast into an FMA, and a scalar correction FMA; plus a 14-op interleave to unpack 64 codes.  Here:
@@ -82,7 +82,7 @@ namespace vnni {
 // The integer part is exact; only the float summation order differs from the kernel above (last bits).  Every
 // token's operations are the same whatever the group width, so a token's rows are bitwise the same alone or in a
 // verify window.  It changes the last bits of a Q2_0 expert on AVX2-only CPUs, so it is OFF by default
-// (STRATA_Q2_BITPLANE=1 turns it on; unset: the kernel above, exactly as before).
+// (LAMINA_Q2_BITPLANE=1 turns it on; unset: the kernel above, exactly as before).
 template <int NT>
 inline void row_bp_acc(const uint8_t* row, const ActQ* const* a, int npairs, __m256* acc) {
     for (int t = 0; t < NT; ++t) acc[t] = _mm256_setzero_ps();
@@ -144,7 +144,7 @@ void rows_bp(const uint8_t* w, size_t row_bytes, int npairs, const ActQ* const* 
 }
 
 const bool kBitplane = [] {
-    const char* e = std::getenv("STRATA_Q2_BITPLANE");
+    const char* e = std::getenv("LAMINA_Q2_BITPLANE");
     return e != nullptr && e[0] == '1';
 }();
 
@@ -152,7 +152,7 @@ const bool kBitplane = [] {
 
 void q2_0_gguf_rows_multi_avx2_v(bool vnni_rows, const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
                                  int nt, float* const* out, int r0, int r1) {
-#if STRATA_AVXVNNI
+#if LAMINA_AVXVNNI
     if (vnni_rows) {
         vnni::rows_nt(w, row_bytes, nblocks, a, nt, out, r0, r1);
         return;
@@ -164,7 +164,7 @@ void q2_0_gguf_rows_multi_avx2_v(bool vnni_rows, const uint8_t* w, size_t row_by
 
 void q2_0_gguf_rows_multi_avx2_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                                       float* const* out, int r0, int r1) {
-    q2_0_gguf_rows_multi_avx2_v(STRATA_AVXVNNI && cpu_avxvnni_ok(), w, row_bytes, nblocks, a, nt, out, r0, r1);
+    q2_0_gguf_rows_multi_avx2_v(LAMINA_AVXVNNI && cpu_avxvnni_ok(), w, row_bytes, nblocks, a, nt, out, r0, r1);
 }
 
 void q2_0_gguf_rows_multi_avx2(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
@@ -235,4 +235,4 @@ void act_quant_q8_1_avx2(const float* x, int n, ActQ& a) {
     else a.bp_pairs = 0;
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace lamina::kernels::cpu

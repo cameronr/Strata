@@ -1,5 +1,5 @@
-// src/platform/memory.cpp - see include/strata/platform/memory.hpp.
-#include "strata/platform/memory.hpp"
+// src/platform/memory.cpp - see include/lamina/platform/memory.hpp.
+#include "lamina/platform/memory.hpp"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -17,7 +17,7 @@
 #include <unistd.h>
 #endif
 
-namespace strata::platform {
+namespace lamina::platform {
 
 #if defined(_WIN32)
 LockResult lock_resident(void* p, uint64_t bytes) {
@@ -193,7 +193,7 @@ constexpr uint64_t kAdviseStep = 128ull << 10;
 
 bool read_ahead_enabled() {
     static const bool on = [] {
-        const char* v = std::getenv("STRATA_READ_AHEAD");
+        const char* v = std::getenv("LAMINA_READ_AHEAD");
         return v == nullptr || std::atoi(v) != 0;
     }();
     return on;
@@ -214,4 +214,4 @@ void advise_willneed(int fd, uint64_t offset, uint64_t bytes) {
 }
 #endif
 
-}  // namespace strata::platform
+}  // namespace lamina::platform

@@ -151,7 +151,7 @@ struct Watch {
 
 size_t body_limit() {
     // the most a request body may hold (read into memory); a larger one is answered 413 before it is read
-    const char* v = std::getenv("STRATA_MAX_BODY_MIB");
+    const char* v = std::getenv("LAMINA_MAX_BODY_MIB");
     long long mib = 0;
     if (v != nullptr) {
         try {
@@ -458,14 +458,14 @@ HttpServer::HttpServer(Service& svc) : svc_(svc), http_(std::make_unique<httplib
         const bool any = std::find(svc_.allowed_hosts.begin(), svc_.allowed_hosts.end(), "*") != svc_.allowed_hosts.end();
         if (truthy(svc_.api_key) || host_allowed(host, svc_.host_names, any)) return httplib::Server::HandlerResponse::Unhandled;
         say("[lamina] refused a request for Host " + py_repr_value(json(host)) + " from " + req.remote_addr +
-            ": not a name this server answers to (add it to \"allowed_hosts\" in the config or STRATA_ALLOWED_HOSTS, or "
+            ": not a name this server answers to (add it to \"allowed_hosts\" in the config or LAMINA_ALLOWED_HOSTS, or "
             "set an API key)");
         res.status = 403;
         res.set_content(py_dumps({{"error", {{"type", "forbidden"},
                                              {"message", "Host " + py_repr_value(json(host)) + " is not allowed (DNS rebinding "
                                                          "protection). Reaching Lamina under this name on purpose? Add it to "
                                                          "\"allowed_hosts\" in the config (lamina-<model>.json) or to the "
-                                                         "STRATA_ALLOWED_HOSTS environment variable, or set an API key "
+                                                         "LAMINA_ALLOWED_HOSTS environment variable, or set an API key "
                                                          "(\"api_key\"), which turns this check off"}}}}, false),
                         "application/json");
         return httplib::Server::HandlerResponse::Handled;
@@ -474,7 +474,7 @@ HttpServer::HttpServer(Service& svc) : svc_(svc), http_(std::make_unique<httplib
         if (res.status == 413 && res.body.empty())
             res.set_content(py_dumps({{"error", {{"type", "invalid_request_error"},
                                                  {"message", "the request body is larger than " + std::to_string(body_limit() >> 20) +
-                                                             " MiB (STRATA_MAX_BODY_MIB raises the limit)"}}}}, false),
+                                                             " MiB (LAMINA_MAX_BODY_MIB raises the limit)"}}}}, false),
                             "application/json");
     });
     h.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
@@ -952,13 +952,13 @@ void post_openai(std::shared_ptr<Exchange> xp, json req) {
     const std::optional<std::string> force = forced_call(jget(req, "tool_choice"), tools);   // a bad value: a 400 now
     auto [formatted, validator] = prepare_format(jget(req, "response_format"), messages);
     messages = std::move(formatted);
-    if (validator != nullptr && (truthy(tools) || truthy(jget(req, "strata_mcp"))))
+    if (validator != nullptr && (truthy(tools) || truthy(jget(req, "lamina_mcp"))))
         throw RequestError("structured response_format with tools/MCP is not supported");
     svc.load();
     const int64_t max_req = py_int(first_truthy({&jget(req, "max_completion_tokens"), &jget(req, "max_tokens")}));   // 0/-1: the rest
     int64_t max_new = max_req;
     validate_bias(req, *svc.engine, svc.tok.n_vocab());
-    bool use_mcp = jget(req, "strata_mcp") == true && svc.mcp != nullptr;   // the web app's opt-in
+    bool use_mcp = jget(req, "lamina_mcp") == true && svc.mcp != nullptr;   // the web app's opt-in
     std::set<std::string> own;   // #592: a second line of defence
     if (tools.is_array())
         for (const auto& t : tools)

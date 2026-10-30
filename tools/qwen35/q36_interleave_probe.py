@@ -2,7 +2,7 @@
 request's long prompt is read: the tokens they produce during the read, and their longest pause between two tokens, against the
 same without a read.  The read goes chunk by chunk with one decode window of the other slots between two chunks.
 
-  python tools/qwen35/q36_interleave_probe.py --exe build/strata-q36 --args "--model M --max-context 8192 --batch 4" --long 3000
+  python tools/qwen35/q36_interleave_probe.py --exe build/lamina-q36 --args "--model M --max-context 8192 --batch 4" --long 3000
 """
 import argparse, shlex, sys, time
 from pathlib import Path

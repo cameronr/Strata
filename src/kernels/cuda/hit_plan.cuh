@@ -6,7 +6,7 @@
 
 #include <cstdint>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int kHitPlanMax = 128;
@@ -68,4 +68,4 @@ __device__ __forceinline__ void hit_plan_block(const int32_t* __restrict__ ids, 
 }
 
 }  // namespace
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

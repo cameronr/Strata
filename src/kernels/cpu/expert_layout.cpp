@@ -1,5 +1,5 @@
 // src/kernels/cpu/expert_layout.cpp - plan v0.3 P6: the per-layer expert table.  See the header.
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -14,7 +14,7 @@
 #endif
 #include <sstream>
 
-namespace strata::kernels::cpu {
+namespace lamina::kernels::cpu {
 namespace {
 ExpertLayout g_layout;
 }
@@ -22,16 +22,16 @@ ExpertLayout g_layout;
 const ExpertLayout& expert_layout() { return g_layout; }
 
 int cpu_isa_cap() {
-    // STRATA_FORCE_ISA (tests, the experimental older-CPU builds): the engine's own dispatch acts as if this CPU
+    // LAMINA_FORCE_ISA (tests, the experimental older-CPU builds): the engine's own dispatch acts as if this CPU
     // stopped at that level.  ggml-cpu is not affected: it runs what the build compiled it for.
     static const int cap = [] {
-        const char* f = std::getenv("STRATA_FORCE_ISA");
+        const char* f = std::getenv("LAMINA_FORCE_ISA");
         if (f == nullptr || f[0] == '\0') return 3;
         const std::string v(f);
         if (v == "avx2") return 2;
         if (v == "avx") return 1;
         if (v == "sse" || v == "sse4.2" || v == "none") return 0;
-        std::fprintf(stderr, "lamina: STRATA_FORCE_ISA=%s is not avx2, avx or sse; ignored\n", f);
+        std::fprintf(stderr, "lamina: LAMINA_FORCE_ISA=%s is not avx2, avx or sse; ignored\n", f);
         return 3;
     }();
     return cap;
@@ -39,7 +39,7 @@ int cpu_isa_cap() {
 
 bool cpu_avx512_ok() {
     static const bool ok = [] {
-        if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
+        if (const char* f = std::getenv("LAMINA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;
         if (cpu_isa_cap() < 3) return false;
         unsigned r[4] = {0, 0, 0, 0};
         auto cpuid = [&](unsigned leaf, unsigned sub) {
@@ -136,9 +136,9 @@ bool cpu_avx1_ok() {
 }
 
 const char* isa_floor_build() {
-#if defined(STRATA_ISA_FLOOR_AVX)
+#if defined(LAMINA_ISA_FLOOR_AVX)
     return "avx";
-#elif defined(STRATA_ISA_FLOOR_NONE)
+#elif defined(LAMINA_ISA_FLOOR_NONE)
     return "sse4.2";
 #else
     return "";
@@ -159,7 +159,7 @@ void cpuid_regs(unsigned leaf, unsigned sub, unsigned r[4]) {
 
 int iq256_gather_setting() {
     static const int s = [] {
-        const char* v = std::getenv("STRATA_IQ256_GATHER");
+        const char* v = std::getenv("LAMINA_IQ256_GATHER");
         if (v == nullptr || v[0] == '\0') return -1;
         return std::atoi(v) != 0 ? 1 : 0;
     }();
@@ -168,7 +168,7 @@ int iq256_gather_setting() {
 
 bool cpu_gather_fast() {
     static const bool ok = [] {
-        if (cpu_isa_cap() < 3) return false;   // STRATA_FORCE_ISA: as on a CPU that stops at AVX2
+        if (cpu_isa_cap() < 3) return false;   // LAMINA_FORCE_ISA: as on a CPU that stops at AVX2
         unsigned r[4];
         cpuid_regs(0, 0, r);
         const unsigned max_leaf = r[0];
@@ -209,7 +209,7 @@ bool cpu_gather_fast_here() {
 
 bool cpu_avxvnni_ok() {
     static const bool ok = [] {
-        if (const char* v = std::getenv("STRATA_NO_AVXVNNI"); v != nullptr && std::atoi(v) != 0) return false;
+        if (const char* v = std::getenv("LAMINA_NO_AVXVNNI"); v != nullptr && std::atoi(v) != 0) return false;
         if (isa_floor_build()[0] != '\0' || cpu_isa_cap() < 3 || !cpu_avx2_ok()) return false;
         unsigned r[4];
         cpuid_regs(0, 0, r);
@@ -297,7 +297,7 @@ void act_quant_any(const float* x, int n, ActQ& a) {
     else act_quant_q8_1_avx1(x, n, a);   // issue #1699
 }
 
-#if !defined(STRATA_NATIVE_EXPERTS)
+#if !defined(LAMINA_NATIVE_EXPERTS)
 // Without ggml-cpu no native pack loads (expert_layout_load_text refuses), so these are never reached.
 bool native_experts_available() noexcept { return false; }
 bool native_fmt(int, int, int64_t, int64_t, NativeFmt&, std::string& err) { err = "built without native experts"; return false; }
@@ -314,9 +314,9 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
     ExpertLayout L;
     L.n_layers = n_layers;
     L.n_expert = n_expert;
-#if !defined(STRATA_NATIVE_EXPERTS)
+#if !defined(LAMINA_NATIVE_EXPERTS)
     (void) in;
-    err = "this pack has native (IQ) experts but the engine was built without STRATA_NATIVE_EXPERTS";
+    err = "this pack has native (IQ) experts but the engine was built without LAMINA_NATIVE_EXPERTS";
     return false;
 #else
     L.native = true;
@@ -328,9 +328,9 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
     while (std::getline(in, line)) {
         if (line.empty() || line[0] == '#') {
             if (!line.empty() && line[0] == '#') {
-                // "# strata native experts vN: ...".  A version this engine does not know may mean columns it
+                // "# lamina native experts vN: ...".  A version this engine does not know may mean columns it
                 // would misread, so it is refused rather than parsed as far as the known columns go.
-                static const char tag[] = "# strata native experts v";
+                static const char tag[] = "# lamina native experts v";
                 if (line.compare(0, sizeof tag - 1, tag) == 0) {
                     L.version = std::atoi(line.c_str() + sizeof tag - 1);
                     if (L.version > kExpertLayoutVersion) {
@@ -387,4 +387,4 @@ bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers
     return native_layout_load(in, n_layers, n_expert, err);
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace lamina::kernels::cpu

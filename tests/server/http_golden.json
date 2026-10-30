@@ -14948,7 +14948,7 @@
     }
    }
   ],
-  "chat-strata-prefix": [
+  "chat-lamina-prefix": [
    200,
    {
     "id": "chatcmpl_<id>",
@@ -14976,12 +14976,12 @@
     }
    }
   ],
-  "chat-strata-prefix-bad": [
+  "chat-lamina-prefix-bad": [
    400,
    {
     "error": {
      "type": "invalid_request_error",
-     "message": "strata_prefix.messages: a whole number (1 or more)"
+     "message": "lamina_prefix.messages: a whole number (1 or more)"
     }
    }
   ],
@@ -15222,7 +15222,7 @@
    {
     "error": {
      "type": "forbidden",
-     "message": "Host 'evil.example.com' is not allowed (DNS rebinding protection). Reaching Lamina under this name on purpose? Add it to \"allowed_hosts\" in the config (lamina-<model>.json) or to the STRATA_ALLOWED_HOSTS environment variable, or set an API key (\"api_key\"), which turns this check off"
+     "message": "Host 'evil.example.com' is not allowed (DNS rebinding protection). Reaching Lamina under this name on purpose? Add it to \"allowed_hosts\" in the config (lamina-<model>.json) or to the LAMINA_ALLOWED_HOSTS environment variable, or set an API key (\"api_key\"), which turns this check off"
     }
    }
   ],

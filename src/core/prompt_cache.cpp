@@ -1,7 +1,7 @@
-// src/core/prompt_cache.cpp - the --serve prompt cache (see include/strata/core/prompt_cache.hpp).
-#include "strata/core/prompt_cache.hpp"
+// src/core/prompt_cache.cpp - the --serve prompt cache (see include/lamina/core/prompt_cache.hpp).
+#include "lamina/core/prompt_cache.hpp"
 
-#include "strata/kernels/qsa.hpp"
+#include "lamina/kernels/qsa.hpp"
 
 #include <cuda_runtime.h>
 
@@ -10,7 +10,7 @@
 #include <cstdlib>
 #include <new>
 
-namespace strata::core {
+namespace lamina::core {
 
 namespace {
 
@@ -137,7 +137,7 @@ void PromptCache::release(Seq& seq, int64_t keep_upto) {
 std::vector<PromptCache::Part> PromptCache::kv_parts(int64_t cells) const {
     // [page][kv_head][page_size][head_dim] with an identity page table: the first cells are one prefix of each
     // pool.  The indexer's pooled rows are one per idx_block cells.
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     const uint64_t row = (uint64_t) g_.idx_key_dim * sizeof(float);
     std::vector<Part> parts;
     for (QsaState* st : kv_) {
@@ -341,4 +341,4 @@ std::string PromptCache::summary() const {
     return buf;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

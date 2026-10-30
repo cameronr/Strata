@@ -1,4 +1,4 @@
-"""Tests for the server address tools/strata_bench.py polls, without starting one.
+"""Tests for the server address tools/lamina_bench.py polls, without starting one.
 
     python -m unittest tools.test_bench_host
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
-import strata_bench as SB  # noqa: E402
+import lamina_bench as SB  # noqa: E402
 
 
 class ServerBase(unittest.TestCase):

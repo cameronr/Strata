@@ -1,4 +1,4 @@
-// qwen_image_2_1_native.hpp - Strata's native Qwen-Image-2.1 DiT runner for stable-diffusion.cpp (CUDA / HIP builds).
+// qwen_image_2_1_native.hpp - Lamina's native Qwen-Image-2.1 DiT runner for stable-diffusion.cpp (CUDA / HIP builds).
 //
 // Copied into src/model/diffusion/ by tools/image/sdcpp_native/apply.py and chosen by model_builders.cpp when the
 // model args contain qwen_image_2_1_native=1.  sd.cpp keeps the text encoder, the VAE, the sampler and the RNG; this
@@ -8,7 +8,7 @@
 // its modulation row is the t = 0 one) goes through all blocks once per prompt and leaves each layer's K/V (fp16)
 // behind - the same prefix cache sd.cpp keeps.  GEMMs are ggml graphs on the runner's backend (the MMQ / BLAS
 // kernels sd.cpp uses, same numerics); LayerNorm+modulate, gate+residual, q/k RMSNorm+RoPE, SwiGLU and (on gfx11)
-// the image attention are Strata kernels (ggml/src/ggml-cuda/qi21-native.cu) on the backend's stream.  Anything this
+// the image attention are Lamina kernels (ggml/src/ggml-cuda/qi21-native.cu) on the backend's stream.  Anything this
 // runner does not cover (reference images, an unfused MLP, a CPU / Vulkan backend, too little VRAM) goes to the
 // stock runner.
 #ifndef __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_NATIVE_H__
@@ -81,17 +81,17 @@ namespace Qwen {
                                 std::shared_ptr<RunnerWeightManager> weight_manager, const char* model_args,
                                 std::string dit_path)
             : QwenImage21Runner(backend, weights, prefix, weight_manager, model_args), dit_path(std::move(dit_path)) {
-            timing = getenv("STRATA_QI_TIMING") != nullptr;
-            qsplit     = getenv("STRATA_QI_QSPLIT") != nullptr;      // measured: no accuracy gain, +7% step time
-            exact_attn = getenv("STRATA_QI_EXACT_ATTN") != nullptr;
-            fuse_qkv   = getenv("STRATA_QI_NO_QKV_FUSE") == nullptr;
-            fast_ln    = getenv("STRATA_QI_FAST_LN") != nullptr;    // measured: no gain on the 3060 (2.10 vs 2.10 s/step)
+            timing = getenv("LAMINA_QI_TIMING") != nullptr;
+            qsplit     = getenv("LAMINA_QI_QSPLIT") != nullptr;      // measured: no accuracy gain, +7% step time
+            exact_attn = getenv("LAMINA_QI_EXACT_ATTN") != nullptr;
+            fuse_qkv   = getenv("LAMINA_QI_NO_QKV_FUSE") == nullptr;
+            fast_ln    = getenv("LAMINA_QI_FAST_LN") != nullptr;    // measured: no gain on the 3060 (2.10 vs 2.10 s/step)
             gbuf.resize(64 << 20);
         }
 
         ~QwenImage21NativeRunner() override { release(); }
 
-        std::string get_desc() override { return "qwen_image_2_1 (strata native)"; }
+        std::string get_desc() override { return "qwen_image_2_1 (lamina native)"; }
 
         void release() {
             if (abuf) ggml_backend_buffer_free(abuf);
@@ -232,7 +232,7 @@ namespace Qwen {
             }
             LOG_INFO("Qwen Image 2.1 native: %zu tensors, %.2f GB on %s%s", W.size(),
                      ggml_backend_buffer_get_size(wbuf) / 1e9, ggml_backend_name(runtime_backend),
-                     wmma_attn ? " (Strata attention)" : "");
+                     wmma_attn ? " (Lamina attention)" : "");
             return true;
         }
 
@@ -333,7 +333,7 @@ namespace Qwen {
             const int64_t kvt = prefix ? n : L + n;       // keys per head in the work K/V
             const bool use_wmma = !prefix && wmma_attn && !exact_attn;
             // fp16 queries carry ~5e-4 relative error into logits that reach the tens here: the low half of each
-            // query (q - fp16(q)) goes through a second WMMA (STRATA_QI_QSPLIT=0 drops it).  It sits in the fp32-sized
+            // query (q - fp16(q)) goes through a second WMMA (LAMINA_QI_QSPLIT=0 drops it).  It sits in the fp32-sized
             // q16 buffer right after the fp16 high half.
             const size_t qlo_off = (size_t) H * n * D * sizeof(ggml_fp16_t);
             float* X = (float*) x->data;
@@ -389,7 +389,7 @@ namespace Qwen {
                     }
                     if (rc) break;
                     if (exact_attn) {
-                        // reference: fp32 attention (fp16 K/V as every path has them), slow; STRATA_QI_EXACT_ATTN=1
+                        // reference: fp32 attention (fp16 K/V as every path has them), slow; LAMINA_QI_EXACT_ATTN=1
                         rc = qi21_attn_causal(s, (const float*) q16->data, (int) n, kw->data, vw->data, (int) kvt,
                                               (float*) att->data, (int) H, (int) n, (int) kvt, 0);
                     } else if (use_wmma) {
@@ -467,7 +467,7 @@ namespace Qwen {
             }
             const auto t0 = std::chrono::steady_clock::now();
             if (!loaded) {
-                wmma_attn = qi21_has_wmma_attn(runtime_backend) && getenv("STRATA_QI_GGML_ATTN") == nullptr;
+                wmma_attn = qi21_has_wmma_attn(runtime_backend) && getenv("LAMINA_QI_GGML_ATTN") == nullptr;
                 if (!load_weights()) {
                     fail("could not load the DiT weights onto the GPU");
                     return QwenImage21Runner::compute(n_threads, inputs);

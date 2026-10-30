@@ -90,8 +90,8 @@ ChatTemplate::~ChatTemplate() = default;
 std::string ChatTemplate::render(const json& messages, const json& tools, bool add_generation_prompt,
                                  const json& kwargs) const {
     // completed empty assistant turns are no examples for the next reply; the final message stays (#843;
-    // STRATA_KEEP_EMPTY_TURNS=1 renders them)
-    const char* keep = std::getenv("STRATA_KEEP_EMPTY_TURNS");
+    // LAMINA_KEEP_EMPTY_TURNS=1 renders them)
+    const char* keep = std::getenv("LAMINA_KEEP_EMPTY_TURNS");
     json msgs = json::array();
     for (size_t i = 0; i < messages.size(); ++i) {
         const json& m = messages[i];
@@ -124,37 +124,37 @@ json ChatTemplate::detect_caps() const {
             return "";
         }
     };
-    const json user = {{"role", "user"}, {"content", "strata_caps_user"}};
+    const json user = {{"role", "user"}, {"content", "lamina_caps_user"}};
     json tools = json::array();
     for (int i = 0; i < 2; ++i)
-        tools.push_back({{"name", "strata_caps_call_" + std::to_string(i)},
-                         {"description", "strata_caps_description"},
+        tools.push_back({{"name", "lamina_caps_call_" + std::to_string(i)},
+                         {"description", "lamina_caps_description"},
                          {"parameters", {{"type", "object"}, {"properties", {{"arg", {{"type", "string"}}}}}}}});
     const std::string tool_prompt = render_probe(json::array({user}), tools);
 
     auto calls_supported = [&](int count) {
         json calls = json::array(), tool_calls = json::array();
         for (int i = 0; i < count; ++i) {
-            json call = {{"name", "strata_caps_call_" + std::to_string(i)},
-                         {"arguments", {{"arg", "strata_caps_arg_" + std::to_string(i)}}}};
+            json call = {{"name", "lamina_caps_call_" + std::to_string(i)},
+                         {"arguments", {{"arg", "lamina_caps_arg_" + std::to_string(i)}}}};
             calls.push_back(call);
             tool_calls.push_back({{"function", call}});
         }
         json messages = json::array({user, {{"role", "assistant"}, {"content", ""}, {"tool_calls", tool_calls}}});
         std::vector<std::string> replies;
         for (int i = 0; i < count; ++i) {
-            replies.push_back("strata_caps_result_" + std::to_string(i));
+            replies.push_back("lamina_caps_result_" + std::to_string(i));
             messages.push_back({{"role", "tool"}, {"content", replies.back()}});
         }
         messages.push_back(user);
         const std::string prompt = render_probe(messages, tools);
-        // the complete calls to the probe functions, as re.findall(r"<tool_call>\s*(<function=strata_caps_call_\d+>
+        // the complete calls to the probe functions, as re.findall(r"<tool_call>\s*(<function=lamina_caps_call_\d+>
         // .*?</function>)\s*</tool_call>", re.S) finds them
         json parsed = json::array();
         size_t at = 0;
         while ((at = prompt.find(kCallStart, at)) != std::string::npos) {
             const size_t body = prompt.size() - lstrip(std::string_view(prompt).substr(at + kCallStart.size())).size();
-            const std::string_view head = "<function=strata_caps_call_";
+            const std::string_view head = "<function=lamina_caps_call_";
             size_t d = body + head.size();
             const bool shape = prompt.compare(body, head.size(), head) == 0 && d < prompt.size() &&
                                std::isdigit((unsigned char) prompt[d]);
@@ -187,18 +187,18 @@ json ChatTemplate::detect_caps() const {
         return true;
     };
     const json history = json::array({user,
-                                      {{"role", "assistant"}, {"content", "strata_caps_answer"},
-                                       {"reasoning_content", "strata_caps_reasoning"}},
+                                      {{"role", "assistant"}, {"content", "lamina_caps_answer"},
+                                       {"reasoning_content", "lamina_caps_reasoning"}},
                                       user});
     auto has = [&](const std::string& s, std::string_view x) { return s.find(x) != std::string::npos; };
-    return {{"supports_tools", has(tool_prompt, "strata_caps_call_0") && has(tool_prompt, "strata_caps_description") &&
+    return {{"supports_tools", has(tool_prompt, "lamina_caps_call_0") && has(tool_prompt, "lamina_caps_description") &&
                                    has(tool_prompt, "<tool_call>") && has(tool_prompt, "<function=")},
             {"supports_tool_calls", calls_supported(1)},
             {"supports_system_role",
-             has(render_probe(json::array({{{"role", "system"}, {"content", "strata_caps_system"}}, user})),
-                 "strata_caps_system")},
+             has(render_probe(json::array({{{"role", "system"}, {"content", "lamina_caps_system"}}, user})),
+                 "lamina_caps_system")},
             {"supports_parallel_tool_calls", calls_supported(2)},
-            {"supports_preserve_reasoning", has(render_probe(history), "strata_caps_reasoning")}};
+            {"supports_preserve_reasoning", has(render_probe(history), "lamina_caps_reasoning")}};
 }
 
 // ---------------------------------------------------------------------------------------------- requests

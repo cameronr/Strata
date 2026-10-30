@@ -1,10 +1,10 @@
-"""tools/qwen35/parity.py - NEW-MODELS-PLAN.md T1's exit gate for Qwen3.6-35B-A3B: strata-q36ref against llama.cpp
+"""tools/qwen35/parity.py - NEW-MODELS-PLAN.md T1's exit gate for Qwen3.6-35B-A3B: lamina-q36ref against llama.cpp
 (tools/qwen35/q36_llama_dump.cpp) on the same GGUF, the same box and the same token ids.
 
 For each prompt (parity_prompts.json, ChatML with thinking off): llama.cpp tokenizes it and runs it (the reference
-ids, layer outputs and greedy tokens); strata-q36ref runs the same ids.  Reported per prompt: the greedy tokens that
+ids, layer outputs and greedy tokens); lamina-q36ref runs the same ids.  Reported per prompt: the greedy tokens that
 agree (of --n), the first divergence with both engines' top-1/top-2 logit margins (a near tie is a margin < 0.05), and
-the per-layer hidden-state error max over positions of ||strata - llama|| / ||llama||.
+the per-layer hidden-state error max over positions of ||lamina - llama|| / ||llama||.
 
     python tools/qwen35/parity.py --ref BIN --dump BIN --model GGUF --out DIR [--n 64] [--ngl 99] [--lock "flock ..."]
 """
@@ -43,7 +43,7 @@ def ids_of(out: str, key: str) -> list[int]:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", required=True, help="strata-q36ref")
+    ap.add_argument("--ref", required=True, help="lamina-q36ref")
     ap.add_argument("--dump", required=True, help="q36_llama_dump")
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
@@ -51,7 +51,7 @@ def main() -> int:
     ap.add_argument("--ngl", type=int, default=99, help="llama.cpp's GPU layers (0 = its CPU backend)")
     ap.add_argument("--lock", default="", help="a command prefix for the GPU runs (the box's flock)")
     ap.add_argument("--prompts", default=str(HERE / "parity_prompts.json"))
-    ap.add_argument("--skip-ref", action="store_true", help="reuse strata-q36ref's outputs in --out")
+    ap.add_argument("--skip-ref", action="store_true", help="reuse lamina-q36ref's outputs in --out")
     ap.add_argument("--past-eos", action="store_true", help="compare all --n tokens, not only up to the answer's end")
     a = ap.parse_args()
     out = Path(a.out)
@@ -66,10 +66,10 @@ def main() -> int:
         prompt_ids, lgen = ids_of(lo, "prompt"), ids_of(lo, "gen")
         if not a.skip_ref:
             so = run([a.ref, "--model", a.model, "--tokens", ",".join(map(str, prompt_ids)), "--n", str(a.n),
-                      "--dump-layers", str(out / f"{tag}.strata.layers"), "--dump-logits", str(out / f"{tag}.strata.logits")],
-                     a.lock, out / f"{tag}.strata.log")
-            (out / f"{tag}.strata.gen").write_text(so, encoding="utf-8")
-        sgen = ids_of((out / f"{tag}.strata.gen").read_text(encoding="utf-8"), "gen")
+                      "--dump-layers", str(out / f"{tag}.lamina.layers"), "--dump-logits", str(out / f"{tag}.lamina.logits")],
+                     a.lock, out / f"{tag}.lamina.log")
+            (out / f"{tag}.lamina.gen").write_text(so, encoding="utf-8")
+        sgen = ids_of((out / f"{tag}.lamina.gen").read_text(encoding="utf-8"), "gen")
         # the answer ends at llama.cpp's first <|im_end|> (included); past it both engines run on in a context no chat
         # ever reaches, so the comparison stops there (--past-eos compares all --n tokens)
         upto = min(len(sgen), len(lgen))
@@ -78,14 +78,14 @@ def main() -> int:
         same = 0
         while same < upto and sgen[same] == lgen[same]:
             same += 1
-        sl = np.fromfile(out / f"{tag}.strata.logits", dtype=np.float32).reshape(-1, 4)
+        sl = np.fromfile(out / f"{tag}.lamina.logits", dtype=np.float32).reshape(-1, 4)
         ll = np.fromfile(out / f"{tag}.llama.logits", dtype=np.float32).reshape(-1, 4)
         div = None
         if same < upto:
-            div = {"step": same, "strata": [int(sl[same, 0]), float(sl[same, 1] - sl[same, 3])],
+            div = {"step": same, "lamina": [int(sl[same, 0]), float(sl[same, 1] - sl[same, 3])],
                    "llama": [int(ll[same, 0]), float(ll[same, 1] - ll[same, 3])]}
         # the layer outputs up to the divergence (after it the two engines read different tokens)
-        sL = np.fromfile(out / f"{tag}.strata.layers", dtype=np.float32).reshape(-1, N_LAYER, N_EMBD)
+        sL = np.fromfile(out / f"{tag}.lamina.layers", dtype=np.float32).reshape(-1, N_LAYER, N_EMBD)
         lL = np.fromfile(out / f"{tag}.llama.layers", dtype=np.float32).reshape(-1, N_LAYER, N_EMBD)
         npos = min(len(sL), len(lL), len(prompt_ids) + same)
         ln = np.linalg.norm(lL[:npos], axis=2)

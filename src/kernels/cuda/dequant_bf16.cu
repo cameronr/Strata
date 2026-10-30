@@ -1,9 +1,9 @@
-// src/kernels/cuda/dequant_bf16.cu - see include/strata/kernels/dequant_bf16.hpp.
+// src/kernels/cuda/dequant_bf16.cu - see include/lamina/kernels/dequant_bf16.hpp.
 //
 // Arithmetic transcribed from ggml/src/ggml-quants.c at the pinned llama.cpp (MIT License, Copyright (c) 2023-2026
 // The ggml authors): dequantize_row_q2_0/q4_0/q5_0/q8_0/q3_K/q4_K/q5_K/q6_K/iq4_nl/iq4_xs.
-#include "strata/kernels/dequant_bf16.hpp"
-#include "strata/kernels/iq_kernels.hpp"
+#include "lamina/kernels/dequant_bf16.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -12,7 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 __device__ __forceinline__ float h2f(const uint8_t* p) {
@@ -185,7 +185,7 @@ __global__ void dequant_kernel(const uint8_t* __restrict__ blocks, int64_t row_b
 // the same expression on the same operands - so the output is bitwise the same (dequant_wide_parity).  On the P40:
 // Q6_K 7.2 -> 0.33 ms (227 GB/s), Q4_K 1.67 -> 0.32 ms, Q5_K 1.24 -> 0.33 ms, IQ4_XS 1.21 -> 0.34 ms for that shape.
 // Q4_K, Q5_K, Q6_K and IQ4_XS.  On by default on compute capability 6.1, where it was measured;
-// STRATA_DEQUANT_WIDE=0 / =1 turns it off / on for every card.
+// LAMINA_DEQUANT_WIDE=0 / =1 turns it off / on for every card.
 __device__ __forceinline__ uint64_t ld8(const uint8_t* p) {   // 8 bytes at a 2-byte aligned address
     const uint16_t* q = reinterpret_cast<const uint16_t*>(p);
     return (uint64_t) q[0] | ((uint64_t) q[1] << 16) | ((uint64_t) q[2] << 32) | ((uint64_t) q[3] << 48);
@@ -266,7 +266,7 @@ __global__ void dequant_wide_kernel(const uint8_t* __restrict__ blocks, int64_t 
 }
 bool wide_type(int type) { return type == 12 || type == 13 || type == 14 || type == 23; }
 bool dequant_wide_on() {
-    static const int env = [] { const char* v = std::getenv("STRATA_DEQUANT_WIDE"); return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
+    static const int env = [] { const char* v = std::getenv("LAMINA_DEQUANT_WIDE"); return v != nullptr && v[0] != '\0' ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
     if (env >= 0) return env != 0;
     static int per_dev[64];   // 0 unknown, 1 no, 2 yes: sm_61 (measured on a Tesla P40) and sm_86 (RTX 3060 / A4000, 0.1.45: short-prompt TTFT -12..-17%, bitwise)
     int dev = 0;
@@ -346,34 +346,34 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
     if (wide_type(type) && (reinterpret_cast<uintptr_t>(blocks) & 1) == 0 && (reinterpret_cast<uintptr_t>(out) & 15) == 0 &&
         ((size_t) ld * sizeof(T)) % 16 == 0 && 4 * total < (1ll << 31) && dequant_wide_on()) {
         const unsigned wgrid = (unsigned) ((4 * total + 255) / 256);
-#define STRATA_DQW(TY) dequant_wide_kernel<TY, T><<<wgrid, 256, 0, st>>>(p, row_bytes, row0, (uint32_t) rows, (uint32_t) gpr, ld, out); break
+#define LAMINA_DQW(TY) dequant_wide_kernel<TY, T><<<wgrid, 256, 0, st>>>(p, row_bytes, row0, (uint32_t) rows, (uint32_t) gpr, ld, out); break
         switch (type) {
-        case 12: STRATA_DQW(12);
-        case 13: STRATA_DQW(13);
-        case 14: STRATA_DQW(14);
-        case 23: STRATA_DQW(23);
+        case 12: LAMINA_DQW(12);
+        case 13: LAMINA_DQW(13);
+        case 14: LAMINA_DQW(14);
+        case 23: LAMINA_DQW(23);
         }
-#undef STRATA_DQW
+#undef LAMINA_DQW
         const cudaError_t e = cudaGetLastError();
         if (e != cudaSuccess) { std::fprintf(stderr, "dequant launch: %s\n", cudaGetErrorString(e)); std::exit(1); }
         return;
     }
     cudaGetLastError();   // an earlier call's error is not this launch's: the check below reads this launch only
-#define STRATA_DQ(TY) dequant_kernel<TY, T><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, ld, out); break
+#define LAMINA_DQ(TY) dequant_kernel<TY, T><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, ld, out); break
     switch (type) {
-    case 2: STRATA_DQ(2);
-    case 6: STRATA_DQ(6);
-    case 7: STRATA_DQ(7);
-    case 8: STRATA_DQ(8);
-    case 11: STRATA_DQ(11);
-    case 12: STRATA_DQ(12);
-    case 13: STRATA_DQ(13);
-    case 14: STRATA_DQ(14);
-    case 20: STRATA_DQ(20);
-    case 23: STRATA_DQ(23);
-    case 42: STRATA_DQ(42);
+    case 2: LAMINA_DQ(2);
+    case 6: LAMINA_DQ(6);
+    case 7: LAMINA_DQ(7);
+    case 8: LAMINA_DQ(8);
+    case 11: LAMINA_DQ(11);
+    case 12: LAMINA_DQ(12);
+    case 13: LAMINA_DQ(13);
+    case 14: LAMINA_DQ(14);
+    case 20: LAMINA_DQ(20);
+    case 23: LAMINA_DQ(23);
+    case 42: LAMINA_DQ(42);
     }
-#undef STRATA_DQ
+#undef LAMINA_DQ
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "dequant launch: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
@@ -414,4 +414,4 @@ void dequant_f32(int ggml_type, const void* blocks, int64_t row0, int64_t rows, 
     launch<float>(ggml_type, blocks, row0, rows, cols, out, stream);
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

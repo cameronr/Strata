@@ -11,8 +11,8 @@
 //     d16 = fp16(d32)                           (stored, and used to DEQUANTIZE)
 //     q   = clip(rint(x / (double)d32), -128, 127)
 //     round trip = q * d16
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/f16_bits.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
@@ -33,8 +33,8 @@ namespace {
 // invisible with the O(1) fixture this file has.  Round 198 validated the shared pair against 395 numpy
 // float16 vectors and all 65,536 reverse patterns, so the test now shares the implementation it is checking
 // instead of guessing at it independently.  Thin aliases keep the body below unchanged.
-using strata::kernels::f16_from_f32;
-using strata::kernels::f32_from_f16;
+using lamina::kernels::f16_from_f32;
+using lamina::kernels::f32_from_f16;
 inline uint16_t f32_to_f16_bits(float f) { return f16_from_f32(f); }
 inline float f16_bits_to_f32(uint16_t h) { return f32_from_f16(h); }
 
@@ -85,8 +85,8 @@ int run_case(const char* name, const std::vector<float>& x, bool check_bytes) {
         for (long long i = 0; i < n; ++i) if (std::memcmp(&rt[(size_t) i], &x[(size_t) i], 4) != 0) ++diff;
         if (diff) std::printf("    PROBE: device x differs from host x in %lld of %lld elements\n", diff, n);
     }
-    strata::kernels::quantize_q8_0(d_x, d_b, n, nullptr);
-    strata::kernels::dequant_q8_0(d_b, d_back, n, nullptr);
+    lamina::kernels::quantize_q8_0(d_x, d_b, n, nullptr);
+    lamina::kernels::dequant_q8_0(d_b, d_back, n, nullptr);
     check(cudaMemcpy(g_blocks.data(), d_b, g_blocks.size(), cudaMemcpyDeviceToHost), "back blocks");
     check(cudaMemcpy(g_back.data(), d_back, (size_t) n * sizeof(float), cudaMemcpyDeviceToHost), "back vals");
 
@@ -182,8 +182,8 @@ int run_case_k(const char* name, const std::vector<float>& x, bool check_bytes, 
     check(cudaMalloc(&d_b, g_blocks.size()), "malloc blocks");
     check(cudaMalloc(&d_back, (size_t) n * sizeof(float)), "malloc back");
     check(cudaMemcpy(d_x, x.data(), (size_t) n * sizeof(float), cudaMemcpyHostToDevice), "copy x");
-    strata::kernels::quantize_q8_K(d_x, d_b, n, nullptr);
-    strata::kernels::dequant_q8_K(d_b, d_back, n, nullptr);
+    lamina::kernels::quantize_q8_K(d_x, d_b, n, nullptr);
+    lamina::kernels::dequant_q8_K(d_b, d_back, n, nullptr);
     check(cudaMemcpy(g_blocks.data(), d_b, g_blocks.size(), cudaMemcpyDeviceToHost), "back blocks");
     check(cudaMemcpy(g_back.data(), d_back, (size_t) n * sizeof(float), cudaMemcpyDeviceToHost), "back vals");
 
@@ -313,14 +313,14 @@ int main(int argc, char** argv) {
         };
         int fp16_bad = 0;
         for (const F16Case& fc : cases) {
-            const uint16_t got = strata::kernels::f16_from_f32(fc.in);
+            const uint16_t got = lamina::kernels::f16_from_f32(fc.in);
             if (got != fc.want) {
                 std::printf("    *** %s: want 0x%04X got 0x%04X\n", fc.what, fc.want, got);
                 ++fp16_bad;
             }
         }
         // and the reverse direction on the pattern that was flushed
-        const float sub = strata::kernels::f32_from_f16(0x0001u);
+        const float sub = lamina::kernels::f32_from_f16(0x0001u);
         const bool sub_ok = (sub == 5.9604645e-8f);
         std::printf("  %-44s %s (%d of %d wrong)\n", "f32->f16 overflow saturates, not NaN",
                     fp16_bad ? "*** NO ***" : "yes", fp16_bad, (int) (sizeof cases / sizeof cases[0]));

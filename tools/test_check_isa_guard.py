@@ -29,20 +29,20 @@ class WideInstruction(unittest.TestCase):
 
 class Policy(unittest.TestCase):
     def test_kernel_in_an_anonymous_namespace_of_a_wide_file_is_fine(self):
-        self.assertIsNone(G.judge("??$gu_rows@$0BA@$00@?A0xa1d599f5@cpu@kernels@strata@@YAXXZ",
-                                  "strata_kernels_cpu:iq_avx512.cpp.obj", "", False, False, False))
-        self.assertIsNone(G.judge("strata::kernels::cpu::(anonymous namespace)::gu_rows<18, 1>(int)", None, "", False,
+        self.assertIsNone(G.judge("??$gu_rows@$0BA@$00@?A0xa1d599f5@cpu@kernels@lamina@@YAXXZ",
+                                  "lamina_kernels_cpu:iq_avx512.cpp.obj", "", False, False, False))
+        self.assertIsNone(G.judge("lamina::kernels::cpu::(anonymous namespace)::gu_rows<18, 1>(int)", None, "", False,
                                   False, True))
 
     def test_listed_public_entry_point_is_fine(self):
-        self.assertIsNone(G.judge("?act_quant_q8_1@cpu@kernels@strata@@YAXPEBMHAEAUActQ@123@@Z",
-                                  "strata_kernels_cpu:expert.cpp.obj", "", False, False, False))
+        self.assertIsNone(G.judge("?act_quant_q8_1@cpu@kernels@lamina@@YAXPEBMHAEAUActQ@123@@Z",
+                                  "lamina_kernels_cpu:expert.cpp.obj", "", False, False, False))
 
     def test_the_probe_must_not_be_wide(self):
-        self.assertIsNotNone(G.judge("?cpu_features@cpu@kernels@strata@@YA?AUCpuFeatures@123@XZ",
-                                     "strata_kernels_cpu:expert.cpp.obj", "", False, False, False))
-        self.assertIsNotNone(G.judge("strata::kernels::cpu::cpu_features()", None, "", False, False, True))
-        self.assertIsNotNone(G.judge("strata::kernels::cpu::iq512_supported(int)", None, "", False, False, True))
+        self.assertIsNotNone(G.judge("?cpu_features@cpu@kernels@lamina@@YA?AUCpuFeatures@123@XZ",
+                                     "lamina_kernels_cpu:expert.cpp.obj", "", False, False, False))
+        self.assertIsNotNone(G.judge("lamina::kernels::cpu::cpu_features()", None, "", False, False, True))
+        self.assertIsNotNone(G.judge("lamina::kernels::cpu::iq512_supported(int)", None, "", False, False, True))
 
     def test_weak_symbol_is_a_violation_even_in_a_wide_file(self):
         why = G.judge("std::vector<float, std::allocator<float> >::_M_realloc_insert(float const&)", None, "", False,
@@ -50,7 +50,7 @@ class Policy(unittest.TestCase):
         self.assertIn("weak", why)
 
     def test_wide_code_in_another_object_is_a_violation(self):
-        self.assertIsNotNone(G.judge("?f@@YAXXZ", "strata_kernels_cpu:pool.cpp.obj", "", False, False, False))
+        self.assertIsNotNone(G.judge("?f@@YAXXZ", "lamina_kernels_cpu:pool.cpp.obj", "", False, False, False))
 
     def test_msvc_vectorizer_guard_is_accepted(self):
         self.assertIsNone(G.judge("?bench@@YAHXZ", "iq_avx2_parity.cpp.obj", "", True, False, False))

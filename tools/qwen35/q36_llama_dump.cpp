@@ -1,9 +1,9 @@
 // tools/qwen35/q36_llama_dump.cpp - llama.cpp's side of the Qwen3.6 parity check (NEW-MODELS-PLAN.md T1): the same GGUF,
 // the same token ids, llama.cpp's own graph.  Prints the prompt's ids and the greedy ids, and dumps every processed
-// position's layer outputs ("l_out-N", through the scheduler's eval callback) in strata-q36ref's format
+// position's layer outputs ("l_out-N", through the scheduler's eval callback) in lamina-q36ref's format
 // ([pos][layer][n_embd] f32) plus each greedy step's top-2 (id, logit).
 //
-// Built against a llama.cpp checkout (not part of Strata's build):
+// Built against a llama.cpp checkout (not part of Lamina's build):
 //   g++ -O2 -std=c++17 q36_llama_dump.cpp -I<llama>/include -I<llama>/ggml/include -L<llama>/build/bin -lllama -lggml
 //       -lggml-base -Wl,-rpath,<llama>/build/bin -o q36_llama_dump
 // Usage: q36_llama_dump --model GGUF (--prompt TEXT | --tokens ID,ID,...) [--n 64] [--ngl 99] [--dump-layers F]
@@ -69,9 +69,9 @@ int main(int argc, char** argv) {
         else if (a == "--dump-full-logits") dump_full = v;
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
-    // STRATA_DUMP_NGL: the GPU layers when the caller asks for the GPU (--ngl > 0) but the file does not fit (UD-Q4_K_XL
+    // LAMINA_DUMP_NGL: the GPU layers when the caller asks for the GPU (--ngl > 0) but the file does not fit (UD-Q4_K_XL
     // on a 12 GB card); the other layers run on llama.cpp's CPU backend
-    if (const char* g = std::getenv("STRATA_DUMP_NGL"); g != nullptr && ngl > 0) ngl = std::atoi(g);
+    if (const char* g = std::getenv("LAMINA_DUMP_NGL"); g != nullptr && ngl > 0) ngl = std::atoi(g);
     llama_backend_init();
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = ngl;
@@ -91,9 +91,9 @@ int main(int argc, char** argv) {
     cap.n_embd = llama_model_n_embd(mdl);
     cap.n_layer = llama_model_n_layer(mdl);
     llama_context_params cp = llama_context_default_params();
-    // STRATA_DUMP_CTX: a smaller context / batch (the parity sequences are a few hundred tokens) for a file whose
+    // LAMINA_DUMP_CTX: a smaller context / batch (the parity sequences are a few hundred tokens) for a file whose
     // weights leave no VRAM for the 4096-token compute buffers (UD-Q6_K_XL on a 32 GB card)
-    const char* cx = std::getenv("STRATA_DUMP_CTX");
+    const char* cx = std::getenv("LAMINA_DUMP_CTX");
     const int nctx = cx ? std::atoi(cx) : 4096;
     cp.n_ctx = nctx;
     cp.n_batch = cp.n_ubatch = nctx;

@@ -1,18 +1,18 @@
-// src/core/split_head.cpp - see include/strata/core/split_head.hpp.
-#include "strata/core/split_head.hpp"
+// src/core/split_head.cpp - see include/lamina/core/split_head.hpp.
+#include "lamina/core/split_head.hpp"
 
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/core/cuda_host.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 
 #include <immintrin.h>
 
 #include <chrono>
 #include <exception>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 }  // namespace
@@ -32,7 +32,7 @@ SplitHead::~SplitHead() {
 
 bool SplitHead::init(int device, int main_device, const std::vector<std::string>& shards, int64_t n_in,
                      int64_t n_vocab, int64_t split, int max_t, std::string& err) {
-    if (split <= 0 || split >= n_vocab || max_t < 1 || max_t > strata::kernels::kVerifyMaxT) {
+    if (split <= 0 || split >= n_vocab || max_t < 1 || max_t > lamina::kernels::kVerifyMaxT) {
         err = "split head: bad arguments";
         return false;
     }
@@ -44,15 +44,15 @@ bool SplitHead::init(int device, int main_device, const std::vector<std::string>
     rows_ = n_vocab - split;
     DeviceScope scope(dev_, main_);
     try {
-        const strata::GgufModel model(shards);
+        const lamina::GgufModel model(shards);
         size_t at = 0;
-        const strata::TensorInfo* t = model.find("output.weight", &at);
-        if (!t || !strata::kernels::native_mmvq_supported((int) t->type)) {
+        const lamina::TensorInfo* t = model.find("output.weight", &at);
+        if (!t || !lamina::kernels::native_mmvq_supported((int) t->type)) {
             err = "split head: output.weight is missing or not a native format";
             return false;
         }
         type_ = (int) t->type;
-        const uint64_t row = strata::kernels::native_mmvq_weight_bytes(type_, (int) n_in, 1);
+        const uint64_t row = lamina::kernels::native_mmvq_weight_bytes(type_, (int) n_in, 1);
         bytes_ = row * (uint64_t) rows_;
         const unsigned pm = cudaHostAllocPortable | cudaHostAllocMapped;
         const size_t T = (size_t) max_t;
@@ -68,10 +68,10 @@ bool SplitHead::init(int device, int main_device, const std::vector<std::string>
                                    cudaMemcpyHostToDevice));
         run("buffers", cudaMalloc((void**) &mixed_, T * (size_t) n_in * 4));
         run("buffers", cudaMalloc((void**) &out_, T * (size_t) rows_ * 4));
-        run("buffers", cudaMalloc((void**) &xq_, strata::kernels::native_q8_1_bytes((int) n_in, max_t)));
-        run("buffers", cudaMalloc((void**) &xil_, strata::kernels::native_q8_1_il_bytes((int) n_in, max_t)));
-        run("buffers", cudaMalloc((void**) &scratch_, strata::kernels::argmax_rows_scratch_bytes(max_t)));
-        run("buffers", cudaMemset(scratch_, 0, strata::kernels::argmax_rows_scratch_bytes(max_t)));
+        run("buffers", cudaMalloc((void**) &xq_, lamina::kernels::native_q8_1_bytes((int) n_in, max_t)));
+        run("buffers", cudaMalloc((void**) &xil_, lamina::kernels::native_q8_1_il_bytes((int) n_in, max_t)));
+        run("buffers", cudaMalloc((void**) &scratch_, lamina::kernels::argmax_rows_scratch_bytes(max_t)));
+        run("buffers", cudaMemset(scratch_, 0, lamina::kernels::argmax_rows_scratch_bytes(max_t)));
         run("mapped", cudaHostAlloc((void**) &h_in_, T * (size_t) n_in * 4, pm));
         run("mapped", cudaHostAlloc((void**) &h_hand_, 64, pm));
         run("mapped", cudaHostAlloc((void**) &h_done_, 64, pm));
@@ -95,7 +95,7 @@ bool SplitHead::init(int device, int main_device, const std::vector<std::string>
 // One window's part: the input from mapped memory, quantized as the main GPU's head does, the rows' projection, the
 // per-token argmax (and logit) to mapped memory, the count raised.
 bool SplitHead::capture(int T, bool logits, std::string& err) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     if (exec_[T][logits]) return true;
     if (cudaStreamBeginCapture(s_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) {
         err = "split head: begin capture";
@@ -157,4 +157,4 @@ bool SplitHead::wait(uint32_t n, std::string& err) {
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

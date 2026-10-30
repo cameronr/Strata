@@ -29,18 +29,18 @@ import urllib.error
 import urllib.request
 
 # #214: a fixed commit of the checkpoint (its `sha` from https://huggingface.co/api/models/Qwen/Qwen3.8-Flash-Next
-# on 2026-09-30), so every install reads the same tensors; STRATA_MTP_REVISION overrides it (e.g. main).  When the
-# repository no longer has it, reading stops (resolve_repo) unless STRATA_ALLOW_UNPINNED=1.
+# on 2026-09-30), so every install reads the same tensors; LAMINA_MTP_REVISION overrides it (e.g. main).  When the
+# repository no longer has it, reading stops (resolve_repo) unless LAMINA_ALLOW_UNPINNED=1.
 PINNED_REVISION = "de4b8e4d43b917e7706784d8bb445c9af86a3540"
-REVISION = os.environ.get("STRATA_MTP_REVISION") or PINNED_REVISION
+REVISION = os.environ.get("LAMINA_MTP_REVISION") or PINNED_REVISION
 # #495: HF_ENDPOINT (a mirror, e.g. https://hf-mirror.com) serves the same revision; the SHA256 checks below still apply
 HF_ENDPOINT = (os.environ.get("HF_ENDPOINT") or "").strip().rstrip("/") or "https://huggingface.co"
 REPO = HF_ENDPOINT + "/Qwen/Qwen3.8-Flash-Next/resolve/%s/" % REVISION
 PINNED = HF_ENDPOINT + "/Qwen/Qwen3.8-Flash-Next/resolve/%s/" % PINNED_REVISION   # SHA256's revision
-# STRATA_SOURCE=modelscope (setup's --source): the same checkpoint from ModelScope.  It serves the repository's current
+# LAMINA_SOURCE=modelscope (setup's --source): the same checkpoint from ModelScope.  It serves the repository's current
 # files, not a pinned revision, so REPO and PINNED are one URL here: every tensor is still checked against the pinned
 # revision's SHA256 below, so a tensor that differs from it is caught, not used.
-if (os.environ.get("STRATA_SOURCE") or "").strip().lower() in ("ms", "modelscope"):
+if (os.environ.get("LAMINA_SOURCE") or "").strip().lower() in ("ms", "modelscope"):
     MS_ENDPOINT = (os.environ.get("MODELSCOPE_ENDPOINT") or "").strip().rstrip("/") or "https://www.modelscope.cn"
     REPO = PINNED = MS_ENDPOINT + "/models/Qwen/Qwen3.8-Flash-Next/resolve/master/"
 DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "F8_E4M3": 1, "I64": 8, "I32": 4}
@@ -118,7 +118,7 @@ SHA256 = {
 def get(url, start=None, end=None, retries=4):
     for attempt in range(retries):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "strata-mtp-fetch"})
+            req = urllib.request.Request(url, headers={"User-Agent": "lamina-mtp-fetch"})
             if start is not None:
                 req.add_header("Range", "bytes=%d-%d" % (start, end))
             with urllib.request.urlopen(req, timeout=120) as r:
@@ -136,9 +136,9 @@ def get(url, start=None, end=None, retries=4):
 
 
 def connections():
-    """Ranges read at once: STRATA_DL_CONNECTIONS (the setting of setup's downloads), else 8; 1 reads them one by one."""
+    """Ranges read at once: LAMINA_DL_CONNECTIONS (the setting of setup's downloads), else 8; 1 reads them one by one."""
     try:
-        n = int((os.environ.get("STRATA_DL_CONNECTIONS") or "").strip() or 8)
+        n = int((os.environ.get("LAMINA_DL_CONNECTIONS") or "").strip() or 8)
     except ValueError:
         n = 8
     return max(1, min(n, 32))
@@ -196,17 +196,17 @@ def sha256_of(path):
 
 def resolve_repo():
     """REPO.  When the pinned revision is gone from the repository (a 404 on its index) it stops, unless
-    STRATA_ALLOW_UNPINNED=1: then the current files are read (their tensors are still checked against the pinned SHA256)."""
+    LAMINA_ALLOW_UNPINNED=1: then the current files are read (their tensors are still checked against the pinned SHA256)."""
     global REPO
     try:
         req = urllib.request.Request(REPO + "model.safetensors.index.json", method="HEAD",
-                                     headers={"User-Agent": "strata-mtp-fetch"})
+                                     headers={"User-Agent": "lamina-mtp-fetch"})
         urllib.request.urlopen(req, timeout=120).close()
     except urllib.error.HTTPError as e:
         if e.code == 404 and "/resolve/%s/" % REVISION in REPO:
-            if (os.environ.get("STRATA_ALLOW_UNPINNED") or "").strip() != "1":
-                sys.exit("the pinned version of the checkpoint (%s) is no longer on Hugging Face: update Strata" % REVISION)
-            print("STRATA_ALLOW_UNPINNED=1: the checkpoint's pinned revision %s is gone: reading its current files "
+            if (os.environ.get("LAMINA_ALLOW_UNPINNED") or "").strip() != "1":
+                sys.exit("the pinned version of the checkpoint (%s) is no longer on Hugging Face: update Lamina" % REVISION)
+            print("LAMINA_ALLOW_UNPINNED=1: the checkpoint's pinned revision %s is gone: reading its current files "
                   "(main); every tensor is still checked against the pinned SHA256" % REVISION, file=sys.stderr)
             REPO = REPO.replace("/resolve/%s/" % REVISION, "/resolve/main/")
     except OSError:
@@ -305,7 +305,7 @@ def fetch(out, only):
 
 def verify(out):
     """#327: the fetched tensors against SHA256 -> the names that are missing or wrong.  [] when they are right, or
-    when there is nothing to check (no tensors/, or STRATA_MTP_REVISION names another revision).  A tensor's verdict
+    when there is nothing to check (no tensors/, or LAMINA_MTP_REVISION names another revision).  A tensor's verdict
     is kept in tensors/verified.json by size and mtime, so a later run hashes only what changed."""
     tdir = os.path.join(out, "tensors")
     if not pinned() or not os.path.isdir(tdir):

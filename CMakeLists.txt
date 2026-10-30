@@ -1,16 +1,16 @@
-﻿# Strata Engine - top-level build.
+﻿# Lamina Engine - top-level build.
 #
-# The engine (`lamina`) and its GPU tools need STRATA_ENABLE_CUDA and NVIDIA GPUs of compute capability 8.0 or
+# The engine (`lamina`) and its GPU tools need LAMINA_ENABLE_CUDA and NVIDIA GPUs of compute capability 8.0 or
 # newer; without CUDA only the CPU-side libraries, their tools and tests build.
 cmake_minimum_required(VERSION 3.24)
-project(strata VERSION 0.1.43.1 LANGUAGES CXX)
-add_compile_definitions(STRATA_VERSION="${PROJECT_VERSION}")
+project(lamina VERSION 0.1.43.1 LANGUAGES CXX)
+add_compile_definitions(LAMINA_VERSION="${PROJECT_VERSION}")
 
 # A build for other PCs (the Docker image): ggml's CPU backend for any AVX2 CPU instead of this machine's (the
 # engine's own AVX-512 kernels are per-file and chosen at run time either way), and the MSVC runtime linked in, so
 # no Visual C++ redistributable is needed.
-option(STRATA_PORTABLE "build for other PCs: AVX2 baseline, static MSVC runtime" OFF)
-if(STRATA_PORTABLE AND MSVC)
+option(LAMINA_PORTABLE "build for other PCs: AVX2 baseline, static MSVC runtime" OFF)
+if(LAMINA_PORTABLE AND MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
 
@@ -21,11 +21,11 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-option(STRATA_ENABLE_CUDA "Build the CUDA targets" OFF)
-option(STRATA_BUILD_TESTS "Build the test suite" OFF)
-option(STRATA_WERROR "Treat compiler warnings as errors" OFF)
+option(LAMINA_ENABLE_CUDA "Build the CUDA targets" OFF)
+option(LAMINA_BUILD_TESTS "Build the test suite" OFF)
+option(LAMINA_WERROR "Treat compiler warnings as errors" OFF)
 
-if(STRATA_ENABLE_CUDA)
+if(LAMINA_ENABLE_CUDA)
   enable_language(CUDA)
   # `enable_language(CUDA)` gives the .cu compile rules but NOT the imported targets, so `CUDA::cudart` has to
   # be brought in explicitly for the host-side tests that call cudaMalloc themselves.
@@ -61,8 +61,8 @@ endif()
 # Every flag is guarded by COMPILE_LANGUAGE:CXX.  Without that guard nvcc receives bare `/W4 /utf-8` and dies
 # with "A single input file is required for a non-link phase" - it parses them as inputs rather than host
 # flags.  Host flags for CUDA must go through -Xcompiler, which is what COMPILE_LANGUAGE:CUDA does below.
-add_library(strata_warnings INTERFACE)
-target_compile_options(strata_warnings INTERFACE
+add_library(lamina_warnings INTERFACE)
+target_compile_options(lamina_warnings INTERFACE
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/W4>
   $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/utf-8>
   # C4324: a struct padded after an alignas member (the CPU pool's activation images), as intended; the CUDA
@@ -75,55 +75,55 @@ target_compile_options(strata_warnings INTERFACE
   # C4211 comes from the host stubs nvcc generates for kernels with internal linkage (anonymous namespaces).
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>>:-Xcompiler=/wd4211>)
 # fopen, sscanf and getenv are standard C; MSVC deprecates them in favour of its own _s variants.
-target_compile_definitions(strata_warnings INTERFACE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
-if(STRATA_WERROR)
-  target_compile_options(strata_warnings INTERFACE
+target_compile_definitions(lamina_warnings INTERFACE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
+if(LAMINA_WERROR)
+  target_compile_options(lamina_warnings INTERFACE
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:MSVC>>:/WX>
     $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CXX_COMPILER_ID:MSVC>>>:-Werror>)
 endif()
 
-# ---- strata_artifact -------------------------------------------------------
+# ---- lamina_artifact -------------------------------------------------------
 # Header-only, and that is a deliberate property rather than an unfinished split: the GGUF reader and the
 # scalar dequantizers hold no state worth hiding, and a header-only boundary cannot introduce a
 # duplicate-symbol or missing-declaration bug into code that is already validated against the real artifact.
-add_library(strata_artifact INTERFACE)
-target_include_directories(strata_artifact INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(strata_artifact INTERFACE strata_warnings)
+add_library(lamina_artifact INTERFACE)
+target_include_directories(lamina_artifact INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lamina_artifact INTERFACE lamina_warnings)
 
-add_executable(strata-gguf src/artifact/gguf_reader.cpp)
-target_link_libraries(strata-gguf PRIVATE strata_artifact)
+add_executable(lamina-gguf src/artifact/gguf_reader.cpp)
+target_link_libraries(lamina-gguf PRIVATE lamina_artifact)
 
-add_executable(strata-dequant src/artifact/dequant.cpp)
-target_link_libraries(strata-dequant PRIVATE strata_artifact)
+add_executable(lamina-dequant src/artifact/dequant.cpp)
+target_link_libraries(lamina-dequant PRIVATE lamina_artifact)
 # this file is now nothing but the CLI entry point, and its inherited guard spells that as a "selftest"
-target_compile_definitions(strata-dequant PRIVATE STRATA_DEQUANT_SELFTEST)
+target_compile_definitions(lamina-dequant PRIVATE LAMINA_DEQUANT_SELFTEST)
 
-# ---- strata_plan ----------------------------------------------------------
+# ---- lamina_plan ----------------------------------------------------------
 # Also header-only.  A "planner" that hides state would be one whose decision is not inspectable, and the
 # whole point of P1.S9 is that the decision is arithmetic you can check by hand.
-add_library(strata_plan INTERFACE)
-target_include_directories(strata_plan INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(strata_plan INTERFACE strata_warnings)
+add_library(lamina_plan INTERFACE)
+target_include_directories(lamina_plan INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(lamina_plan INTERFACE lamina_warnings)
 
-add_executable(strata-plan src/plan/plan_main.cpp)
-target_link_libraries(strata-plan PRIVATE strata_plan)
+add_executable(lamina-plan src/plan/plan_main.cpp)
+target_link_libraries(lamina-plan PRIVATE lamina_plan)
 
-# ---- strata_core (CUDA) ---------------------------------------------------
+# ---- lamina_core (CUDA) ---------------------------------------------------
 # Only built when CUDA is on, so the targets above keep working on a machine with no toolkit.  The arch guard
 # above has already refused anything older than sm_80 by the time this runs.
-if(STRATA_ENABLE_CUDA)
-  add_library(strata_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
+if(LAMINA_ENABLE_CUDA)
+  add_library(lamina_core STATIC src/core/pinned.cu src/platform/memory.cpp src/core/weights.cpp src/core/layout.cpp
                                  src/platform/console_quit.cpp)
-  target_include_directories(strata_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_include_directories(lamina_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   # CUDA::cudart is PUBLIC because host translation units call the runtime: the .cu sources get cudart through the
   # CUDA language rules, a .cpp does not.
-  target_link_libraries(strata_core PUBLIC strata_plan strata_warnings CUDA::cudart)
+  target_link_libraries(lamina_core PUBLIC lamina_plan lamina_warnings CUDA::cudart)
 
-  # ---- strata_kernels (P2.S2) ----
+  # ---- lamina_kernels (P2.S2) ----
   # Naive first, each with a parity test against a reference that was itself validated against ggml.  The
-  # kernels link `strata_artifact` for the scalar dequantizers, because using the VALIDATED scalar path as the
+  # kernels link `lamina_artifact` for the scalar dequantizers, because using the VALIDATED scalar path as the
   # reference is the whole point - a kernel checked against another copy of itself proves nothing.
-  add_library(strata_kernels STATIC src/kernels/cuda/s_gemv.cu
+  add_library(lamina_kernels STATIC src/kernels/cuda/s_gemv.cu
                           src/kernels/cuda/quantize_act.cu
                           src/kernels/cuda/rope.cu
                           src/kernels/cuda/sampler.cu
@@ -159,9 +159,9 @@ if(STRATA_ENABLE_CUDA)
                           src/kernels/ngram.cpp
                           src/ngram/ple_reader.cpp
                           src/platform/direct_file.cpp)
-  target_link_libraries(strata_kernels PUBLIC strata_core strata_artifact)
+  target_link_libraries(lamina_kernels PUBLIC lamina_core lamina_artifact)
   # plan v0.3 P6: llama.cpp's block layouts and codebook grids for the i-quant formats (MIT, third_party/ggml)
-  target_include_directories(strata_kernels PRIVATE third_party/ggml)
+  target_include_directories(lamina_kernels PRIVATE third_party/ggml)
   # Match the pinned llama.cpp CUDA arithmetic contract for this adapter only.
   set_source_files_properties(src/kernels/cuda/native_mmvq.cu src/kernels/cuda/native_mma.cu src/kernels/cuda/native_bf16.cu
     src/kernels/cuda/native_gr_norm.cu
@@ -175,52 +175,52 @@ if(STRATA_ENABLE_CUDA)
     src/kernels/cuda/draft_proxy.cu
     PROPERTIES COMPILE_OPTIONS "--use_fast_math")
 
-  # ---- strata_engine (P2.S5) -----------------------------------------------------
-  # The COMPOSED layer lives here and not in `strata_core`, because it calls kernels and `strata_kernels`
-  # already links `strata_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
+  # ---- lamina_engine (P2.S5) -----------------------------------------------------
+  # The COMPOSED layer lives here and not in `lamina_core`, because it calls kernels and `lamina_kernels`
+  # already links `lamina_core` - putting `gdn_layer` in core would make the two mutually dependent.  A third
   # library is the honest shape of the dependency graph: core knows about devices and weights, kernels know
   # about arithmetic, and this one knows the ORDER the arithmetic happens in.
-  add_library(strata_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
+  add_library(lamina_engine STATIC src/core/layer.cpp src/core/session.cpp src/core/expert_source.cpp
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp
     src/core/prompt_cache.cpp src/core/adaptive_tier.cpp src/core/second_gpu.cpp src/core/arena_place.cpp
     src/core/split_head.cpp src/core/vmm.cpp src/core/gpu_select.cpp src/core/pack_image.cpp)
-  target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu CUDA::cudart ${CMAKE_DL_LIBS})
+  target_include_directories(lamina_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(lamina_engine PUBLIC lamina_core lamina_kernels lamina_kernels_cpu CUDA::cudart ${CMAKE_DL_LIBS})
 
-  # `strata generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
+  # `lamina generate` (P2.S6).  The FIRST user-facing program: everything under it is a component, and this is
   # what composes them into a token.  No tokenizer - the prompt arrives as ids - because Gate C1 compares logits
   # against llama.cpp on the SAME ids and a tokenizer on one side of that comparison is a second variable.
   # plan v0.3 P5: batched prompt processing (tensor-core GEMMs through cuBLAS).
-  add_library(strata_prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu src/prefill/experts.cpp
+  add_library(lamina_prefill STATIC src/prefill/gemm.cu src/prefill/kernels.cu src/prefill/experts.cpp
                                     src/prefill/prefill.cpp src/prefill/split.cpp)
-  target_include_directories(strata_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(strata_prefill PUBLIC strata_engine CUDA::cublas CUDA::cudart)
+  target_include_directories(lamina_prefill PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(lamina_prefill PUBLIC lamina_engine CUDA::cublas CUDA::cudart)
 
   # the engine as a library: the lamina binary's main (src/program/main.cpp) and lamina-server's engine thread, which
   # speaks the --serve protocol through in-process channels (serve_io.hpp)
-  add_library(strata_serve_io STATIC src/program/serve_io.cpp)
-  target_include_directories(strata_serve_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  add_library(strata_program STATIC src/program/generate.cpp)
-  target_include_directories(strata_program PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(strata_program PUBLIC strata_engine strata_prefill strata_spec strata_serve_io CUDA::cudart)
+  add_library(lamina_serve_io STATIC src/program/serve_io.cpp)
+  target_include_directories(lamina_serve_io PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_library(lamina_program STATIC src/program/generate.cpp)
+  target_include_directories(lamina_program PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+  target_link_libraries(lamina_program PUBLIC lamina_engine lamina_prefill lamina_spec lamina_serve_io CUDA::cudart)
   add_executable(lamina src/program/main.cpp)
-  target_link_libraries(lamina PRIVATE strata_program)
+  target_link_libraries(lamina PRIVATE lamina_program)
   # the hyper-connection read's fused up projection + mix against cuBLAS + gr_mix_r at every sub-chunk size (--bench)
   add_executable(gr_upmix_parity src/prefill/gr_upmix_parity.cu)
-  target_link_libraries(gr_upmix_parity PRIVATE strata_prefill CUDA::cudart)
+  target_link_libraries(gr_upmix_parity PRIVATE lamina_prefill CUDA::cudart)
   add_test(NAME gr_upmix_parity COMMAND gr_upmix_parity)
   set_tests_properties(gr_upmix_parity PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(adaptive_policy_test tests/core/adaptive_policy_test.cpp)
   target_include_directories(adaptive_policy_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-  target_link_libraries(adaptive_policy_test PRIVATE strata_artifact)
+  target_link_libraries(adaptive_policy_test PRIVATE lamina_artifact)
   # #477: the learned expert profile (--expert-profile-save): its order and make_profile.py's file format (CPU only)
   add_executable(expert_profile_save_test tests/core/expert_profile_save_test.cpp)
-  target_link_libraries(expert_profile_save_test PRIVATE strata_engine)
+  target_link_libraries(expert_profile_save_test PRIVATE lamina_engine)
   # the prompt cache's checkpoint retention (spread_victim) against least recent use (CPU only)
   add_executable(prompt_cache_spread_test tests/core/prompt_cache_spread_test.cpp)
-  target_link_libraries(prompt_cache_spread_test PRIVATE strata_engine)
-  if(STRATA_BUILD_TESTS)
+  target_link_libraries(prompt_cache_spread_test PRIVATE lamina_engine)
+  if(LAMINA_BUILD_TESTS)
     add_test(NAME expert_profile_save_test COMMAND expert_profile_save_test)
     add_test(NAME prompt_cache_spread_test COMMAND prompt_cache_spread_test)
     add_test(NAME adaptive_policy_test COMMAND adaptive_policy_test)
@@ -229,79 +229,79 @@ if(STRATA_ENABLE_CUDA)
                          PASS_REGULAR_EXPRESSION "--deterministic-adapt")
   endif()
 
-  # A kernel test: a program calling the CUDA runtime, linked with strata_kernels (and LIBS), and the ctest test
+  # A kernel test: a program calling the CUDA runtime, linked with lamina_kernels (and LIBS), and the ctest test
   # running it with ARGS (none with NO_TEST). A host .cpp gets the toolkit's headers and cudart explicitly: enabling
   # the CUDA language gives them to .cu sources only.
-  function(strata_kernel_test name source)
+  function(lamina_kernel_test name source)
     cmake_parse_arguments(PARSE_ARGV 2 T "NO_TEST" "" "LIBS;ARGS")
     add_executable(${name} ${source})
     target_include_directories(${name} PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(${name} PRIVATE strata_kernels ${T_LIBS} CUDA::cudart)
+    target_link_libraries(${name} PRIVATE lamina_kernels ${T_LIBS} CUDA::cudart)
     if(NOT T_NO_TEST)
       add_test(NAME ${name} COMMAND ${name} ${T_ARGS})
     endif()
   endfunction()
 
   # the coalesced Q8_0 dequant against the per-block kernel: the same bytes in BF16, FP16 and FP32
-  strata_kernel_test(dequant_q8_0_identity src/kernels/dequant_q8_0_identity.cu)
-  strata_kernel_test(iq_parity src/kernels/iq_parity.cpp NO_TEST)
-  strata_kernel_test(shared_expert_parity src/kernels/shared_expert_parity.cpp ARGS --selftest)
-  strata_kernel_test(gr_parity src/kernels/gr_parity.cpp ARGS --selftest)
-  strata_kernel_test(draft_proxy_parity src/kernels/draft_proxy_parity.cpp ARGS --selftest)
-  strata_kernel_test(gdn_parity src/kernels/gdn_parity.cpp ARGS --selftest)
-  strata_kernel_test(s2_gemv_q8_parity src/kernels/s2_gemv_q8_parity.cpp ARGS --selftest)
-  strata_kernel_test(sampler_parity src/kernels/sampler_parity.cpp ARGS --selftest)
-  set_tests_properties(sampler_parity PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=0")
+  lamina_kernel_test(dequant_q8_0_identity src/kernels/dequant_q8_0_identity.cu)
+  lamina_kernel_test(iq_parity src/kernels/iq_parity.cpp NO_TEST)
+  lamina_kernel_test(shared_expert_parity src/kernels/shared_expert_parity.cpp ARGS --selftest)
+  lamina_kernel_test(gr_parity src/kernels/gr_parity.cpp ARGS --selftest)
+  lamina_kernel_test(draft_proxy_parity src/kernels/draft_proxy_parity.cpp ARGS --selftest)
+  lamina_kernel_test(gdn_parity src/kernels/gdn_parity.cpp ARGS --selftest)
+  lamina_kernel_test(s2_gemv_q8_parity src/kernels/s2_gemv_q8_parity.cpp ARGS --selftest)
+  lamina_kernel_test(sampler_parity src/kernels/sampler_parity.cpp ARGS --selftest)
+  set_tests_properties(sampler_parity PROPERTIES ENVIRONMENT "LAMINA_OLD_SAMPLER=0;LAMINA_SAMPLER_ONE_BLOCK=0")
   # the same fixtures on the other two sampled paths: the one-block kernel and the 0.1.20 kernel
   add_test(NAME sampler_parity_one_block COMMAND sampler_parity --selftest)
-  set_tests_properties(sampler_parity_one_block PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=0;STRATA_SAMPLER_ONE_BLOCK=1")
+  set_tests_properties(sampler_parity_one_block PROPERTIES ENVIRONMENT "LAMINA_OLD_SAMPLER=0;LAMINA_SAMPLER_ONE_BLOCK=1")
   add_test(NAME sampler_parity_old COMMAND sampler_parity --selftest)
-  set_tests_properties(sampler_parity_old PROPERTIES ENVIRONMENT "STRATA_OLD_SAMPLER=1;STRATA_SAMPLER_ONE_BLOCK=0")
+  set_tests_properties(sampler_parity_old PROPERTIES ENVIRONMENT "LAMINA_OLD_SAMPLER=1;LAMINA_SAMPLER_ONE_BLOCK=0")
 
-  strata_kernel_test(rope_parity src/kernels/rope_parity.cpp ARGS --selftest)
-  strata_kernel_test(quantize_act_parity src/kernels/quantize_act_parity.cpp ARGS --selftest)
-  strata_kernel_test(s_gemv_parity src/kernels/s_gemv_parity.cpp ARGS --selftest)
-  strata_kernel_test(elementwise_parity src/kernels/elementwise_parity.cpp ARGS --selftest)
-  strata_kernel_test(s_gemv_q8k_parity src/kernels/s_gemv_q8k_parity.cpp ARGS --selftest)
-  strata_kernel_test(qsa_parity src/kernels/qsa_parity.cpp ARGS --selftest)
+  lamina_kernel_test(rope_parity src/kernels/rope_parity.cpp ARGS --selftest)
+  lamina_kernel_test(quantize_act_parity src/kernels/quantize_act_parity.cpp ARGS --selftest)
+  lamina_kernel_test(s_gemv_parity src/kernels/s_gemv_parity.cpp ARGS --selftest)
+  lamina_kernel_test(elementwise_parity src/kernels/elementwise_parity.cpp ARGS --selftest)
+  lamina_kernel_test(s_gemv_q8k_parity src/kernels/s_gemv_q8k_parity.cpp ARGS --selftest)
+  lamina_kernel_test(qsa_parity src/kernels/qsa_parity.cpp ARGS --selftest)
 
   # ---- P2.S4: the PLE n-gram hash, the IQ4_NL table read, and the PLE block ----
-  # `ngram.cpp` is host-only but lives in `strata_kernels` because `ple.cu` shares its geometry constants, and
+  # `ngram.cpp` is host-only but lives in `lamina_kernels` because `ple.cu` shares its geometry constants, and
   # splitting them across two libraries would only add a layer.
   #
   # The pack, the original GGUF and the ggml capture are all REQUIRED inputs: this test's oracles are real
   # artifacts, so the working directory is pinned to the source tree and a missing input is a hard error
   # INSIDE the test.  A test that passes by finding nothing to compare is the failure mode this project keeps
   # re-learning.
-  strata_kernel_test(kv_q8_parity src/kernels/kv_q8_parity.cpp)
+  lamina_kernel_test(kv_q8_parity src/kernels/kv_q8_parity.cpp)
 
   # The verify window's batched kernels vs the per-token kernel sequences they replace, bitwise (synthetic data).
-  strata_kernel_test(verify_parity src/kernels/verify_parity.cpp LIBS strata_prefill strata_kernels_cpu ARGS --selftest)
+  lamina_kernel_test(verify_parity src/kernels/verify_parity.cpp LIBS lamina_prefill lamina_kernels_cpu ARGS --selftest)
 
   # The QSA block scores and top-k against the kernels they replaced, kept in the test: bitwise (synthetic data).
-  strata_kernel_test(qsa_select_parity src/kernels/qsa_select_parity.cu)
+  lamina_kernel_test(qsa_select_parity src/kernels/qsa_select_parity.cu)
   # The MMVQ of 2..8 tokens from interleaved activations against native_mmvq: bitwise (synthetic matrices).
-  strata_kernel_test(mmvq_il_parity src/kernels/mmvq_il_parity.cu)
+  lamina_kernel_test(mmvq_il_parity src/kernels/mmvq_il_parity.cu)
 
   # native_mmvq's multi_exact contract, bitwise: a T-column call against T single-column calls on the same Q8_1
   # bytes, with the flag off as the negative control (synthetic, GPU, no model; the control assumes 32-lane warps)
-  strata_kernel_test(mmvq_multi_parity src/kernels/mmvq_multi_parity.cpp)
+  lamina_kernel_test(mmvq_multi_parity src/kernels/mmvq_multi_parity.cpp)
 
   # Plan v0.3 P0.1: working-set lock of a host region (CPU only).
   add_executable(platform_memory_test src/platform/memory_test.cpp)
-  target_link_libraries(platform_memory_test PRIVATE strata_core CUDA::cudart)
+  target_link_libraries(platform_memory_test PRIVATE lamina_core CUDA::cudart)
   add_test(NAME platform_memory_test COMMAND platform_memory_test)
 
   # Plan v0.3 P2: the n-gram table read straight from the SSD. The selftest needs only the CPU and a temp file.
   add_executable(ple_reader_test src/ngram/ple_reader_test.cpp)
   target_include_directories(ple_reader_test PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-  target_link_libraries(ple_reader_test PRIVATE strata_kernels CUDA::cudart)
+  target_link_libraries(ple_reader_test PRIVATE lamina_kernels CUDA::cudart)
   add_test(NAME ple_reader_selftest COMMAND ple_reader_test --selftest)
 endif()
 
-# ---- strata_kernels_cpu (P2.S3) ----
+# ---- lamina_kernels_cpu (P2.S3) ----
 #
-# A SEPARATE LIBRARY from `strata_kernels`, and `/arch:AVX512` is set on the SOURCE rather than on the target
+# A SEPARATE LIBRARY from `lamina_kernels`, and `/arch:AVX512` is set on the SOURCE rather than on the target
 # so that the flag applies only to the TU that needs it.  Both parts matter:
 #
 #   * the CPU expert kernel uses `_mm256_dpbusd_epi32` (AVX512-VNNI) and `_mm256_multishift_epi64_epi8`
@@ -310,21 +310,21 @@ endif()
 #     test drivers must NOT be in it - otherwise the fallback is not a fallback, it is the same bet with
 #     worse opt-out.
 # Plan v0.3 P6: speculation components that need no GPU.
-add_library(strata_spec STATIC src/spec/suffix_drafter.cpp)
-target_include_directories(strata_spec PUBLIC include)
+add_library(lamina_spec STATIC src/spec/suffix_drafter.cpp)
+target_include_directories(lamina_spec PUBLIC include)
 add_executable(suffix_drafter_test src/spec/suffix_drafter_test.cpp)
-target_link_libraries(suffix_drafter_test PRIVATE strata_spec)
+target_link_libraries(suffix_drafter_test PRIVATE lamina_spec)
 add_test(NAME suffix_drafter_test COMMAND suffix_drafter_test)
-if(STRATA_BUILD_TESTS)
+if(LAMINA_BUILD_TESTS)
   # the f32 -> bf16 rounding against ggml's, NaN included, over every f32 bit pattern (header-only, CPU)
   add_executable(bf16_bits_test src/kernels/bf16_bits_test.cpp)
   target_include_directories(bf16_bits_test PRIVATE include)
   add_test(NAME bf16_bits_test COMMAND bf16_bits_test)
 endif()
 
-add_library(strata_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
+add_library(lamina_kernels_cpu STATIC src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp
             src/kernels/cpu/expert_layout.cpp src/kernels/cpu/q2_avx2.cpp)
-target_include_directories(strata_kernels_cpu PUBLIC include)
+target_include_directories(lamina_kernels_cpu PUBLIC include)
 # Plan v0.3 P6: only the kernel files get the AVX-512 / AVX2 flags; the pool and the probe run on any x86-64,
 # and the engine picks the kernels at run time (cpu_avx512_ok).
 if(MSVC)
@@ -356,29 +356,29 @@ int main() {
     volatile int x = 1;
     return _mm256_extract_epi32(dots(_mm256_set1_epi32(x), _mm256_set1_epi32(x)), 0) == 0;
 }
-]=] STRATA_HAVE_AVXVNNI_INTRINSICS)
+]=] LAMINA_HAVE_AVXVNNI_INTRINSICS)
 unset(CMAKE_REQUIRED_FLAGS)
-if(STRATA_HAVE_AVXVNNI_INTRINSICS)
-  set(_strata_avxvnni STRATA_AVXVNNI=1)
+if(LAMINA_HAVE_AVXVNNI_INTRINSICS)
+  set(_lamina_avxvnni LAMINA_AVXVNNI=1)
 else()
-  set(_strata_avxvnni STRATA_AVXVNNI=0)
+  set(_lamina_avxvnni LAMINA_AVXVNNI=0)
 endif()
-set_property(SOURCE src/kernels/cpu/q2_avx2.cpp APPEND PROPERTY COMPILE_DEFINITIONS ${_strata_avxvnni})
+set_property(SOURCE src/kernels/cpu/q2_avx2.cpp APPEND PROPERTY COMPILE_DEFINITIONS ${_lamina_avxvnni})
 find_package(Threads REQUIRED)
-target_link_libraries(strata_kernels_cpu PUBLIC Threads::Threads)
+target_link_libraries(lamina_kernels_cpu PUBLIC Threads::Threads)
 # The expert pool against serial runs; `--stress` needs no pack (synthetic experts, idle gaps that put the workers
 # to sleep).
 add_executable(pool_test src/kernels/cpu/pool_test.cpp)
-target_link_libraries(pool_test PRIVATE strata_kernels_cpu)
+target_link_libraries(pool_test PRIVATE lamina_kernels_cpu)
 
 # ---- plan v0.3 P6: the i-quant models' CPU experts (IQ2_XS / IQ3_XXS files) ----
 #
 # The CPU computes a native expert with ggml-cpu's own dot products (`ggml_get_type_traits_cpu`), so an IQ
 # weight means exactly what it means in llama.cpp.  ggml is built static from a llama.cpp checkout: a local one
-# with -DSTRATA_GGML_DIR=..., otherwise the pinned upstream commit (third_party/ggml/VERSION.txt).
-option(STRATA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
-set(STRATA_GGML_DIR "" CACHE PATH "llama.cpp checkout to take ggml from (empty: fetch the pinned commit)")
-if(STRATA_NATIVE_EXPERTS)
+# with -DLAMINA_GGML_DIR=..., otherwise the pinned upstream commit (third_party/ggml/VERSION.txt).
+option(LAMINA_NATIVE_EXPERTS "Native (IQ) expert support through ggml-cpu" ON)
+set(LAMINA_GGML_DIR "" CACHE PATH "llama.cpp checkout to take ggml from (empty: fetch the pinned commit)")
+if(LAMINA_NATIVE_EXPERTS)
   enable_language(C)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
   set(GGML_STATIC ON CACHE BOOL "" FORCE)
@@ -387,7 +387,7 @@ if(STRATA_NATIVE_EXPERTS)
   set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
   set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-  if(STRATA_PORTABLE)
+  if(LAMINA_PORTABLE)
     set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
     foreach(_f GGML_AVX GGML_AVX2 GGML_FMA GGML_F16C GGML_BMI2)
       set(${_f} ON CACHE BOOL "" FORCE)
@@ -395,27 +395,27 @@ if(STRATA_NATIVE_EXPERTS)
   else()
     set(GGML_NATIVE ON CACHE BOOL "" FORCE)
   endif()
-  if(STRATA_GGML_DIR)
-    add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+  if(LAMINA_GGML_DIR)
+    add_subdirectory(${LAMINA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   else()
     include(FetchContent)
-    FetchContent_Declare(strata_llamacpp
+    FetchContent_Declare(lamina_llamacpp
       GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
       GIT_TAG 3cf03257f219afbe7334045ff7c6a06ac68c627d
       GIT_SHALLOW FALSE)
-    FetchContent_GetProperties(strata_llamacpp)
-    if(NOT strata_llamacpp_POPULATED)
-      FetchContent_Populate(strata_llamacpp)
+    FetchContent_GetProperties(lamina_llamacpp)
+    if(NOT lamina_llamacpp_POPULATED)
+      FetchContent_Populate(lamina_llamacpp)
     endif()
-    add_subdirectory(${strata_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
+    add_subdirectory(${lamina_llamacpp_SOURCE_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
   endif()
   # lamina-server's parts from the same checkout (its root skips the ggml added above): libllama for the tokenizer
   # (the vocabulary of the model's GGUF, loaded without its tensors), llama-common for the Jinja chat templates,
   # and the vendored cpp-httplib, nlohmann/json, stb and sheredom/subprocess
-  if(STRATA_GGML_DIR)
-    set(_strata_llama_root ${STRATA_GGML_DIR})
+  if(LAMINA_GGML_DIR)
+    set(_lamina_llama_root ${LAMINA_GGML_DIR})
   else()
-    set(_strata_llama_root ${strata_llamacpp_SOURCE_DIR})
+    set(_lamina_llama_root ${lamina_llamacpp_SOURCE_DIR})
   endif()
   set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
   # lamina-server's outgoing HTTPS: WinHTTP on Windows (no OpenSSL DLLs beside it), OpenSSL through cpp-httplib elsewhere
@@ -426,13 +426,13 @@ if(STRATA_NATIVE_EXPERTS)
              LLAMA_ALL_WARNINGS LLAMA_TOOLS_INSTALL LLAMA_TESTS_INSTALL)
     set(${_o} OFF CACHE BOOL "" FORCE)
   endforeach()
-  add_subdirectory(${_strata_llama_root} ${CMAKE_BINARY_DIR}/llama EXCLUDE_FROM_ALL)
-  # part of strata_kernels_cpu (the pool calls these and they call its CPU probe: one library, so GNU ld's
+  add_subdirectory(${_lamina_llama_root} ${CMAKE_BINARY_DIR}/llama EXCLUDE_FROM_ALL)
+  # part of lamina_kernels_cpu (the pool calls these and they call its CPU probe: one library, so GNU ld's
   # one-pass static linking has no cycle to resolve)
-  target_sources(strata_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
+  target_sources(lamina_kernels_cpu PRIVATE src/kernels/cpu/native_expert.cpp src/kernels/cpu/iq_avx512.cpp
                                            src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp
                                            src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp)
-  target_include_directories(strata_kernels_cpu PRIVATE third_party/ggml)
+  target_include_directories(lamina_kernels_cpu PRIVATE third_party/ggml)
   if(MSVC)
     set_source_files_properties(src/kernels/cpu/iq_avx512.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
     set_source_files_properties(src/kernels/cpu/iq_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
@@ -447,129 +447,129 @@ if(STRATA_NATIVE_EXPERTS)
     set_source_files_properties(src/kernels/cpu/q2_avx1.cpp src/kernels/cpu/iq_avx1.cpp PROPERTIES COMPILE_OPTIONS
                                 "-msse4.2;-mavx;-mno-avx2;-mno-fma;-mno-f16c")
   endif()
-  set_property(SOURCE src/kernels/cpu/iq_avx2.cpp APPEND PROPERTY COMPILE_DEFINITIONS ${_strata_avxvnni})
-  target_link_libraries(strata_kernels_cpu PUBLIC ggml-cpu ggml-base)
-  target_compile_definitions(strata_kernels_cpu PUBLIC STRATA_NATIVE_EXPERTS=1)
+  set_property(SOURCE src/kernels/cpu/iq_avx2.cpp APPEND PROPERTY COMPILE_DEFINITIONS ${_lamina_avxvnni})
+  target_link_libraries(lamina_kernels_cpu PUBLIC ggml-cpu ggml-base)
+  target_compile_definitions(lamina_kernels_cpu PUBLIC LAMINA_NATIVE_EXPERTS=1)
   # the AVX-2 expert kernels' variants (iq_avx2.cpp, q2_avx2.cpp; with AVX-VNNI where the CPU has it) bit for bit
   # against each other at 1..8 tokens and against ggml-cpu's dot, on random blocks; --bench: ms per expert on one
   # thread, the weights streamed from DRAM
   add_executable(iq_avx2_parity src/kernels/cpu/iq_avx2_parity.cpp)
-  target_link_libraries(iq_avx2_parity PRIVATE strata_kernels_cpu)
+  target_link_libraries(iq_avx2_parity PRIVATE lamina_kernels_cpu)
   add_test(NAME iq_avx2_parity COMMAND iq_avx2_parity)
   # the AVX-2 Q8_K activation quantizer against ggml's, byte for byte (--bench: its time)
   add_executable(q8k_quant_parity src/kernels/cpu/q8k_quant_parity.cpp)
-  target_link_libraries(q8k_quant_parity PRIVATE strata_kernels_cpu)
+  target_link_libraries(q8k_quant_parity PRIVATE lamina_kernels_cpu)
   add_test(NAME q8k_quant_parity COMMAND q8k_quant_parity)
-  if(STRATA_ENABLE_CUDA)
+  if(LAMINA_ENABLE_CUDA)
     # llama.cpp's MMQ kernels (ggml-cuda, MIT) for the prompt path's experts, from the same checkout as ggml: mmq.cuh's
     # instances for the expert types of ISTA-DASLab's and unsloth's files and the quantizer, with the few host
     # symbols of ggml-cuda.cu they use in src/prefill/ggml_cuda_host.cu
-    if(STRATA_GGML_DIR)
-      set(_strata_gg ${STRATA_GGML_DIR}/ggml)
+    if(LAMINA_GGML_DIR)
+      set(_lamina_gg ${LAMINA_GGML_DIR}/ggml)
     else()
-      set(_strata_gg ${strata_llamacpp_SOURCE_DIR}/ggml)
+      set(_lamina_gg ${lamina_llamacpp_SOURCE_DIR}/ggml)
     endif()
-    set(_strata_mmq ${_strata_gg}/src/ggml-cuda)
-    add_library(strata_mmq STATIC src/prefill/moe_mmq.cu src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu)
+    set(_lamina_mmq ${_lamina_gg}/src/ggml-cuda)
+    add_library(lamina_mmq STATIC src/prefill/moe_mmq.cu src/prefill/ggml_cuda_host.cu ${_lamina_mmq}/quantize.cu)
     foreach(_t q2_0 iq1_s iq2_xxs iq2_xs iq2_s iq3_xxs iq3_s iq4_nl iq4_xs q4_k q5_k q6_k q5_1 q8_0)
-      target_sources(strata_mmq PRIVATE ${_strata_mmq}/template-instances/mmq-instance-${_t}.cu)
+      target_sources(lamina_mmq PRIVATE ${_lamina_mmq}/template-instances/mmq-instance-${_t}.cu)
     endforeach()
     # MMQ with a pointer per expert (src/prefill/moe_mmq_tab.cuh, upstream's copy of mmq.cuh's scheduler): the prompt
     # experts read in place.  The copy mirrors mmq.cuh from mul_mat_q_process_tile through mul_mat_q_case; another
     # llama.cpp tree (another fingerprint of that text) leaves it out, and the experts are gathered as before.  The
     # gate/up and down types of ISTA-DASLab's IQ3_S and unsloth's UD-Q4_K_XL files, one TU each.
-    file(READ ${_strata_mmq}/mmq.cuh _strata_mmq_src)
-    string(REPLACE "\r\n" "\n" _strata_mmq_src "${_strata_mmq_src}")
-    string(FIND "${_strata_mmq_src}" "static __device__ __forceinline__ void mul_mat_q_process_tile" _strata_tab_a)
-    string(FIND "${_strata_mmq_src}" "#define DECL_MMQ_CASE" _strata_tab_b)
-    set(_strata_tab_hash "")
-    if(_strata_tab_a GREATER -1 AND _strata_tab_b GREATER _strata_tab_a)
-      math(EXPR _strata_tab_len "${_strata_tab_b} - ${_strata_tab_a}")
-      string(SUBSTRING "${_strata_mmq_src}" ${_strata_tab_a} ${_strata_tab_len} _strata_tab_region)
-      string(SHA256 _strata_tab_hash "${_strata_tab_region}")
+    file(READ ${_lamina_mmq}/mmq.cuh _lamina_mmq_src)
+    string(REPLACE "\r\n" "\n" _lamina_mmq_src "${_lamina_mmq_src}")
+    string(FIND "${_lamina_mmq_src}" "static __device__ __forceinline__ void mul_mat_q_process_tile" _lamina_tab_a)
+    string(FIND "${_lamina_mmq_src}" "#define DECL_MMQ_CASE" _lamina_tab_b)
+    set(_lamina_tab_hash "")
+    if(_lamina_tab_a GREATER -1 AND _lamina_tab_b GREATER _lamina_tab_a)
+      math(EXPR _lamina_tab_len "${_lamina_tab_b} - ${_lamina_tab_a}")
+      string(SUBSTRING "${_lamina_mmq_src}" ${_lamina_tab_a} ${_lamina_tab_len} _lamina_tab_region)
+      string(SHA256 _lamina_tab_hash "${_lamina_tab_region}")
     endif()
-    unset(_strata_mmq_src)
-    unset(_strata_tab_region)
-    if(_strata_tab_hash STREQUAL "36e4dc716c504470ec09cc0852d29a6ac5eace257f6e5e72db3805ca4f043eb0")   # 3cf03257
-      set(_strata_tab_cuh ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/moe_mmq_tab.cuh)
+    unset(_lamina_mmq_src)
+    unset(_lamina_tab_region)
+    if(_lamina_tab_hash STREQUAL "36e4dc716c504470ec09cc0852d29a6ac5eace257f6e5e72db3805ca4f043eb0")   # 3cf03257
+      set(_lamina_tab_cuh ${CMAKE_CURRENT_SOURCE_DIR}/src/prefill/moe_mmq_tab.cuh)
       foreach(_t iq2_s iq3_xxs iq3_s iq4_xs q4_k q5_k q2_0 iq4_nl q5_1 q8_0)
-        string(TOUPPER ${_t} _strata_tab_T)
+        string(TOUPPER ${_t} _lamina_tab_T)
         configure_file(src/prefill/mmq_tab_instance.cu.in ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu @ONLY)
-        target_sources(strata_mmq PRIVATE ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu)
+        target_sources(lamina_mmq PRIVATE ${CMAKE_BINARY_DIR}/mmq_tab/mmq-tab-${_t}.cu)
       endforeach()
-      target_compile_definitions(strata_mmq PRIVATE STRATA_MMQ_TAB=1)
+      target_compile_definitions(lamina_mmq PRIVATE LAMINA_MMQ_TAB=1)
     else()
-      message(STATUS "pointer-table MMQ left out: mmq.cuh's scheduler differs from the mirrored one (${_strata_tab_hash})")
+      message(STATUS "pointer-table MMQ left out: mmq.cuh's scheduler differs from the mirrored one (${_lamina_tab_hash})")
     endif()
-    target_include_directories(strata_mmq PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq}
+    target_include_directories(lamina_mmq PRIVATE ${_lamina_gg}/include ${_lamina_gg}/src ${_lamina_mmq}
                                PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
+    target_compile_options(lamina_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
     if(MSVC)
-      target_compile_options(strata_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
+      target_compile_options(lamina_mmq PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/bigobj>)
     endif()
-    target_link_libraries(strata_mmq PUBLIC ggml-base CUDA::cudart)
-    target_link_libraries(strata_prefill PUBLIC strata_mmq)
-    target_link_libraries(strata_engine PUBLIC strata_mmq)   # the verify window's projections at 7-8 tokens
+    target_link_libraries(lamina_mmq PUBLIC ggml-base CUDA::cudart)
+    target_link_libraries(lamina_prefill PUBLIC lamina_mmq)
+    target_link_libraries(lamina_engine PUBLIC lamina_mmq)   # the verify window's projections at 7-8 tokens
     # the prompt path's routed-expert products by format at the engine's shapes (a bench, not a test)
     add_executable(mmq_expert_bench src/prefill/mmq_expert_bench.cpp)
-    target_include_directories(mmq_expert_bench PRIVATE ${_strata_gg}/include)
-    target_link_libraries(mmq_expert_bench PRIVATE strata_mmq strata_kernels CUDA::cudart)
+    target_include_directories(mmq_expert_bench PRIVATE ${_lamina_gg}/include)
+    target_link_libraries(mmq_expert_bench PRIVATE lamina_mmq lamina_kernels CUDA::cudart)
     # the prompt experts' q8_1 inputs in one kernel each, byte for byte the pairs they replace (--bench: both forms)
     add_executable(mmq_quant_parity src/prefill/mmq_quant_parity.cu)
-    target_include_directories(mmq_quant_parity PRIVATE ${_strata_gg}/include)
-    target_link_libraries(mmq_quant_parity PRIVATE strata_prefill strata_mmq CUDA::cudart)
+    target_include_directories(mmq_quant_parity PRIVATE ${_lamina_gg}/include)
+    target_link_libraries(mmq_quant_parity PRIVATE lamina_prefill lamina_mmq CUDA::cudart)
     add_test(NAME mmq_quant_parity COMMAND mmq_quant_parity)
     # the prompt experts' gate/up product read in place (the pointer-table MMQ) byte for byte the gathered one
     add_executable(mmq_tab_parity src/prefill/mmq_tab_parity.cu)
-    target_include_directories(mmq_tab_parity PRIVATE ${_strata_gg}/include)
-    target_link_libraries(mmq_tab_parity PRIVATE strata_mmq CUDA::cudart)
+    target_include_directories(mmq_tab_parity PRIVATE ${_lamina_gg}/include)
+    target_link_libraries(mmq_tab_parity PRIVATE lamina_mmq CUDA::cudart)
     add_test(NAME mmq_tab_parity COMMAND mmq_tab_parity)
     add_executable(native_expert_parity src/kernels/native_expert_parity.cpp)
     target_include_directories(native_expert_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(native_expert_parity PRIVATE strata_kernels strata_kernels_cpu strata_artifact CUDA::cudart)
+    target_link_libraries(native_expert_parity PRIVATE lamina_kernels lamina_kernels_cpu lamina_artifact CUDA::cudart)
     add_test(NAME native_expert_parity_k_quants COMMAND native_expert_parity --synthetic q4_K/q5_1 q5_K/q8_0)
-    # --expert-math exact's expf: the CPU pool's (strata_kernels_cpu) against the GPU's, over every float
+    # --expert-math exact's expf: the CPU pool's (lamina_kernels_cpu) against the GPU's, over every float
     add_executable(swiglu_expf_parity src/kernels/swiglu_expf_parity.cu)
-    target_link_libraries(swiglu_expf_parity PRIVATE strata_kernels_cpu CUDA::cudart)
+    target_link_libraries(swiglu_expf_parity PRIVATE lamina_kernels_cpu CUDA::cudart)
     add_test(NAME swiglu_expf_parity COMMAND swiglu_expf_parity)
     # The grouped native expert kernels against the ones they replaced, kept in the test: bitwise (synthetic experts).
     add_executable(expert_grouped_parity src/kernels/expert_grouped_parity.cu)
     target_include_directories(expert_grouped_parity PRIVATE third_party/ggml src/kernels/cuda)
-    target_link_libraries(expert_grouped_parity PRIVATE strata_kernels strata_kernels_cpu CUDA::cudart)
+    target_link_libraries(expert_grouped_parity PRIVATE lamina_kernels lamina_kernels_cpu CUDA::cudart)
     add_test(NAME expert_grouped_parity COMMAND expert_grouped_parity)
 
-    # Qwen3.6-35B-A3B (GGUF architecture qwen35moe): its own engine path, a library `strata` switches to for such a
-    # model (the family switch at the top of its main) and strata-q36 wraps on its own; the experts that do not fit
-    # in VRAM run on the CPU pool.  strata-q36ref: the reference path tools/qwen35/ checks against llama.cpp.
-    add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
-    target_include_directories(strata_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    # Qwen3.6-35B-A3B (GGUF architecture qwen35moe): its own engine path, a library `lamina` switches to for such a
+    # model (the family switch at the top of its main) and lamina-q36 wraps on its own; the experts that do not fit
+    # in VRAM run on the CPU pool.  lamina-q36ref: the reference path tools/qwen35/ checks against llama.cpp.
+    add_library(lamina_qwen35 STATIC src/qwen35/q36_engine.cu)
+    target_include_directories(lamina_qwen35 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
                                PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
-    target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_kernels strata_kernels_cpu strata_warnings
-                          strata_serve_io CUDA::cudart)
-    target_compile_definitions(strata_qwen35 PRIVATE STRATA_Q36_CPU_POOL=1)
-    add_executable(strata-q36 src/qwen35/q36_main.cpp)
-    target_link_libraries(strata-q36 PRIVATE strata_qwen35 CUDA::cudart)
-    target_link_libraries(strata_program PUBLIC strata_qwen35)
-    target_compile_definitions(strata_program PRIVATE STRATA_HAVE_QWEN35=1)
-    add_executable(strata-q36ref src/qwen35/q36ref.cu)
-    target_include_directories(strata-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-    target_link_libraries(strata-q36ref PRIVATE strata_kernels strata_warnings CUDA::cudart)
+    target_link_libraries(lamina_qwen35 PRIVATE lamina_prefill lamina_kernels lamina_kernels_cpu lamina_warnings
+                          lamina_serve_io CUDA::cudart)
+    target_compile_definitions(lamina_qwen35 PRIVATE LAMINA_Q36_CPU_POOL=1)
+    add_executable(lamina-q36 src/qwen35/q36_main.cpp)
+    target_link_libraries(lamina-q36 PRIVATE lamina_qwen35 CUDA::cudart)
+    target_link_libraries(lamina_program PUBLIC lamina_qwen35)
+    target_compile_definitions(lamina_program PRIVATE LAMINA_HAVE_QWEN35=1)
+    add_executable(lamina-q36ref src/qwen35/q36ref.cu)
+    target_include_directories(lamina-q36ref PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(lamina-q36ref PRIVATE lamina_kernels lamina_warnings CUDA::cudart)
   endif()
 endif()
 
-if(STRATA_BUILD_TESTS)
+if(LAMINA_BUILD_TESTS)
   # Plan v0.3 P6: one expert applied to several tokens, bitwise vs the single-token kernel (synthetic, CPU only).
   # plan v0.3 P5: the device dequantizers vs the artifact's CPU dequantizers on the real shards (not a ctest: needs
   # the 38 GB model; run it by hand or from tools/gpu_session.py)
   add_executable(dequant_bf16_test src/kernels/dequant_bf16_test.cpp)
-  target_link_libraries(dequant_bf16_test PRIVATE strata_kernels strata_artifact CUDA::cudart)
+  target_link_libraries(dequant_bf16_test PRIVATE lamina_kernels lamina_artifact CUDA::cudart)
 
   add_executable(expert_multi_test src/kernels/cpu/expert_multi_test.cpp)
-  target_link_libraries(expert_multi_test PRIVATE strata_kernels_cpu)
+  target_link_libraries(expert_multi_test PRIVATE lamina_kernels_cpu)
   add_test(NAME expert_multi_test COMMAND expert_multi_test)
 
   add_executable(expert_parity src/kernels/cpu/expert_parity.cpp)
-  target_link_libraries(expert_parity PRIVATE strata_kernels_cpu)
+  target_link_libraries(expert_parity PRIVATE lamina_kernels_cpu)
   # The pack is a REQUIRED input, not an optional one: this test compares against a real expert blob, and a
   # missing file would otherwise be reported as a pass by a test that skipped everything.
   add_test(NAME expert_parity COMMAND expert_parity --selftest
@@ -579,13 +579,13 @@ if(STRATA_BUILD_TESTS)
   add_test(NAME pool_stress COMMAND pool_test --stress)
 endif()
 
-if(STRATA_BUILD_TESTS)
+if(LAMINA_BUILD_TESTS)
   enable_testing()
 endif()
 
 # ---- lamina-server ----------------------------------------------------------
 # The HTTP server: the OpenAI, Anthropic and Responses APIs and the web app, with the engine on a thread of its own
-# (strata_program through in-process channels). lamina_text is its text layer (no GPU): the tokenizer, the chat
+# (lamina_program through in-process channels). lamina_text is its text layer (no GPU): the tokenizer, the chat
 # template (Jinja, vendored from llama.cpp's common/jinja), the request conversions and the output parser;
 # lamina-check runs it on JSON-lines cases (scratch/lamina/p6_check.py compares them with the Python server's).
 if(TARGET cpp-httplib AND TARGET ggml-base)
@@ -600,8 +600,8 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
     target_compile_options(lamina_jinja PRIVATE -w)
   endif()
   # llama.cpp's pre-tokenizer split (the qwen35 pattern has a custom implementation there)
-  add_library(lamina_unicode STATIC ${_strata_llama_root}/src/unicode.cpp ${_strata_llama_root}/src/unicode-data.cpp)
-  target_include_directories(lamina_unicode PUBLIC ${_strata_llama_root})
+  add_library(lamina_unicode STATIC ${_lamina_llama_root}/src/unicode.cpp ${_lamina_llama_root}/src/unicode-data.cpp)
+  target_include_directories(lamina_unicode PUBLIC ${_lamina_llama_root})
   if(MSVC)
     target_compile_options(lamina_unicode PRIVATE /w /utf-8)
   else()
@@ -610,10 +610,10 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   add_library(lamina_text STATIC src/server/json.cpp src/server/log.cpp src/server/tokenizer.cpp
                                  src/server/frontend.cpp)
   target_include_directories(lamina_text PUBLIC src/server)
-  target_link_libraries(lamina_text PUBLIC lamina_jinja lamina_unicode nlohmann ggml-base strata_warnings)
+  target_link_libraries(lamina_text PUBLIC lamina_jinja lamina_unicode nlohmann ggml-base lamina_warnings)
   add_executable(lamina-check src/server/check.cpp)
   target_link_libraries(lamina-check PRIVATE lamina_text)
-  if(TARGET strata_program)
+  if(TARGET lamina_program)
     # the web app inside the binary (cmake/embed_web.cmake)
     file(GLOB_RECURSE _lamina_web CONFIGURE_DEPENDS src/server/web/*)
     add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
@@ -627,9 +627,9 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
                 src/server/prometheus.cpp src/server/replicas.cpp src/server/responses.cpp src/server/runconfig.cpp
                 src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp src/server/telemetry.cpp
                 src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp)
-    target_include_directories(lamina_server_core PUBLIC src/server ${_strata_llama_root}/vendor
-                               ${_strata_llama_root}/vendor/cpp-httplib)
-    target_link_libraries(lamina_server_core PUBLIC lamina_text cpp-httplib vendor-hash strata_program strata_warnings)
+    target_include_directories(lamina_server_core PUBLIC src/server ${_lamina_llama_root}/vendor
+                               ${_lamina_llama_root}/vendor/cpp-httplib)
+    target_link_libraries(lamina_server_core PUBLIC lamina_text cpp-httplib vendor-hash lamina_program lamina_warnings)
     if(WIN32)
       target_link_libraries(lamina_server_core PUBLIC winhttp ws2_32 ole32 windowscodecs shell32)
     else()

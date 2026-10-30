@@ -142,9 +142,9 @@ class Ranges(FetchCase):
                 got = b"".join(M.ranged("u", 100, len(data) - 1, 1000, workers))
             self.assertEqual(got, data[100:])
             self.assertEqual(sorted(seen)[0], (100, 1099))
-        with mock.patch.dict(M.os.environ, {"STRATA_DL_CONNECTIONS": "1"}):
+        with mock.patch.dict(M.os.environ, {"LAMINA_DL_CONNECTIONS": "1"}):
             self.assertEqual(M.connections(), 1)
-        with mock.patch.dict(M.os.environ, {"STRATA_DL_CONNECTIONS": ""}):
+        with mock.patch.dict(M.os.environ, {"LAMINA_DL_CONNECTIONS": ""}):
             self.assertEqual(M.connections(), 8)
 
     def test_a_failing_range_stops_the_parallel_read(self):
@@ -197,7 +197,7 @@ class Ranges(FetchCase):
             self.assertEqual(M.verify(str(self.out)), [])
         with mock.patch.object(M, "REPO", "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/main/"):
             (self.out / "tensors" / "mtp.a.bin").write_bytes(b"x")
-            self.assertEqual(M.verify(str(self.out)), [])          # STRATA_MTP_REVISION: other hashes
+            self.assertEqual(M.verify(str(self.out)), [])          # LAMINA_MTP_REVISION: other hashes
         self.assertEqual(M.verify(str(self.out)), ["mtp.a"])
         self.assertEqual(M.verify(str(self.out / "nothing")), [])
 

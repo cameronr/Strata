@@ -424,9 +424,9 @@ def cmake_build(tc: Toolchain, src: Path, b: Path, target: str, defs: list, env:
 
 def build_engine(tc: Toolchain, archs: str, portable: bool, env: dict):
     b = ROOT / "build"
-    cmake_build(tc, ROOT, b, "lamina lamina-server", ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
-                                         f"-DCMAKE_CUDA_ARCHITECTURES={archs}", f"-DSTRATA_GGML_DIR={LLAMA.as_posix()}",
-                                         f"-DSTRATA_PORTABLE={'ON' if portable else 'OFF'}", *cuda_defs(tc.nvcc)], env)
+    cmake_build(tc, ROOT, b, "lamina lamina-server", ["-DLAMINA_ENABLE_CUDA=ON", "-DLAMINA_BUILD_TESTS=OFF",
+                                         f"-DCMAKE_CUDA_ARCHITECTURES={archs}", f"-DLAMINA_GGML_DIR={LLAMA.as_posix()}",
+                                         f"-DLAMINA_PORTABLE={'ON' if portable else 'OFF'}", *cuda_defs(tc.nvcc)], env)
     if WIN:   # the CUDA runtime beside the engine
         for dll in cuda_dlls(tc.nvcc):
             shutil.copy2(dll, b / dll.name)
@@ -444,7 +444,7 @@ def build_vision(tc: Toolchain, env: dict):
     """The image encoder runs on the CPU, built for any AVX2 CPU: a native build on an AVX-512 CPU runs without flash
     attention, about half as fast."""
     cmake_build(tc, ROOT / "tools" / "vision", ROOT / "build-vision", "lamina-vision",
-                [f"-DLLAMA_DIR={LLAMA.as_posix()}", "-DSTRATA_VISION_CUDA=OFF", "-DSTRATA_PORTABLE=ON"], env)
+                [f"-DLLAMA_DIR={LLAMA.as_posix()}", "-DLAMINA_VISION_CUDA=OFF", "-DLAMINA_PORTABLE=ON"], env)
     ok(f"the image encoder: build-vision/bin/lamina-vision{EXE}")
 
 
@@ -565,7 +565,7 @@ def fetch(f: File, data: Path):
 # ---- the model's preparation
 
 def tool(name: str, *args):
-    run([sys.executable, ROOT / "tools" / name, *args], env=clean_env({**os.environ, "STRATA_GGUF_PY": str(LLAMA / "gguf-py")}))
+    run([sys.executable, ROOT / "tools" / name, *args], env=clean_env({**os.environ, "LAMINA_GGUF_PY": str(LLAMA / "gguf-py")}))
 
 
 def prepare(key: str, m: Model, data: Path, vision: bool):

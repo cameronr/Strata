@@ -1,5 +1,5 @@
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/bf16_bits.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
 #include "mmvf_multi.cuh"
 
 #include <cuda_runtime.h>
@@ -7,7 +7,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 // The FP32-activation MMVF implementation below is adapted from llama.cpp
@@ -111,19 +111,19 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
         (reinterpret_cast<uintptr_t>(y) & 3u) != 0)
         throw std::invalid_argument("bf16_gemv_fp32_mmvf: null or misaligned pointer");
     const cudaStream_t st = (cudaStream_t) stream;
-#define STRATA_MMVF_CASE(N) case N: \
+#define LAMINA_MMVF_CASE(N) case N: \
     bf16_f32_mmvf_kernel<N><<<(unsigned) n_out, N, 0, st>>>(x, w, y, (int) n_in); break
     switch (mmvf_block_size(n_in)) {
-        STRATA_MMVF_CASE(32);
-        STRATA_MMVF_CASE(64);
-        STRATA_MMVF_CASE(96);
-        STRATA_MMVF_CASE(128);
-        STRATA_MMVF_CASE(160);
-        STRATA_MMVF_CASE(192);
-        STRATA_MMVF_CASE(224);
-        STRATA_MMVF_CASE(256);
+        LAMINA_MMVF_CASE(32);
+        LAMINA_MMVF_CASE(64);
+        LAMINA_MMVF_CASE(96);
+        LAMINA_MMVF_CASE(128);
+        LAMINA_MMVF_CASE(160);
+        LAMINA_MMVF_CASE(192);
+        LAMINA_MMVF_CASE(224);
+        LAMINA_MMVF_CASE(256);
     }
-#undef STRATA_MMVF_CASE
+#undef LAMINA_MMVF_CASE
     const cudaError_t result = cudaGetLastError();
     if (result != cudaSuccess)
         throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf launch: ") + cudaGetErrorString(result));
@@ -148,23 +148,23 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, const uint16_t* w, float* y, int6
     }
     const cudaStream_t st = (cudaStream_t) stream;
     const unsigned blocks = (unsigned) ((n_out + kRows - 1) / kRows + (n_out2 + kRows - 1) / kRows);
-#define STRATA_MMVF_CASE(N) case N: \
+#define LAMINA_MMVF_CASE(N) case N: \
     bf16_f32_mmvf_multi_kernel<N><<<blocks, N, 0, st>>>(x, w, y, (int) n_in, (int) n_out, n_tok, w2, y2, (int) n_out2); \
     break
     switch (mmvf_block_size(n_in)) {
-        STRATA_MMVF_CASE(32);
-        STRATA_MMVF_CASE(64);
-        STRATA_MMVF_CASE(96);
-        STRATA_MMVF_CASE(128);
-        STRATA_MMVF_CASE(160);
-        STRATA_MMVF_CASE(192);
-        STRATA_MMVF_CASE(224);
-        STRATA_MMVF_CASE(256);
+        LAMINA_MMVF_CASE(32);
+        LAMINA_MMVF_CASE(64);
+        LAMINA_MMVF_CASE(96);
+        LAMINA_MMVF_CASE(128);
+        LAMINA_MMVF_CASE(160);
+        LAMINA_MMVF_CASE(192);
+        LAMINA_MMVF_CASE(224);
+        LAMINA_MMVF_CASE(256);
     }
-#undef STRATA_MMVF_CASE
+#undef LAMINA_MMVF_CASE
     const cudaError_t result = cudaGetLastError();
     if (result != cudaSuccess)
         throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

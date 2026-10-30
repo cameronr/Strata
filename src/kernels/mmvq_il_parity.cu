@@ -5,8 +5,8 @@
 // within kMmaTol of native_mmvq (float rounding), and each column bitwise the same at every column count they take.
 // --bench times both inside CUDA graphs (weights cycled past the L2); --bench27 Qwen3.8-27B's dense shapes at 1-8
 // columns: native_mmvq, native_mmvq_il without the tensor cores and with them.
-#include "strata/kernels/native_mma.hpp"
-#include "strata/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_mma.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
 
@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-using namespace strata::kernels;
+using namespace lamina::kernels;
 
 #define CK(x) do { const cudaError_t e_ = (x); if (e_ != cudaSuccess) { std::printf("%s: %s\n", #x, cudaGetErrorString(e_)); std::exit(1); } } while (0)
 

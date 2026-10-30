@@ -64,7 +64,7 @@ void openai_chunks(Service& svc, const json& req, const std::vector<int32_t>& id
         }
         if (kind == "mcp") {
             json c = chunk(json::object());
-            c["strata_mcp"] = x;
+            c["lamina_mcp"] = x;
             return out(&c);
         }
         if (kind == "event") {
@@ -125,7 +125,7 @@ json openai_collect(const std::vector<json>& chunks) {
     json mcp = json::array();
     const json* last = nullptr;
     for (const json& c : chunks) {
-        if (truthy(jget(c, "strata_mcp"))) mcp.push_back(c["strata_mcp"]);
+        if (truthy(jget(c, "lamina_mcp"))) mcp.push_back(c["lamina_mcp"]);
         const json& d = c["choices"][0]["delta"];
         if (jget(d, "content").is_string()) content += d["content"].get<std::string>();
         if (jget(d, "reasoning_content").is_string()) reasoning += d["reasoning_content"].get<std::string>();
@@ -151,7 +151,7 @@ json openai_collect(const std::vector<json>& chunks) {
     json msg = {{"role", "assistant"}, {"content", content.empty() ? json(nullptr) : json(content)}};
     if (!reasoning.empty()) msg["reasoning_content"] = reasoning;
     if (!calls.empty()) msg["tool_calls"] = calls;
-    if (!mcp.empty()) msg["strata_mcp"] = mcp;
+    if (!mcp.empty()) msg["lamina_mcp"] = mcp;
     json result = {{"id", (*last)["id"]}, {"object", "chat.completion"}, {"created", (*last)["created"]},
                    {"model", (*last)["model"]},
                    {"choices", json::array({{{"index", 0}, {"message", msg}, {"finish_reason", (*last)["choices"][0]["finish_reason"]}}})},
@@ -444,7 +444,7 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
 
 void debug_request(const std::string& api, const json& req, const json& messages, const json& tools, int64_t max_new,
                    bool thinking, size_t prompt_tokens) {
-    if (std::getenv("STRATA_DEBUG") == nullptr || !*std::getenv("STRATA_DEBUG")) return;
+    if (std::getenv("LAMINA_DEBUG") == nullptr || !*std::getenv("LAMINA_DEBUG")) return;
     const json last = messages.empty() ? json::object() : messages.back();
     std::string body;
     const json& content = jget(last, "content");

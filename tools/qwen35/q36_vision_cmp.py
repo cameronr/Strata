@@ -1,10 +1,10 @@
-"""vcmp.py - the picture gate: strata-q36 against llama.cpp (mtmd) on the same GGUF + mmproj, same pictures.
+"""vcmp.py - the picture gate: lamina-q36 against llama.cpp (mtmd) on the same GGUF + mmproj, same pictures.
 
-For each (picture, question): llama.cpp HIP (q36_mtmd_dump, encoder on the CPU like strata-vision's) gives the prompt's
-chunks, its greedy answer and every step's full logits; the encoder file of strata-vision (venc.py) is laid over the same
-ids; strata-q36 (--tokens ids --emb file --force llama's greedy ids) gives its logits on the same sequence.  Reported:
+For each (picture, question): llama.cpp HIP (q36_mtmd_dump, encoder on the CPU like lamina-vision's) gives the prompt's
+chunks, its greedy answer and every step's full logits; the encoder file of lamina-vision (venc.py) is laid over the same
+ids; lamina-q36 (--tokens ids --emb file --force llama's greedy ids) gives its logits on the same sequence.  Reported:
 the answer text agreement, the first token's logits (top-1/top-2 both, max |diff| over the top-5), the teacher-forced
-mean KL(P_llama || Q_strata) and top-1 agreement over the steps, and - the floor - the same numbers for llama.cpp's CPU
+mean KL(P_llama || Q_lamina) and top-1 agreement over the steps, and - the floor - the same numbers for llama.cpp's CPU
 backend against llama.cpp HIP.
 
   python q36_vision_cmp.py --dump BIN --q36 BIN --vision BIN --model GGUF --mmproj F --out DIR --pic shapes.png --pic code4217.png
@@ -88,7 +88,7 @@ def main():
     for pic_spec in a.pic:
         pics = pic_spec.split("+")            # "a.png+b.png": one request with two pictures (one <__media__> each)
         name = "+".join(os.path.basename(p) for p in pics)
-        # the encoder's file (strata-vision, CPU): one record per picture, in prompt order
+        # the encoder's file (lamina-vision, CPU): one record per picture, in prompt order
         run([sys.executable, a.venc, a.vision, a.mmproj, a.model, *pics], "", os.path.join(a.out, name + ".venc.log"))
         emb = os.path.join(a.out, name + ".sve")
         with open(emb, "wb") as f:
@@ -122,7 +122,7 @@ def main():
             Q = np.fromfile(q_logit_f, dtype=np.float32).reshape(-1, V)
             kl, top1 = kl_stats(P, Q)
             d5 = np.abs(np.sort(P[0])[-5:] - np.sort(Q[0])[-5:]).max()
-            row = {"tag": tag, "prompt_tokens": len(ids), "llama_gen": gen, "strata_gen_forced": qgen,
+            row = {"tag": tag, "prompt_tokens": len(ids), "llama_gen": gen, "lamina_gen_forced": qgen,
                    "first_top1_same": bool(P[0].argmax() == Q[0].argmax()), "first_max_top5_diff": float(d5),
                    "kl_mean": float(kl.mean()), "kl_first": float(kl[0]), "top1": float(top1.mean()), "steps": int(len(kl))}
             if a.floor:
@@ -136,9 +136,9 @@ def main():
                 row.update({"floor_kl_mean": float(klc.mean()), "floor_kl_first": float(klc[0]), "floor_top1": float(t1c.mean()),
                             "floor_first_max_top5_diff": float(np.abs(np.sort(P[0])[-5:] - np.sort(C[0])[-5:]).max())})
             rows.append(row)
-            print(json.dumps({k: v for k, v in row.items() if k not in ("llama_gen", "strata_gen_forced")}), flush=True)
+            print(json.dumps({k: v for k, v in row.items() if k not in ("llama_gen", "lamina_gen_forced")}), flush=True)
             print("  llama  :", gen[:16], flush=True)
-            print("  strata :", qgen[:16], "(teacher-forced on llama's ids: its own greedy at each step)", flush=True)
+            print("  lamina :", qgen[:16], "(teacher-forced on llama's ids: its own greedy at each step)", flush=True)
     json.dump(rows, open(os.path.join(a.out, "summary.json"), "w"), indent=1)
 
 

@@ -1,21 +1,21 @@
-// src/kernels/cuda/iq_kernels.cu - see include/strata/kernels/iq_kernels.hpp.
+// src/kernels/cuda/iq_kernels.cu - see include/lamina/kernels/iq_kernels.hpp.
 //
 // The dequantizers and the q8_1 quantizer are transcribed from llama.cpp (ggml/src/ggml-cuda/dequantize.cuh,
 // quantize.cu at the commit in third_party/ggml/VERSION.txt; MIT license, third_party/ggml/LICENSE), the dot products
 // in iq_dot.cuh.
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/q8_1_finite.hpp"
 #include "iq_dot.cuh"
 #include "q8_1_il.cuh"
-#include "strata/kernels/expf_contract.hpp"
-#include "strata/kernels/f16_bits.hpp"
+#include "lamina/kernels/expf_contract.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 void check(const char* what) {
@@ -358,12 +358,12 @@ __global__ void __launch_bounds__(DOWN_WARPS * 32) native_down_sub_kernel(const 
 
 // The decoded-once kernels' formats: gate/up rows of 80 calls at n_embd 2560; down rows (n_ff 640) of IQ4_NL (40 calls,
 // 8 lanes a row; 4 or 16: 3-6% slower) and Q2_0 (20 calls, 4 lanes; 8 or 16: up to 14% slower at 8 tokens)
-#define STRATA_GU80_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(42)
+#define LAMINA_GU80_FMTS(X) X(16) X(17) X(18) X(21) X(22) X(23) X(42)
 bool gu80(const NativeExpertLayout& L) {
     switch (L.gu_type) {
-#define STRATA_GU80(T) case T:
-        STRATA_GU80_FMTS(STRATA_GU80)
-#undef STRATA_GU80
+#define LAMINA_GU80(T) case T:
+        LAMINA_GU80_FMTS(LAMINA_GU80)
+#undef LAMINA_GU80
             return L.n_embd == 2560;
         default: return false;
     }
@@ -938,9 +938,9 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
     const auto* W = (const uint8_t*) w;
     const auto* X = (const block_q8_1*) x_q8_1;
     switch (t) {
-#define STRATA_MMVQ(T) case T: mmvq_kernel<T><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols); break;
-        STRATA_FMTS(STRATA_MMVQ)
-#undef STRATA_MMVQ
+#define LAMINA_MMVQ(T) case T: mmvq_kernel<T><<<grid, block, 0, s>>>(W, rb, X, y, n_in, n_out, ncols); break;
+        LAMINA_FMTS(LAMINA_MMVQ)
+#undef LAMINA_MMVQ
         default: std::fprintf(stderr, "iq_mmvq: type %d is not supported\n", t); std::exit(1);
     }
     check("iq_mmvq");
@@ -959,10 +959,10 @@ void launch_iq3_s_il(const uint8_t* w, size_t rb, const void* x_q8_1, const void
     }
     const Q81IlParts parts = q8_1_il_parts(x_il, n_in, ncols);
     switch (ncols) {
-#define STRATA_IL(N) \
+#define LAMINA_IL(N) \
     case N: mmvq_il_iq3_s_kernel<N, R><<<blocks, 128, 0, s>>>(w, rb, parts.pm, parts.d, y, n_in, n_out); break;
-        STRATA_IL(2) STRATA_IL(3) STRATA_IL(4) STRATA_IL(5) STRATA_IL(6) STRATA_IL(7) STRATA_IL(8)
-#undef STRATA_IL
+        LAMINA_IL(2) LAMINA_IL(3) LAMINA_IL(4) LAMINA_IL(5) LAMINA_IL(6) LAMINA_IL(7) LAMINA_IL(8)
+#undef LAMINA_IL
     }
 }
 }  // namespace
@@ -1125,14 +1125,14 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
         }
     } else if (gu80(L)) {
         switch (L.gu_type) {
-#define STRATA_GU80(T) case T: native_gus80_kernel<T><<<ggu, GUS_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-            STRATA_GU80_FMTS(STRATA_GU80)
-#undef STRATA_GU80
+#define LAMINA_GU80(T) case T: native_gus80_kernel<T><<<ggu, GUS_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+            LAMINA_GU80_FMTS(LAMINA_GU80)
+#undef LAMINA_GU80
         }
     } else switch (L.gu_type) {
-#define STRATA_GU(T) case T: native_gus_kernel<T><<<ggu, GUS_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
-        STRATA_FMTS(STRATA_GU)
-#undef STRATA_GU
+#define LAMINA_GU(T) case T: native_gus_kernel<T><<<ggu, GUS_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, hq); break;
+        LAMINA_FMTS(LAMINA_GU)
+#undef LAMINA_GU
         default: std::fprintf(stderr, "native_expert_grouped: gate/up type %d\n", L.gu_type); std::exit(1);
     }
     check("native_expert_grouped/gu");
@@ -1159,9 +1159,9 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
                                                                                      ent_dst, hq, L, out);
     } else {
     switch (L.d_type) {
-#define STRATA_DOWN(T) case T: native_down_kernel<T><<<gd, DOWN_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
-        STRATA_FMTS(STRATA_DOWN)
-#undef STRATA_DOWN
+#define LAMINA_DOWN(T) case T: native_down_kernel<T><<<gd, DOWN_WARPS * 32, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        LAMINA_FMTS(LAMINA_DOWN)
+#undef LAMINA_DOWN
         default: std::fprintf(stderr, "native_expert_grouped: down type %d\n", L.d_type); std::exit(1);
     }
     }
@@ -1178,4 +1178,4 @@ void native_expert_rows_out(const float* rows, const int32_t* n_groups, const in
     check("native_expert_rows_out");
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

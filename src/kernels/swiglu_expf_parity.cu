@@ -2,11 +2,11 @@
 //
 // For every 32-bit pattern x: expf_contract(x) on the device against its host form, and the SwiGLU silu(g) * u with
 // g = x (u = 1 and a fixed pseudo-random u per x) in the exact gate/up kernel's operations against the CPU pool's own
-// native_swiglu_exact (strata_kernels_cpu, the function the pool calls).  Both must match bit for bit.  It also counts
+// native_swiglu_exact (lamina_kernels_cpu, the function the pool calls).  Both must match bit for bit.  It also counts
 // the patterns where the C runtime's expf differs from expf_contract, the reason the pool does not call it under exact.
 // Usage: swiglu_expf_parity (exit 0 when both match everywhere); runs on the first visible GPU.
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/expf_contract.hpp"
+#include "lamina/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/expf_contract.hpp"
 
 #include <cuda_runtime.h>
 
@@ -36,9 +36,9 @@ __global__ void eval_kernel(uint32_t base, uint32_t n, uint32_t* e, uint32_t* s1
     if (i >= n) return;
     const uint32_t b = base + i;
     const float x = __uint_as_float(b);
-    e[i] = __float_as_uint(strata::kernels::expf_contract(x));
+    e[i] = __float_as_uint(lamina::kernels::expf_contract(x));
     // native_gus_contract_kernel's operations
-    const float ee = strata::kernels::expf_contract(-x);
+    const float ee = lamina::kernels::expf_contract(-x);
     const float sil = __fdiv_rn(x, __fadd_rn(1.0f, ee));
     s1[i] = __float_as_uint(sil);
     su[i] = __float_as_uint(__fmul_rn(sil, u_of(b)));
@@ -61,7 +61,7 @@ bool same(uint32_t a, uint32_t b) {   // NaNs compare by class: a NaN's payload 
 }  // namespace
 
 int main() {
-    namespace cpu = strata::kernels::cpu;
+    namespace cpu = lamina::kernels::cpu;
     uint32_t *de = nullptr, *ds1 = nullptr, *dsu = nullptr;
     if (cudaMalloc(&de, kChunk * 4) != cudaSuccess || cudaMalloc(&ds1, kChunk * 4) != cudaSuccess ||
         cudaMalloc(&dsu, kChunk * 4) != cudaSuccess) {
@@ -87,7 +87,7 @@ int main() {
                 for (uint64_t i = w; i < kChunk; i += nth) {
                     const uint32_t b = (uint32_t) (base + i);
                     const float x = from_bits(b);
-                    const uint32_t he = bits(strata::kernels::expf_contract(x));
+                    const uint32_t he = bits(lamina::kernels::expf_contract(x));
                     crt += !same(he, bits(std::exp(x)));
                     const bool ok = same(ge[i], he) && same(gs1[i], bits(cpu::native_swiglu_exact(x, 1.0f))) &&
                                     same(gsu[i], bits(cpu::native_swiglu_exact(x, u_of(b))));

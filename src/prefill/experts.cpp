@@ -1,19 +1,19 @@
-// src/prefill/experts.cpp - see include/strata/prefill/experts.hpp.
-#include "strata/prefill/experts.hpp"
+// src/prefill/experts.cpp - see include/lamina/prefill/experts.hpp.
+#include "lamina/prefill/experts.hpp"
 
-#include "strata/core/cuda_host.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/prefill/gemm.hpp"
-#include "strata/prefill/kernels.hpp"
-#include "strata/prefill/moe_mmq.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/prefill/gemm.hpp"
+#include "lamina/prefill/kernels.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
 
-namespace strata::prefill {
+namespace lamina::prefill {
 namespace {
 
 constexpr int64_t N = 2560, FF2 = 1280, FF = 640, K = 10;
@@ -45,27 +45,27 @@ struct Alloc {
     }
 };
 
-size_t blob_cap() { return ((size_t) strata::kernels::cpu::expert_layout().max_blob + 255) & ~(size_t) 255; }
+size_t blob_cap() { return ((size_t) lamina::kernels::cpu::expert_layout().max_blob + 255) & ~(size_t) 255; }
 // a blob's bytes in the copy-ahead area: the cache slots' stride, the room after it for the bytes the down product
 // reads past its matrix (run_layer)
 uint64_t area_stride(int64_t layer) {
-    return (uint64_t) core::ExpertCache::slot_stride((int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer));
+    return (uint64_t) core::ExpertCache::slot_stride((int64_t) lamina::kernels::cpu::expert_layout().blob_bytes(layer));
 }
 
 // the pinned upload block: NPTR x n_expert pointers, then the adds (at most 3 per row, 2 per expert) with each
 // batch's row bounds (2 per expert), rows, weights
 size_t adds_cap(int64_t chunk, int64_t n_expert) { return (size_t) (chunk * K * 3 + n_expert * 4); }
 
-// a native layer whose expert types llama.cpp's MMQ covers takes it (STRATA_PREFILL_MMQ=0: FP16 for every layer)
-bool mmq_layer(const strata::kernels::cpu::NativeFmt& f) {
+// a native layer whose expert types llama.cpp's MMQ covers takes it (LAMINA_PREFILL_MMQ=0: FP16 for every layer)
+bool mmq_layer(const lamina::kernels::cpu::NativeFmt& f) {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_PREFILL_MMQ");
+        const char* e = std::getenv("LAMINA_PREFILL_MMQ");
         return e == nullptr || std::atoi(e) != 0;
     }();
     return on && mmq::supported(f.gu_type) && mmq::supported(f.d_type);
 }
 bool mmq_any() {
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     for (const auto& f : lay.fmt) if (mmq_layer(f)) return true;
     return false;
 }
@@ -306,7 +306,7 @@ void ExpertRunner::set_pace(std::function<bool()> f) { impl_->pace = std::move(f
 uint64_t ExpertRunner::prefetch_need(const int32_t* res, const int32_t* skip, int64_t n_expert, bool streams,
                                      double shift) {
     if (!streams) return 0;
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     uint64_t most = 0;
     for (int64_t l = 0; l < lay.n_layers; ++l) {
         const uint64_t stride = area_stride(l);
@@ -365,7 +365,7 @@ bool ExpertRunner::prefetch_next(std::string& err) {
     if (!prefetch_left()) return true;
     core::DeviceScope on(m.dev, m.main, m.remote);
     const int64_t layer = m.pre_layer;
-    const size_t bb = (size_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
+    const size_t bb = (size_t) lamina::kernels::cpu::expert_layout().blob_bytes(layer);
     const size_t stride = (size_t) area_stride(layer);
     if (m.pre_gate) {   // the previous layer's batches have read the area
         // pieces go out once they have: a copy queued behind a wait holds up every copy queued after it on this GPU's
@@ -444,8 +444,8 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         }
         m.timed = false;
     }
-    const auto& lay = strata::kernels::cpu::expert_layout();
-    const auto& f = lay.fmt.empty() ? strata::kernels::cpu::NativeFmt{} : lay.fmt[(size_t) layer];
+    const auto& lay = lamina::kernels::cpu::expert_layout();
+    const auto& f = lay.fmt.empty() ? lamina::kernels::cpu::NativeFmt{} : lay.fmt[(size_t) layer];
     const size_t bb = (size_t) lay.blob_bytes(layer);
     const size_t stride = (bb + 255) & ~(size_t) 255;   // staging: a run of arena blobs lands as one copy when equal
     const bool use_mmq = m.mmq_ctx != nullptr && mmq_layer(f);
@@ -635,7 +635,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
             if (!in_place) cudaMemsetAsync((uint8_t*) m.dq_gu + (size_t) n * gub, 0, MMQ_TAIL, m.s);
             if (!d_place) cudaMemsetAsync((uint8_t*) m.dq_d + (size_t) n * db, 0, MMQ_TAIL, m.s);
         } else
-            strata::kernels::iq_dequant_experts_f16(f.gu_type, f.d_type, (const uint8_t* const*) (m.ptrs + 0 * E + j0), n,
+            lamina::kernels::iq_dequant_experts_f16(f.gu_type, f.d_type, (const uint8_t* const*) (m.ptrs + 0 * E + j0), n,
                                                     f.up_off, f.down_off, f.n_ff, f.n_embd, m.dq_gu, m.dq_d, m.s);
         // the batch's staging slot and the copy-ahead area are free once their last reader is queued: the gather,
         // the gate/up product, or with down read in place too that product
@@ -725,4 +725,4 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
     return true;
 }
 
-}  // namespace strata::prefill
+}  // namespace lamina::prefill

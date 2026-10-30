@@ -1,5 +1,5 @@
-// src/core/gpu_select.cpp - see include/strata/core/gpu_select.hpp.
-#include "strata/core/gpu_select.hpp"
+// src/core/gpu_select.cpp - see include/lamina/core/gpu_select.hpp.
+#include "lamina/core/gpu_select.hpp"
 
 #include <cuda_runtime.h>
 
@@ -23,7 +23,7 @@
 #include <regex>
 #include <thread>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 std::string lower(std::string s) {
@@ -266,4 +266,4 @@ std::vector<GpuProbe> probe_gpus(const std::vector<int>& devices, int main_devic
     return out;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

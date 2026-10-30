@@ -1,7 +1,7 @@
 """tools/qwen35/kl.py - teacher-forced KL for Qwen3.6-35B-A3B (NEW-MODELS-PLAN.md T1/T2): on one token sequence per
 prompt (the prompt + llama.cpp GPU's greedy answer, from a parity.py run), the next-token distributions of
-llama.cpp HIP (the reference P), llama.cpp CPU (the noise floor) and strata-q36ref.  Reported: mean KL(P || Q) and
-the top-1 agreement over all steps, per engine; the plan's gate is Strata's KL within 1.5x of the floor.
+llama.cpp HIP (the reference P), llama.cpp CPU (the noise floor) and lamina-q36ref.  Reported: mean KL(P || Q) and
+the top-1 agreement over all steps, per engine; the plan's gate is Lamina's KL within 1.5x of the floor.
 
     python tools/qwen35/kl.py --ref BIN --dump BIN --model GGUF --parity DIR --out DIR [--lock "..."] [--cpu-lock "..."]
 """
@@ -49,21 +49,21 @@ def main() -> int:
     ap.add_argument("--lock", default="")
     ap.add_argument("--cpu-lock", default="")
     ap.add_argument("--cache", default="", help="where llama.cpp's logits are kept between runs (default --out)")
-    ap.add_argument("--ref-args", default="", help="extra strata-q36ref arguments (e.g. '--act f32')")
+    ap.add_argument("--ref-args", default="", help="extra lamina-q36ref arguments (e.g. '--act f32')")
     a = ap.parse_args()
     out, par = Path(a.out), Path(a.parity)
     out.mkdir(parents=True, exist_ok=True)
     tags = sorted(p.name.split(".")[0] for p in par.glob("p*.llama.log"))
-    kl = {"cpu": [], "strata": []}
-    top1 = {"cpu": [], "strata": []}
-    kl_ans = {"cpu": [], "strata": []}
-    top1_ans = {"cpu": [], "strata": []}
+    kl = {"cpu": [], "lamina": []}
+    top1 = {"cpu": [], "lamina": []}
+    kl_ans = {"cpu": [], "lamina": []}
+    top1_ans = {"cpu": [], "lamina": []}
     for tag in tags:
         prompt, gen = ids(par / f"{tag}.llama.log", "prompt"), ids(par / f"{tag}.llama.log", "gen")
         force = ",".join(map(str, gen))
         toks = ",".join(map(str, prompt))
         cache = Path(a.cache) if a.cache else out
-        f = {k: (out if k == "strata" else cache) / f"{tag}.{k}.full" for k in ("gpu", "cpu", "strata")}
+        f = {k: (out if k == "lamina" else cache) / f"{tag}.{k}.full" for k in ("gpu", "cpu", "lamina")}
         # llama.cpp's two runs depend only on the model and the sequence: kept in --out and reused (64 MB each)
         if not f["gpu"].exists():
             run([a.dump, "--model", a.model, "--tokens", toks, "--force", force, "--ngl", "99", "--dump-full-logits",
@@ -71,15 +71,15 @@ def main() -> int:
         if not f["cpu"].exists():
             run([a.dump, "--model", a.model, "--tokens", toks, "--force", force, "--ngl", "0", "--dump-full-logits",
                  str(f["cpu"])], a.cpu_lock, cache / f"{tag}.cpu.log")
-        run([a.ref, "--model", a.model, "--tokens", toks, "--force", force, "--dump-full-logits", str(f["strata"]),
-             *shlex.split(a.ref_args)], a.lock, out / f"{tag}.strata.log")
+        run([a.ref, "--model", a.model, "--tokens", toks, "--force", force, "--dump-full-logits", str(f["lamina"]),
+             *shlex.split(a.ref_args)], a.lock, out / f"{tag}.lamina.log")
         P = log_softmax(np.fromfile(f["gpu"], dtype=np.float32).reshape(-1, V))
         # the answer: the steps up to and including the first <|im_end|> of the forced sequence (past it the context is
         # one no chat reaches, and its distributions are the noisiest); "all" keeps every step
         ans = gen.index(EOS) + 1 if EOS in gen else len(P)
         line = f"{tag}: {len(P)} steps ({ans} answer)"
         per = {}
-        for k in ("cpu", "strata"):
+        for k in ("cpu", "lamina"):
             Q = log_softmax(np.fromfile(f[k], dtype=np.float32).reshape(-1, V))
             n = min(len(P), len(Q))
             d = (np.exp(P[:n]) * (P[:n] - Q[:n])).sum(axis=1)
@@ -91,14 +91,14 @@ def main() -> int:
             per[k] = d
             line += f"; {k}: KL {d.mean():.5f} (answer {d[:ans].mean():.5f}) top-1 {t1.mean():.3f}"
         np.savez(out / f"{tag}.kl.npz", answer=ans, **per)
-        f["strata"].unlink(missing_ok=True)
+        f["lamina"].unlink(missing_ok=True)
         print(line, flush=True)
     for name, K, T in (("all steps", kl, top1), ("answers only", kl_ans, top1_ans)):
         print(f"-- {name}")
-        for k in ("cpu", "strata"):
+        for k in ("cpu", "lamina"):
             print(f"{k:6s} vs llama.cpp HIP: mean KL {np.mean(K[k]):.5f} (median {np.median(K[k]):.6f}, p99 "
                   f"{np.percentile(K[k], 99):.4f}), top-1 {np.mean(T[k]):.4f} over {len(K[k])} steps")
-        print(f"ratio strata / floor: {np.mean(K['strata']) / max(np.mean(K['cpu']), 1e-12):.2f}")
+        print(f"ratio lamina / floor: {np.mean(K['lamina']) / max(np.mean(K['cpu']), 1e-12):.2f}")
     return 0
 
 

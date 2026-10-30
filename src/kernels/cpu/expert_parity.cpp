@@ -16,7 +16,7 @@
 // wrong expert would still agree perfectly.  What is checked instead is structural: the blob must decode to
 // finite, non-zero scales, and the blob at a DIFFERENT layer must be different data - which is what a wrong
 // stride would break.
-#include "strata/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = lamina::kernels::cpu;
 
 namespace {
 

@@ -1,8 +1,8 @@
-// src/kernels/cuda/qsa_decode_attn.cu - see include/strata/kernels/qsa_decode_attn.hpp.
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/kv_q8.hpp"
+// src/kernels/cuda/qsa_decode_attn.cu - see include/lamina/kernels/qsa_decode_attn.hpp.
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/kv_q4.hpp"
+#include "lamina/kernels/kv_q8.hpp"
 
 #include "fwht.cuh"
 
@@ -15,7 +15,7 @@
 #include <cstdlib>
 #include <type_traits>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int HD = 256;          // head_dim
@@ -1068,4 +1068,4 @@ uint64_t qsa_decode_attn_scratch_floats(int64_t cap, const QsaShapes& s) {
     return (uint64_t) max_splits(cap) * (uint64_t) s.n_head * (HD + 2) + 64;
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

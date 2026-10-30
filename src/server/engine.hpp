@@ -1,6 +1,6 @@
-// src/server/engine.hpp - the engine as the server sees it (serve/server.py's StrataEngine and MockEngine).
+// src/server/engine.hpp - the engine as the server sees it (LaminaEngine and MockEngine).
 //
-// LaminaEngine runs the engine (strata::program::run) on a thread of this process and speaks its --serve line
+// LaminaEngine runs the engine (lamina::program::run) on a thread of this process and speaks its --serve line
 // protocol through in-process channels: GEN / GENI requests (sampling keys between max_new and the ids), STOP, QUIT;
 // T tokens, PP prompt progress, LP / TIERS notes, DONE figures, ERR, READY and INFO. A request runs through generate(),
 // whose callbacks take each token and the heartbeats; a callback that returns false ends the request (STOP, then

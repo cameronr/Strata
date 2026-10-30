@@ -1,6 +1,6 @@
-// src/platform/direct_file.cpp - see include/strata/platform/direct_file.hpp.
-#include "strata/platform/direct_file.hpp"
-#include "strata/platform/aux_cpus.hpp"
+// src/platform/direct_file.cpp - see include/lamina/platform/direct_file.hpp.
+#include "lamina/platform/direct_file.hpp"
+#include "lamina/platform/aux_cpus.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -22,7 +22,7 @@
 #include <unistd.h>
 #endif
 
-namespace strata::platform {
+namespace lamina::platform {
 
 double now_us() {
     using namespace std::chrono;
@@ -58,10 +58,10 @@ struct Pending {
     uint64_t tag;
 };
 
-/// The number of issuing threads: STRATA_IO_THREADS, else 4 (Windows: overlapped submits) / 16 (Linux: each
+/// The number of issuing threads: LAMINA_IO_THREADS, else 4 (Windows: overlapped submits) / 16 (Linux: each
 /// thread does one blocking pread, so the thread count is the queue depth).
 int io_threads(int dflt) {
-    const char* v = std::getenv("STRATA_IO_THREADS");
+    const char* v = std::getenv("LAMINA_IO_THREADS");
     const int n = v ? std::atoi(v) : dflt;
     return std::clamp(n, 1, 64);
 }
@@ -185,7 +185,7 @@ bool DirectFile::open(const std::string& path, std::string& err) {
     // Completions of reads that finish synchronously are still queued to the port, so every issued read
     // produces exactly one packet; `wait` is the only completion path.
     const int n = io_threads(4);
-    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { strata::aux_cpus::pin_current_thread(); impl_->worker(); });
+    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { lamina::aux_cpus::pin_current_thread(); impl_->worker(); });
     return true;
 }
 
@@ -312,7 +312,7 @@ bool DirectFile::open(const std::string& path, std::string& err) {
     if (fstat(impl_->fd, &st) != 0) { err = "DirectFile: cannot size " + path; close(); return false; }
     impl_->size = (uint64_t) st.st_size;
     const int n = io_threads(16);
-    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { strata::aux_cpus::pin_current_thread(); impl_->worker(); });
+    for (int i = 0; i < n; ++i) impl_->pool.emplace_back([this] { lamina::aux_cpus::pin_current_thread(); impl_->worker(); });
     return true;
 }
 
@@ -363,4 +363,4 @@ int DirectFile::wait(Completion* out, int max, int timeout_ms) {
 }
 #endif
 
-}  // namespace strata::platform
+}  // namespace lamina::platform

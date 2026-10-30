@@ -2,14 +2,14 @@
 //
 // In order: the shards and their tensors' sizes, the expert table (native_experts.txt), then the index rows and
 // dense.bin's pieces with their conversions.
-#include "strata/core/pack_image.hpp"
+#include "lamina/core/pack_image.hpp"
 
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/artifact/gguf_split.hpp"
-#include "strata/kernels/bf16_bits.hpp"
-#include "strata/kernels/f16_bits.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/artifact/gguf_split.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 
-#if defined(STRATA_NATIVE_EXPERTS)
+#if defined(LAMINA_NATIVE_EXPERTS)
 #include "ggml.h"
 #endif
 
@@ -21,7 +21,7 @@
 #include <cstring>
 #include <exception>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 constexpr uint64_t kAlign = 64;   // ALIGN: every dense.bin piece and every arena row starts on 64 B
@@ -32,7 +32,7 @@ constexpr uint64_t kChunk = 1ull << 20;
 /// Elements and bytes per block (the reader's block_geometry): false for a type it cannot size.
 bool block_of(uint32_t type, uint64_t& elems, uint64_t& bytes) {
     int be = 0, bb = 0;
-    if (!strata::block_geometry(type, be, bb)) return false;
+    if (!lamina::block_geometry(type, be, bb)) return false;
     elems = (uint64_t) be;
     bytes = (uint64_t) bb;
     return true;
@@ -142,7 +142,7 @@ std::string native_problem(const std::string& name, uint32_t type) {
 
 /// Whether this build dequantizes `type` (ggml's own dequantizers, the ones llama.cpp reads the type with).
 bool dequantizable(uint32_t type) {
-#if defined(STRATA_NATIVE_EXPERTS)
+#if defined(LAMINA_NATIVE_EXPERTS)
     uint64_t be = 0, bb = 0;
     if (type >= (uint32_t) GGML_TYPE_COUNT || !block_of(type, be, bb)) return false;
     const ggml_type_traits* tr = ggml_get_type_traits((ggml_type) type);
@@ -163,18 +163,18 @@ void decode(uint32_t type, const uint8_t* src, size_t n, float* out) {
             for (size_t i = 0; i < n; ++i) {
                 uint16_t h;
                 std::memcpy(&h, src + i * 2, 2);
-                out[i] = strata::kernels::f32_from_f16(h);
+                out[i] = lamina::kernels::f32_from_f16(h);
             }
             return;
         case kBf16:
             for (size_t i = 0; i < n; ++i) {
                 uint16_t h;
                 std::memcpy(&h, src + i * 2, 2);
-                out[i] = strata::kernels::f32_from_bf16(h);
+                out[i] = lamina::kernels::f32_from_bf16(h);
             }
             return;
         default:
-#if defined(STRATA_NATIVE_EXPERTS)
+#if defined(LAMINA_NATIVE_EXPERTS)
             ggml_get_type_traits((ggml_type) type)->to_float(src, out, (int64_t) n);
 #endif
             return;
@@ -190,7 +190,7 @@ bool encode(const PackImage::Piece& p, const float* v, size_t n, uint8_t* out, s
             unsigned nonfinite = 0;
             for (size_t i = 0; i < n; ++i) {
                 nonfinite |= !(std::fabs(v[i]) <= FLT_MAX);
-                const uint16_t h = strata::kernels::bf16_from_f32(v[i]);
+                const uint16_t h = lamina::kernels::bf16_from_f32(v[i]);
                 std::memcpy(out + i * 2, &h, 2);
             }
             if (nonfinite) {
@@ -206,7 +206,7 @@ bool encode(const PackImage::Piece& p, const float* v, size_t n, uint8_t* out, s
                     err = p.name + ": cannot convert non-finite weights to F16";
                     return false;
                 }
-                const uint16_t h = strata::kernels::f16_from_f32(v[i]);
+                const uint16_t h = lamina::kernels::f16_from_f32(v[i]);
                 if ((h & 0x7FFFu) == 0x7C00u) {
                     err = p.name + ": a value is beyond F16's range, which the engine reads it as";
                     return false;
@@ -292,8 +292,8 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
     try {
         // ---- the shards: every one (a missing one is an error), the split keys checked, each tensor sized and inside
         // its file
-        img.shards_ = strata::gguf_split_paths(gguf_first_shard);
-        const strata::GgufModel model(img.shards_);
+        img.shards_ = lamina::gguf_split_paths(gguf_first_shard);
+        const lamina::GgufModel model(img.shards_);
         for (size_t s = 0; s < model.size(); ++s) {
             const GgufFile& g = model.shard(s);
             const uint64_t payload = g.file_size() - g.data_start();
@@ -379,7 +379,7 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
                      std::to_string(total) + " " + std::to_string(blob) + "\n";
             total += blob * (uint64_t) n_expert;
         }
-        img.experts_ = "# strata native experts v3: layer gu_type d_type offset blob_bytes (n_expert " +
+        img.experts_ = "# lamina native experts v3: layer gu_type d_type offset blob_bytes (n_expert " +
                        std::to_string(n_expert) + ", total " + std::to_string(total) + "; the engine takes the "
                        "experts from " + img.source_ + " by tensor name)\n" + lines;
         // prism.hadamard: experts folded with a Hadamard rotation, which this engine does not run
@@ -461,7 +461,7 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
             img.pieces_.push_back(std::move(p));
         }
         img.dense_bytes_ = at;
-        img.index_ = "# strata pack index v3 -- computed by the engine (native experts) from " + img.source_ +
+        img.index_ = "# lamina pack index v3 -- computed by the engine (native experts) from " + img.source_ +
                      "\n# align " + std::to_string(kAlign) + " pool " + std::to_string(pool) + " tensors " +
                      std::to_string(todo.size()) + "\n" + rows;
     } catch (const std::exception& e) {
@@ -511,4 +511,4 @@ bool PackImage::read(uint64_t offset, size_t n, void* dst, std::string& err) con
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

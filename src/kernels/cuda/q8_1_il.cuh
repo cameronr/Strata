@@ -2,7 +2,7 @@
 // multi-column dot products read it, for native_mmvq.cu and iq_kernels.cu.
 #pragma once
 
-#include "strata/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 // NC columns of the block-major (PM false) or position-major copy: u(b, p, o) = int p of q8_1 block b of every column,
@@ -96,4 +96,4 @@ inline Q81IlParts q8_1_il_parts(const void* x_il, int n_in, int ncols) {
 }
 
 }  // namespace
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

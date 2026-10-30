@@ -1,19 +1,19 @@
 // src/kernels/cpu/q2_avx2_rows.inl - the Q2_0 row kernel of q2_avx2.cpp, included there twice like
-// iq_avx2_rows.inl: the AVX2 form (STRATA_ROWS_VNNI 0, namespace plain) and the AVX-VNNI one (1, namespace vnni), every
-// function under STRATA_ROWS_FN (GCC/Clang's target("avxvnni") in the VNNI copy).  Not a header.
+// iq_avx2_rows.inl: the AVX2 form (LAMINA_ROWS_VNNI 0, namespace plain) and the AVX-VNNI one (1, namespace vnni), every
+// function under LAMINA_ROWS_FN (GCC/Clang's target("avxvnni") in the VNNI copy).  Not a header.
 
 // The 2-bit codes (0..3) times the int8 activation, four products per int32 lane.  vpdpbusd is one uop where maddubs
 // + madd(ones) take two on the multiply ports; maddubs cannot saturate (a pair is at most 2 * 3 * 128), so the sums
 // are the same.
-STRATA_ROWS_FN inline __m256i dot4(__m256i codes, __m256i act) {
-#if STRATA_ROWS_VNNI
+LAMINA_ROWS_FN inline __m256i dot4(__m256i codes, __m256i act) {
+#if LAMINA_ROWS_VNNI
     return _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), codes, act);
 #else
     return _mm256_madd_epi16(_mm256_maddubs_epi16(codes, act), _mm256_set1_epi16(1));
 #endif
 }
 
-template <int NT> STRATA_ROWS_FN
+template <int NT> LAMINA_ROWS_FN
 inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, float* res) {
     __m256 acc[NT];
     float corr[NT];
@@ -39,7 +39,7 @@ inline void row_multi(const uint8_t* row, const ActQ* const* a, int nblocks, flo
     }
 }
 
-template <int NT> STRATA_ROWS_FN
+template <int NT> LAMINA_ROWS_FN
 void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, float* const* out, int r0, int r1) {
     float res[NT];
     for (int r = r0; r < r1; ++r) {
@@ -48,7 +48,7 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
     }
 }
 
-STRATA_ROWS_FN void rows_nt(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
+LAMINA_ROWS_FN void rows_nt(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt,
                             float* const* out, int r0, int r1) {
     switch (nt) {
         case 1: rows<1>(w, row_bytes, nblocks, a, out, r0, r1); break;
@@ -63,5 +63,5 @@ STRATA_ROWS_FN void rows_nt(const uint8_t* w, size_t row_bytes, int nblocks, con
     }
 }
 
-#undef STRATA_ROWS_VNNI
-#undef STRATA_ROWS_FN
+#undef LAMINA_ROWS_VNNI
+#undef LAMINA_ROWS_FN

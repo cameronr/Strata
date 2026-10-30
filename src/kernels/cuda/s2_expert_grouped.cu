@@ -13,14 +13,14 @@
 // partials are reduced through shuffle; the CPU walks every chunk in order with its own accumulator shape.
 // The two agree to float rounding and not to the bit, which is the same contract `s_gemv_parity` carries for
 // the same reason.  `bench/micro/moe_hit_parity.cu` is the check.
-#include "strata/kernels/s2_expert_grouped.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/core/geometry.hpp"
-#include "strata/kernels/dp4a.hpp"
-#include "strata/kernels/f16_bits.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/core/geometry.hpp"
+#include "lamina/kernels/dp4a.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -31,15 +31,15 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
-// THE BLOB'S OWN GEOMETRY, from `include/strata/kernels/cpu/expert.hpp`.  Restated as literals because that
+// THE BLOB'S OWN GEOMETRY, from `include/lamina/kernels/cpu/expert.hpp`.  Restated as literals because that
 // header is the CPU path's and this file must not silently follow it if the two ever disagree: the sizes below
 // are what the CPU kernel's indexing computes, and `moe_hit_parity` compares the two end to end.
 constexpr int H = 2560;
 constexpr int FF = 640;
-static_assert(H == strata::core::kCompiledGeometry.n_embd && FF == strata::core::kCompiledGeometry.n_ff, "s2_expert_grouped is compiled for core/geometry.hpp");
+static_assert(H == lamina::core::kCompiledGeometry.n_embd && FF == lamina::core::kCompiledGeometry.n_ff, "s2_expert_grouped is compiled for core/geometry.hpp");
 constexpr int QK = 64;                       // Q2_0's group: one fp16 scale per 64 weights
 constexpr int ROW_GU = H / 4;                // 640 B of codes per gate/up row (2 bits per element)
 constexpr int ROW_D = FF / 4;                // 160 B per down row
@@ -154,7 +154,7 @@ __device__ __forceinline__ int load_x_chunk(const uint8_t* __restrict__ xb, int 
         // natural word j: x[4j .. 4j+3]; a 64-bit shift (sh is 0, 8, 16 or 24) rather than __funnelshift_r, so the same
         // source needs no CUDA-only intrinsic.
         n[j] = (unsigned) ((((unsigned long long) v[j + 1] << 32) | v[j]) >> sh);
-        hx = STRATA_DP4A(0x01010101, (int) n[j], hx);
+        hx = LAMINA_DP4A(0x01010101, (int) n[j], hx);
     }
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
@@ -174,7 +174,7 @@ __device__ __forceinline__ int load_x_chunk(const uint8_t* __restrict__ xb, int 
 __device__ __forceinline__ int chunk_s(const int m[8], const int X[8]) {
     int s = 0;
 #pragma unroll
-    for (int j = 0; j < 8; ++j) s = STRATA_DP4A(m[j], X[j], s);
+    for (int j = 0; j < 8; ++j) s = LAMINA_DP4A(m[j], X[j], s);
     return s;
 }
 
@@ -249,8 +249,8 @@ __device__ __forceinline__ float chunk_dot(uint2 cb, const int* xw, float dw, fl
         const unsigned cbyte = cbytes[j];
         const int cw = (int) ((cbyte & 3u) | (((cbyte >> 2) & 3u) << 8) | (((cbyte >> 4) & 3u) << 16) |
                               (((cbyte >> 6) & 3u) << 24));
-        s = STRATA_DP4A(cw, xw[j], s);
-        hx = STRATA_DP4A(ones, xw[j], hx);
+        s = LAMINA_DP4A(cw, xw[j], s);
+        hx = LAMINA_DP4A(ones, xw[j], hx);
     }
     return dw * dx * (float) (s - hx);
 }
@@ -596,9 +596,9 @@ void moe_grouped_s2(const unsigned long long* grp_ptr, const int32_t* grp_start,
         check("moe_grouped_s2/gu", stream);
     }
     // #783 PR-k (stuchapin909): SwiGLU and the scaled Q8_0 quantize of its result in one kernel (gate_up still gets the
-    // activation written back, so the parity checks read the same buffer); STRATA_S2_SWIGLU_Q8=0 keeps the two launches
+    // activation written back, so the parity checks read the same buffer); LAMINA_S2_SWIGLU_Q8=0 keeps the two launches
     static const bool swiglu_q8 = [] {
-        const char* e = std::getenv("STRATA_S2_SWIGLU_Q8");
+        const char* e = std::getenv("LAMINA_S2_SWIGLU_Q8");
         return e == nullptr || e[0] != '0';
     }();
     static_assert(FF % 32 == 0, "the fused SwiGLU + Q8_0 kernel works in whole 32-value blocks");
@@ -637,4 +637,4 @@ void moe_hit_add(float* parts, const float* hit_out, const int32_t* dst, const i
     check("moe_hit_add", stream);
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

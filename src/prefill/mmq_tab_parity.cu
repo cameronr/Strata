@@ -7,7 +7,7 @@
 // would put a non-finite value into the output.  Groups of 1-16 experts with mixed row counts (0 to 1,000), and
 // max_rows from 1 to 1,000 so that every tile width MMQ picks (8-128) is taken, few-tile launches (the stream-k grid
 // with its fixup) and many-tile ones.  Both outputs are pre-filled with the NaN pattern and compared whole.
-#include "strata/prefill/moe_mmq.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
 
@@ -23,7 +23,7 @@
 #include <vector>
 
 namespace {
-namespace mmq = strata::prefill::mmq;
+namespace mmq = lamina::prefill::mmq;
 
 constexpr int G = mmq::kGatherGroupMax;
 constexpr size_t TAIL = 4096;

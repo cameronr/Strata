@@ -19,11 +19,11 @@
 
 namespace q36a {
 
-using strata::kernels::cp_async16;
-using strata::kernels::cp_commit;
-using strata::kernels::cp_wait;
-using strata::kernels::ldsm4;
-using strata::kernels::ldsm4t;
+using lamina::kernels::cp_async16;
+using lamina::kernels::cp_commit;
+using lamina::kernels::cp_wait;
+using lamina::kernels::ldsm4;
+using lamina::kernels::ldsm4t;
 
 constexpr int kHD = 256;     // the head size
 constexpr int kBc = 32;      // cells a tile

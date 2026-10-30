@@ -1,6 +1,6 @@
 // src/core/pinned.cu - P2.S1: the pinned host arena.
-#include "strata/core/pinned.hpp"
-#include "strata/platform/memory.hpp"
+#include "lamina/core/pinned.hpp"
+#include "lamina/platform/memory.hpp"
 
 #include <cuda_runtime.h>
 
@@ -18,7 +18,7 @@
 #endif
 #endif
 
-namespace strata::core {
+namespace lamina::core {
 
 namespace {
 
@@ -119,10 +119,10 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : 
                    std::to_string(registered_slices) + " slices pinned (" + std::to_string(registered_bytes >> 30) +
                    " GiB); " + note;
             if (registered_bytes < bytes) {
-                const char* env = std::getenv("STRATA_ARENA_LOCK");
+                const char* env = std::getenv("LAMINA_ARENA_LOCK");
                 if (env == nullptr || std::string(env) != "0") {
-                    const strata::platform::LockResult lr =
-                        strata::platform::lock_resident((uint8_t*) base + registered_bytes, bytes - registered_bytes);
+                    const lamina::platform::LockResult lr =
+                        lamina::platform::lock_resident((uint8_t*) base + registered_bytes, bytes - registered_bytes);
                     locked_bytes = lr.locked_bytes;
                     note = lr.note + "; " + note;
                 }
@@ -144,14 +144,14 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : 
             (void) cudaGetLastError();
             // Plan v0.3 P0.1: keep it RESIDENT instead. Unpinned, Windows trims the arena under memory pressure
             // and the CPU pool's rate then depends on the OS; locking it through the working set needs no
-            // special privilege. STRATA_ARENA_LOCK=0 is the A/B arm.
-            const char* env = std::getenv("STRATA_ARENA_LOCK");
+            // special privilege. LAMINA_ARENA_LOCK=0 is the A/B arm.
+            const char* env = std::getenv("LAMINA_ARENA_LOCK");
             if (env == nullptr || std::string(env) != "0") {
-                const strata::platform::LockResult lr = strata::platform::lock_resident(base, bytes);
+                const lamina::platform::LockResult lr = lamina::platform::lock_resident(base, bytes);
                 locked_bytes = lr.locked_bytes;
                 note = lr.note + "; " + note;
             } else {
-                note = "arena lock disabled (STRATA_ARENA_LOCK=0); " + note;
+                note = "arena lock disabled (LAMINA_ARENA_LOCK=0); " + note;
             }
         }
     }
@@ -159,7 +159,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds) : 
 
 PinnedArena::~PinnedArena() {
     if (base) {
-        if (locked_bytes) strata::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
+        if (locked_bytes) lamina::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
         if (slice_bytes) {
             for (uint64_t off : slice_starts) cudaHostUnregister((uint8_t*) base + off);
         } else {
@@ -170,4 +170,4 @@ PinnedArena::~PinnedArena() {
     }
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

@@ -9,14 +9,14 @@
 // relative).  (c2) where --expert-math exact has kernels (the K-quant formats): the GPU in the CPU's activation formats
 // against the CPU with its exact SwiGLU, bit for bit, the hidden rows' bytes too.  (d) the GPU dequantizers of the
 // prompt path and the embedding, against `to_float`: exact.
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/iq_avx512.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/iq_avx512.hpp"
 #include "ggml-cpu.h"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/quantize_act.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/quantize_act.hpp"
 
 #include "ggml.h"
 
@@ -33,7 +33,7 @@
 #include <cstring>
 #include <vector>
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = lamina::kernels::cpu;
 
 namespace {
 
@@ -57,7 +57,7 @@ int q8_0_tie_fixture(cudaStream_t s) {
     cudaMalloc((void**) &dx, x.size() * sizeof(float));
     cudaMalloc((void**) &dy, 34);
     cudaMemcpy(dx, x.data(), x.size() * sizeof(float), cudaMemcpyHostToDevice);
-    strata::kernels::native_q8_0_contract_probe(dx, 32, dy, s);
+    lamina::kernels::native_q8_0_contract_probe(dx, 32, dy, s);
     cudaStreamSynchronize(s);
     std::vector<uint8_t> got(34);
     cudaMemcpy(got.data(), dy, got.size(), cudaMemcpyDeviceToHost);
@@ -92,7 +92,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
     std::vector<float> x((size_t) NT * H);
     for (auto& v : x) v = nd(rng);
     std::vector<float> ref((size_t) NT * H), got_c((size_t) NT * H), got_g((size_t) NT * H);
-    const bool exact = strata::kernels::native_expert_exact_supported(f.gu_type, f.d_type, f.gu_act, f.d_act);
+    const bool exact = lamina::kernels::native_expert_exact_supported(f.gu_type, f.d_type, f.gu_act, f.d_act);
     std::vector<float> got_cx((size_t) NT * H), got_gx((size_t) NT * H);
     std::vector<std::vector<uint8_t>> cpu_hqx(NT, std::vector<uint8_t>(cpu::kNativeHBytes));
     for (int k = 0; k < NT; ++k) {
@@ -203,7 +203,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         cudaMalloc(&dblob, blob.size());
         cudaMalloc(&dx, x.size() * 4);
         cudaMalloc(&dxq, (size_t) NT * (std::max)(H / 32 * 36, H / 256 * 292));
-        cudaMalloc(&dscr, strata::kernels::native_expert_scratch_bytes(NT, FF));
+        cudaMalloc(&dscr, lamina::kernels::native_expert_scratch_bytes(NT, FF));
         cudaMalloc((void**) &dout, (size_t) NT * H * 4);
         cudaMalloc((void**) &dptr, 8);
         cudaMalloc((void**) &dstart, 8);
@@ -220,14 +220,14 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         cudaMemcpy(ddst, idx, NT * 4, cudaMemcpyHostToDevice);
         cudaMemcpy(dtok, idx, NT * 4, cudaMemcpyHostToDevice);
         auto run = [&](bool contract, std::vector<float>& out) {
-            const auto L = contract ? strata::kernels::native_expert_layout(f.gu_type, f.d_type, H, FF, f.gu_act, f.d_act)
-                                    : strata::kernels::native_expert_layout(f.gu_type, f.d_type, H, FF);
+            const auto L = contract ? lamina::kernels::native_expert_layout(f.gu_type, f.d_type, H, FF, f.gu_act, f.d_act)
+                                    : lamina::kernels::native_expert_layout(f.gu_type, f.d_type, H, FF);
             if (L.gu_act == 15)
-                strata::kernels::quantize_q8_K((const float*) dx, (uint8_t*) dxq, (int64_t) NT * H, s);
+                lamina::kernels::quantize_q8_K((const float*) dx, (uint8_t*) dxq, (int64_t) NT * H, s);
             else
-                strata::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
+                lamina::kernels::quantize_q8_1_rows((const float*) dx, NT, H, dxq, s);
             const int64_t xstride = L.gu_act == 15 ? (H / 256) * 292 : (H / 32) * 36;
-            strata::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, xstride, dscr, dout, s);
+            lamina::kernels::native_expert_grouped(L, dptr, dstart, dn, ddst, dtok, 1, NT, dxq, xstride, dscr, dout, s);
             cudaStreamSynchronize(s);
             cudaMemcpy(out.data(), dout, out.size() * 4, cudaMemcpyDeviceToHost);
         };
@@ -261,7 +261,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
                     {f.d_type, f.down_off, f.d_row, H, cpu_hqx[k].data(), FF, f.h_bytes}};
                 for (const auto& set : sets) {
                     cudaMemcpy(dact, set.a, set.ab, cudaMemcpyHostToDevice);
-                    strata::kernels::native_exact_dot_rows(set.type, (const uint8_t*) dblob + set.off, set.row_bytes,
+                    lamina::kernels::native_exact_dot_rows(set.type, (const uint8_t*) dblob + set.off, set.row_bytes,
                                                            (int) set.rows, dact, set.n, drow, s);
                     cudaStreamSynchronize(s);
                     cudaMemcpy(gd.data(), drow, (size_t) set.rows * 4, cudaMemcpyDeviceToHost);
@@ -288,7 +288,7 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
             {(const uint8_t*) dblob, f.gu_type, &G}, {(const uint8_t*) dblob + f.up_off, f.gu_type, &U},
             {(const uint8_t*) dblob + f.down_off, f.d_type, &D}};
         for (const auto& m : mats) {
-            strata::kernels::iq_dequant_f32(m.type, m.src, FF * H, dq, s);
+            lamina::kernels::iq_dequant_f32(m.type, m.src, FF * H, dq, s);
             cudaStreamSynchronize(s);
             cudaMemcpy(got_dq.data(), dq, got_dq.size() * 4, cudaMemcpyDeviceToHost);
             dq_err = (std::max)(dq_err, rel(got_dq, *m.want));
@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
     cudaStream_t s;
     cudaStreamCreate(&s);
     const int q5k = cpu::ggml_q5_K_mins_rounding();   // the exact Q5_K dots follow this build's ggml, as the engine's
-    strata::kernels::set_exact_q5_K_fma(q5k == 1);
+    lamina::kernels::set_exact_q5_K_fma(q5k == 1);
     std::printf("ggml's Q5_K mins: %s\n", q5k == 1 ? "one FMA" : q5k == 0 ? "a product, then a sum" : "UNKNOWN");
     if (q5k < 0) ++failures;
     failures += q8_0_tie_fixture(s);
@@ -365,7 +365,7 @@ int main(int argc, char** argv) {
             cpu::NativeFmt f;
             std::string err;
             if (gu < 0 || dn < 0 || !cpu::native_fmt(gu, dn, H, FF, f, err) ||
-                !strata::kernels::native_expert_supported(gu, dn, H, FF)) {
+                !lamina::kernels::native_expert_supported(gu, dn, H, FF)) {
                 std::printf("%s: %s\n", arg.c_str(), err.empty() ? "not a supported pair of GGML types" : err.c_str());
                 ++failures;
                 continue;
@@ -373,13 +373,13 @@ int main(int argc, char** argv) {
             failures += check_blob(f, synthetic_blob(f, i), i, "synthetic", s);
         }
     } else {
-        const strata::GgufModel model(strata::gguf_split_paths(argv[1]));
+        const lamina::GgufModel model(lamina::gguf_split_paths(argv[1]));
         std::vector<int> layers;
         for (int i = 2; i < argc; ++i) layers.push_back(std::atoi(argv[i]));
         if (layers.empty()) layers = {0, 1, 2, 3, 20, 47};
         const int E = 7;
         for (int l : layers) {
-            const strata::TensorInfo* t[3] = {};
+            const lamina::TensorInfo* t[3] = {};
             const uint8_t* data[3] = {};
             const char* roles[3] = {"gate", "up", "down"};
             for (int r = 0; r < 3; ++r) {

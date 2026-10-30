@@ -1,12 +1,12 @@
-// src/prefill/moe_mmq.cu - see include/strata/prefill/moe_mmq.hpp.  llama.cpp's MMQ (ggml-cuda, MIT) is compiled
+// src/prefill/moe_mmq.cu - see include/lamina/prefill/moe_mmq.hpp.  llama.cpp's MMQ (ggml-cuda, MIT) is compiled
 // from the pinned llama.cpp checkout the build already takes ggml from; src/prefill/ggml_cuda_host.cu supplies the
 // few host symbols of ggml-cuda.cu it references.
-#include "strata/prefill/moe_mmq.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 
 #include "common.cuh"
 #include "mmq.cuh"
 #include "quantize.cuh"
-#if defined(STRATA_MMQ_TAB)
+#if defined(LAMINA_MMQ_TAB)
 #include "moe_mmq_tab.hpp"   // declarations: the kernels are in the per-type mmq-tab-*.cu TUs
 #endif
 
@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::prefill::mmq {
+namespace lamina::prefill::mmq {
 namespace {
 
 void ck(cudaError_t e, const char* what) {
@@ -276,23 +276,23 @@ Context::Context() {
 }
 Context::~Context() { delete (ggml_backend_cuda_context*) ctx_; }
 
-#if defined(STRATA_MMQ_TAB)
+#if defined(LAMINA_MMQ_TAB)
 namespace {
 // the pointer-table MMQ for the types CMakeLists builds it for; false: none (nothing launched; ctx null: only asked)
 bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, const mmq_x_tab& tab, cudaStream_t s) {
     switch (t) {
-#define STRATA_TAB_CASE(T) case T: return ctx == nullptr || mul_mat_q_tab_case<T>(*ctx, a, tab, s)
-        STRATA_TAB_CASE(GGML_TYPE_IQ2_S);
-        STRATA_TAB_CASE(GGML_TYPE_IQ3_XXS);
-        STRATA_TAB_CASE(GGML_TYPE_IQ3_S);
-        STRATA_TAB_CASE(GGML_TYPE_IQ4_XS);
-        STRATA_TAB_CASE(GGML_TYPE_Q4_K);
-        STRATA_TAB_CASE(GGML_TYPE_Q5_K);
-        STRATA_TAB_CASE(GGML_TYPE_Q2_0);
-        STRATA_TAB_CASE(GGML_TYPE_IQ4_NL);
-        STRATA_TAB_CASE(GGML_TYPE_Q5_1);
-        STRATA_TAB_CASE(GGML_TYPE_Q8_0);
-#undef STRATA_TAB_CASE
+#define LAMINA_TAB_CASE(T) case T: return ctx == nullptr || mul_mat_q_tab_case<T>(*ctx, a, tab, s)
+        LAMINA_TAB_CASE(GGML_TYPE_IQ2_S);
+        LAMINA_TAB_CASE(GGML_TYPE_IQ3_XXS);
+        LAMINA_TAB_CASE(GGML_TYPE_IQ3_S);
+        LAMINA_TAB_CASE(GGML_TYPE_IQ4_XS);
+        LAMINA_TAB_CASE(GGML_TYPE_Q4_K);
+        LAMINA_TAB_CASE(GGML_TYPE_Q5_K);
+        LAMINA_TAB_CASE(GGML_TYPE_Q2_0);
+        LAMINA_TAB_CASE(GGML_TYPE_IQ4_NL);
+        LAMINA_TAB_CASE(GGML_TYPE_Q5_1);
+        LAMINA_TAB_CASE(GGML_TYPE_Q8_0);
+#undef LAMINA_TAB_CASE
         default: return false;
     }
 }
@@ -300,7 +300,7 @@ bool run_tab(ggml_backend_cuda_context* ctx, ggml_type t, const mmq_args& a, con
 #endif
 
 bool tab_takes(int t, int64_t w_rows, int64_t w_cols) {
-#if defined(STRATA_MMQ_TAB)
+#if defined(LAMINA_MMQ_TAB)
     return w_rows % 128 == 0 && w_cols % ggml_blck_size((ggml_type) t) == 0 &&
            run_tab(nullptr, (ggml_type) t, mmq_args{}, mmq_x_tab{}, nullptr);
 #else
@@ -360,7 +360,7 @@ void Context::run(const Product& p, void* stream) {
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
     if (p.tab) {
-#if defined(STRATA_MMQ_TAB)
+#if defined(LAMINA_MMQ_TAB)
         mmq_x_tab tab{};
         for (int z = 0; z < p.n && z < kGatherGroupMax; ++z) tab.p[z] = (const char*) p.tab[z];
         if (p.n <= kGatherGroupMax && tab_takes(p.type, p.w_rows, p.w_cols) && run_tab(&ctx, t, a, tab, s)) {
@@ -483,17 +483,17 @@ void swiglu_quantize(const float* gu, void* xq, int t, int64_t rows, int64_t n_f
     constexpr int B = CUDA_QUANTIZE_BLOCK_SIZE_MMQ;
     const dim3 grid((unsigned) rows, (unsigned) ((ne0 + 4 * B - 1) / (4 * B)));
     const cudaStream_t s = (cudaStream_t) stream;
-#define STRATA_SWQ(L) (interleaved ? swiglu_quantize_mmq_q8_1<L, true><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows) \
+#define LAMINA_SWQ(L) (interleaved ? swiglu_quantize_mmq_q8_1<L, true><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows) \
                                    : swiglu_quantize_mmq_q8_1<L, false><<<grid, B, 0, s>>>(gu, xq, n_ff, ne0, (int) rows))
     switch (mmq_get_q8_1_ds_layout((ggml_type) t)) {
-        case MMQ_Q8_1_DS_LAYOUT_D4: STRATA_SWQ(MMQ_Q8_1_DS_LAYOUT_D4); break;
-        case MMQ_Q8_1_DS_LAYOUT_DS4: STRATA_SWQ(MMQ_Q8_1_DS_LAYOUT_DS4); break;
-        case MMQ_Q8_1_DS_LAYOUT_D2S6: STRATA_SWQ(MMQ_Q8_1_DS_LAYOUT_D2S6); break;
+        case MMQ_Q8_1_DS_LAYOUT_D4: LAMINA_SWQ(MMQ_Q8_1_DS_LAYOUT_D4); break;
+        case MMQ_Q8_1_DS_LAYOUT_DS4: LAMINA_SWQ(MMQ_Q8_1_DS_LAYOUT_DS4); break;
+        case MMQ_Q8_1_DS_LAYOUT_D2S6: LAMINA_SWQ(MMQ_Q8_1_DS_LAYOUT_D2S6); break;
         default:
             std::fprintf(stderr, "prefill mmq: no q8_1 layout for type %d\n", t);
             std::exit(1);
     }
-#undef STRATA_SWQ
+#undef LAMINA_SWQ
     ck(cudaGetLastError(), "swiglu_quantize");
 }
 
@@ -503,4 +503,4 @@ void iota(int32_t* dst, int64_t n, void* stream) {
     ck(cudaGetLastError(), "iota");
 }
 
-}  // namespace strata::prefill::mmq
+}  // namespace lamina::prefill::mmq

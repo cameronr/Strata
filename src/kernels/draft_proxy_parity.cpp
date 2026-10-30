@@ -5,9 +5,9 @@
 // 40,525 rows (this branch's draft subset), 49,184 (6,148 candidates: 13 for some of the 512 rescoring warps) and
 // 106,299 (upstream's CJK subset), each with the copy's top-1 and the exact head timed.
 // Usage: draft_proxy_parity --selftest
-#include "strata/kernels/draft_proxy.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+#include "lamina/kernels/draft_proxy.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
@@ -85,7 +85,7 @@ void dequant(int type, const uint8_t* row, float* w) {
 int run(int type, int rows) {
     const int ROWS = rows;
     std::mt19937 rng(type * 7919 + ROWS);
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const size_t rb = native_mmvq_weight_bytes(type, K, 1);
     std::vector<uint8_t> hw((size_t) ROWS * rb);
     for (auto& v : hw) v = (uint8_t) rng();

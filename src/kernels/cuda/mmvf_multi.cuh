@@ -6,13 +6,13 @@
 // MIT License, Copyright (c) 2023-2026 The ggml authors (see native_bf16.cu for the full notice).
 #pragma once
 
-#include "strata/kernels/bf16_bits.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstdint>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int kMmvfMaxRows = 8;
@@ -138,4 +138,4 @@ __device__ __forceinline__ void mmvf_multi_rows(const float* __restrict__ x, con
 }
 
 }  // namespace
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

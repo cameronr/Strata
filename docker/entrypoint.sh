@@ -16,6 +16,6 @@ set -- --no-build --model "$MODEL" --data-dir /data --vision "${VISION:-on}"
 [ -n "${MAIN_GPU:-}" ] && set -- "$@" --main-gpu "$MAIN_GPU"
 .venv/bin/python setup.py "$@"
 # the key reaches the server through its environment, not its command line
-STRATA_API_KEY="$API_KEY"
-export STRATA_API_KEY
+LAMINA_API_KEY="$API_KEY"
+export LAMINA_API_KEY
 exec build/lamina-server --config "lamina-$MODEL.json" --host 0.0.0.0 --port 8080

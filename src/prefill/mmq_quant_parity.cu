@@ -4,8 +4,8 @@
 // for every q8_1 layout MMQ reads (D4: Q8_0 IQ4_NL Q2_0 IQ3_S, DS4: Q5_1 Q4_K, D2S6: Q2_K), on rows routed as the prompt
 // path routes them (10 of 512 experts a token, grouped by expert), with an all-zero token and row counts that are
 // multiples of nothing.  --bench: both forms at a batch of 8192 rows (the engine's), ms and the rows' bytes moved.
-#include "strata/prefill/kernels.hpp"
-#include "strata/prefill/moe_mmq.hpp"
+#include "lamina/prefill/kernels.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
 
@@ -23,7 +23,7 @@
 #include <vector>
 
 namespace {
-namespace mmq = strata::prefill::mmq;
+namespace mmq = lamina::prefill::mmq;
 
 void ck(cudaError_t e, const char* what) {
     if (e != cudaSuccess) throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(e));
@@ -101,7 +101,7 @@ void input_case(int64_t T, std::mt19937& rng, cudaStream_t s) {
     for (const Layout& l : kTypes) {
         ck(cudaMemset(qa.p, 0xA5, qb), "fill");
         ck(cudaMemset(qf.p, 0xA5, qb), "fill");
-        strata::prefill::gather_rows16_f32(xd.as<uint16_t>(), sd.as<int32_t>(), f32.as<float>(), rows, N, s);
+        lamina::prefill::gather_rows16_f32(xd.as<uint16_t>(), sd.as<int32_t>(), f32.as<float>(), rows, N, s);
         mmq::quantize(f32.as<float>(), nullptr, qa.p, (int) l.type, N, N, rows, s);
         mmq::quantize_f16(xd.as<uint16_t>(), sd.as<int32_t>(), qf.p, (int) l.type, N, N, rows, s);
         ck(cudaStreamSynchronize(s), "sync");
@@ -173,7 +173,7 @@ void bench(cudaStream_t s) {
     };
     const int ty = GGML_TYPE_IQ3_S, td = GGML_TYPE_IQ4_NL;
     const float in2 = time([&] {
-        strata::prefill::gather_rows16_f32(xd.as<uint16_t>(), sd.as<int32_t>(), f32.as<float>(), rows, N, s);
+        lamina::prefill::gather_rows16_f32(xd.as<uint16_t>(), sd.as<int32_t>(), f32.as<float>(), rows, N, s);
         mmq::quantize(f32.as<float>(), nullptr, q.p, ty, N, N, rows, s);
     });
     const float in1 = time([&] { mmq::quantize_f16(xd.as<uint16_t>(), sd.as<int32_t>(), q.p, ty, N, N, rows, s); });

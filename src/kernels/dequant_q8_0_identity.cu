@@ -1,7 +1,7 @@
 // src/kernels/dequant_q8_0_identity.cu - the coalesced Q8_0 dequant (upstream #1720) against the per-block kernel it
 // replaces: an output 16-byte aligned takes the new kernel, one shifted by an element takes the old one, and the
 // two must be the same bytes in BF16, FP16 and FP32.  Prints each path's time.  Exit 0 when all three match.
-#include "strata/kernels/dequant_bf16.hpp"
+#include "lamina/kernels/dequant_bf16.hpp"
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -25,9 +25,9 @@ int main() {
     cudaMemcpy(db, h.data(), h.size(), cudaMemcpyHostToDevice);
     const size_t n = (size_t) (rows * cols);
     auto run = [&](int kind, uint8_t* out) {
-        if (kind == 0) strata::kernels::dequant_bf16(8, db, 0, rows, cols, (uint16_t*) out, nullptr);
-        if (kind == 1) strata::kernels::dequant_f16(8, db, 0, rows, cols, (uint16_t*) out, nullptr);
-        if (kind == 2) strata::kernels::dequant_f32(8, db, 0, rows, cols, (float*) out, nullptr);
+        if (kind == 0) lamina::kernels::dequant_bf16(8, db, 0, rows, cols, (uint16_t*) out, nullptr);
+        if (kind == 1) lamina::kernels::dequant_f16(8, db, 0, rows, cols, (uint16_t*) out, nullptr);
+        if (kind == 2) lamina::kernels::dequant_f32(8, db, 0, rows, cols, (float*) out, nullptr);
     };
     int bad = 0;
     for (int kind = 0; kind < 3; ++kind) {

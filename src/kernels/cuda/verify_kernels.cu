@@ -1,9 +1,9 @@
-// src/kernels/cuda/verify_kernels.cu - see include/strata/kernels/verify_kernels.hpp.
+// src/kernels/cuda/verify_kernels.cu - see include/lamina/kernels/verify_kernels.hpp.
 //
 // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
-#include "strata/kernels/verify_kernels.hpp"
-#include "strata/kernels/warp.cuh"
+#include "lamina/kernels/verify_kernels.hpp"
+#include "lamina/kernels/warp.cuh"
 #include "hit_plan.cuh"
 
 #include <cuda_runtime.h>
@@ -12,7 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int S = 128;          // GDN state size
@@ -703,4 +703,4 @@ void copy_indexed(float* dst, const float* src, int64_t stride, const int32_t* i
     check("copy_indexed");
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

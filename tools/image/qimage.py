@@ -1,4 +1,4 @@
-"""tools/image/qimage.py - Qwen-Image-2.1-Turbo for Strata's image endpoint: stable-diffusion.cpp (sd-cli) at a pinned
+"""tools/image/qimage.py - Qwen-Image-2.1-Turbo for Lamina's image endpoint: stable-diffusion.cpp (sd-cli) at a pinned
 commit, built for this PC's GPU, and the model's three files at pinned Hugging Face revisions.
 
 setup.py (--images qwen-image) and tools/image/install.py use these pieces; serve/images.py runs the result.
@@ -156,12 +156,12 @@ def unpack_source(third_party: Path, sd_zip: Path, ggml_zip: Path) -> Path:
     shutil.rmtree(dst, ignore_errors=True)
     shutil.move(str(top), str(dst))
     shutil.rmtree(tmp, ignore_errors=True)
-    (dst / ".strata-pin").write_text(f"{SD_CPP_COMMIT}\n{SD_GGML_COMMIT}\n", encoding="utf-8")
+    (dst / ".lamina-pin").write_text(f"{SD_CPP_COMMIT}\n{SD_GGML_COMMIT}\n", encoding="utf-8")
     return dst
 
 
 def source_ok(src: Path) -> bool:
-    pin = Path(src) / ".strata-pin"
+    pin = Path(src) / ".lamina-pin"
     return pin.is_file() and pin.read_text(encoding="utf-8").split() == [SD_CPP_COMMIT, SD_GGML_COMMIT] \
         and (Path(src) / "ggml" / "CMakeLists.txt").is_file()
 
@@ -195,7 +195,7 @@ def image_config(backend: str, quant: str, exe: Path, models_dir: Path, *, uma: 
            "llm": str(local_path(models_dir, "llm")), "args": default_args(backend), "gpu_policy": policy,
            "uma": bool(uma), "sd_cpp": SD_CPP_COMMIT[:7]}
     if backend in NATIVE_BACKENDS:
-        cfg["native"] = bool(native)       # Strata's DiT runner (--model-args qwen_image_2_1_native=1)
+        cfg["native"] = bool(native)       # Lamina's DiT runner (--model-args qwen_image_2_1_native=1)
     if gpu is not None:
         cfg["gpu"] = gpu
     if lib_dirs:

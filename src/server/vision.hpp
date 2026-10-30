@@ -75,7 +75,7 @@ std::string combined_embeddings_path(const std::string& vision_dir, uintmax_t nb
 /// #874: `parts` (files) one after the other into `path`; on Windows as a short-lived file (FILE_ATTRIBUTE_TEMPORARY),
 /// which normally never reaches the drive before it is deleted
 void write_temporary(const std::string& path, const std::vector<std::string>& parts);
-/// a timeout from the environment (STRATA_VISION_READY_S ...): seconds, nullopt for no limit (0 or less)
+/// a timeout from the environment (LAMINA_VISION_READY_S ...): seconds, nullopt for no limit (0 or less)
 std::optional<double> timeout_env(const char* name, double dflt);
 
 }  // namespace lamina

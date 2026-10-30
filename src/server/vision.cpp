@@ -42,8 +42,8 @@ namespace lamina {
 namespace fs = std::filesystem;
 namespace {
 
-const std::optional<double> kReadyS = timeout_env("STRATA_VISION_READY_S", 300.0);
-const std::optional<double> kEncodeS = timeout_env("STRATA_VISION_ENCODE_S", 300.0);
+const std::optional<double> kReadyS = timeout_env("LAMINA_VISION_READY_S", 300.0);
+const std::optional<double> kEncodeS = timeout_env("LAMINA_VISION_ENCODE_S", 300.0);
 
 std::string read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -299,7 +299,7 @@ std::string combined_embeddings_path(const std::string& vision_dir, uintmax_t nb
     if (fs::is_directory(shm, ec) && ::access("/dev/shm", W_OK) == 0) {
         const fs::space_info sp = fs::space(shm, ec);
         if (!ec && sp.available > 2 * nbytes + (16u << 20))
-            return "/dev/shm/strata-vision-" + std::to_string(::getpid()) + "-" + name;
+            return "/dev/shm/lamina-vision-" + std::to_string(::getpid()) + "-" + name;
     }
 #else
     (void) nbytes;

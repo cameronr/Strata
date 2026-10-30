@@ -36,7 +36,7 @@
 namespace lamina::responses {
 
 /// our own reasoning replay strings; others' encrypted_content is ignored
-inline constexpr std::string_view kEncryptedPrefix = "strata.r1:";
+inline constexpr std::string_view kEncryptedPrefix = "lamina.r1:";
 
 /// a request error in the Responses format: {"error": {"message", "type", "param", "code"}}
 struct ResponsesError : std::invalid_argument {

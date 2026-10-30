@@ -268,7 +268,7 @@ void StdioTransport::start() {
     o.env = std::move(env);
     o.in = o.out = o.err = SpawnOptions::pipe;
     o.no_window = true;   // no console window of its own on Windows
-    if (const char* debug = std::getenv("STRATA_DEBUG"); debug != nullptr && *debug) {
+    if (const char* debug = std::getenv("LAMINA_DEBUG"); debug != nullptr && *debug) {
         const std::string name = s.name;
         o.on_err_line = [name](const std::string& line) {
             if (!strip(line).empty()) say("[mcp " + name + "] " + std::string(rstrip(line)));

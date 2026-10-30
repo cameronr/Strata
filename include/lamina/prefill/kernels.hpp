@@ -1,0 +1,101 @@
+// include/lamina/prefill/kernels.hpp - plan v0.3 P5: the element-wise and stateful kernels of a prompt chunk.
+//
+// T tokens at a time, all row-major with the token as the slow index.  The arithmetic mirrors the per-token native
+// kernels (the decode path), batched; where a step is a recurrence in time (the GDN conv and state, the PLE conv)
+// the kernel walks the chunk's tokens in order inside one launch.
+#pragma once
+
+#include "lamina/kernels/rope_scaling.hpp"
+
+#include <cstdint>
+
+namespace lamina::prefill {
+
+// ---- hyper-connection (n_embd 2560, hc 4, hc_lr 320)
+/// xn[t, c*2560 + d] = R[t,c,d] * rsqrt(mean_d R[t,c,:]^2 + eps) * w_norm[c*2560 + d]; also its BF16 image.
+void gr_norm(const float* R, const float* w_norm, float eps, float* xn, uint16_t* xn16, int64_t T, void* stream);
+/// gr_norm without the FP32 rows: the row scales rs[t*4 + c] and the BF16 image; gr_mix_r reads R instead.
+void gr_norm_rs(const float* R, const float* w_norm, float eps, float* rs, uint16_t* xn16, int64_t T, void* stream);
+/// gr_mix with xn recomputed from R, rs and w_norm as gr_norm computes it (the same bits).
+void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float* gated, float* mixed, uint16_t* mixed16,
+              int64_t T, void* stream, uint16_t* mixed_h = nullptr);
+/// The up projection (gated = lo16 . w_up^T, w_up BF16 [10240, 320]) and gr_mix_r in one kernel, `gated` never
+/// written: gr_mix_r's bits where cuBLAS sums K as the kernel does (gr_upmix_parity).  sm_80+.
+void gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const float* rs, const float* w_norm,
+              float* mixed, uint16_t* mixed16, int64_t T, void* stream, uint16_t* mixed_h = nullptr);
+/// gr_write, then gr_norm_rs of the written rows with the next read's norm weights, R read once.
+void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm, float eps,
+                      float* rs, uint16_t* xn16, int64_t T, void* stream, const uint16_t* partial = nullptr);
+/// lo16[t, k] = bf16(silu(lo[t, k] / hc))
+void gr_silu(const float* lo, uint16_t* lo16, int64_t T, void* stream);
+/// mixed[t, d] = mean_c xn[t, c, d] * sigmoid(gated[t, c, d]); FP32, BF16 and FP16 (any of them may be null).
+void gr_mix(const float* xn, const float* gated, float* mixed, uint16_t* mixed16, int64_t T, void* stream,
+            uint16_t* mixed_h = nullptr);
+/// R[t, c, d] += (bo[t, d] (+ partial[t, d], FP16)) * 2 sigmoid(inj[t, c] / hc)   (inj has row stride inj_ld)
+void gr_write(float* R, const float* bo, const float* inj, int64_t inj_ld, int64_t T, void* stream,
+              const uint16_t* partial = nullptr);
+/// R[t, c, :] = e[t, :] for all four streams (the embedding broadcast).
+void gr_broadcast(const float* e, float* R, int64_t T, void* stream);
+
+// ---- GDN (state 128, 16 k heads, 48 v heads, 10240 conv channels, 4 taps)
+/// gate[t,h] = softplus(ab[t,h] + dt[h]) * ssm_a[h];  beta[t,h] = sigmoid(ab[t, 48 + h])  (ab: [T, 96])
+void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate, float* beta, int64_t T, void* stream);
+/// The 4-tap causal conv + SiLU over the chunk (history [C][3] in, updated to the chunk's last three inputs), then
+/// the L2 norm of the q and k heads of every token: the verify window's gdn_conv_l2_multi over all T tokens at once.
+/// h: [T, C].
+void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, int64_t T, float eps, void* stream);
+/// The recurrence over the chunk: y[t] = o (before the norm), in the gated delta rule's chunkwise form on the tensor
+/// cores (FP16 products, FP32 sums and state; gdn_step_norm_multi's values within FP16's rounding).
+void gdn_scan(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T, void* stream);
+/// y16[t] = rmsnorm(o) * gamma * sigmoid(z) per head in FP16 (the out projection's input), o from y; `y32`: its FP32
+/// value too, in place over o (the parity test's).
+void gdn_out_norm(float* y, const float* z, const float* gamma, float eps, uint16_t* y16, int64_t T, void* stream,
+                  bool y32 = false);
+
+// ---- MoE
+/// softmax over 512, top-10 (ties to the lower id), weights renormalised over the ten (the native router).
+void route(const float* logits, int32_t* ids, float* weights, int64_t T, void* stream);
+/// h16[n, r] = fp16(silu(gu[n, 2r]) * gu[n, 2r + 1])   (the interleaved expert gate/up)
+void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream);
+/// h16[n, r] = fp16(silu(g[n, r]) * u[n, r])   (the shared expert, gate and up separate, width 640)
+void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream);
+/// Gather rows: dst16[i, :] = x16[src[i], :] (n rows of `width` BF16).
+void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int64_t n, int64_t width, void* stream);
+/// The same from FP16 rows into FP32 ones (MMQ's quantizer reads floats).
+void gather_rows16_f32(const uint16_t* x16, const int32_t* src, float* dst, int64_t n, int64_t width, void* stream);
+/// y = FP16 bits of x, saturated at +-65504 (the second GPU's expert sums on their way back: below ~20 measured)
+void sums_to_f16(const float* x, uint16_t* y, int64_t n, void* stream);
+/// In place: x[t, :] *= sigmoid(sg[t])   (the shared expert's scalar gate)
+void moe_shared_gate(float* x, const float* sg, int64_t T, void* stream);
+/// sum[src[r], :] += w[r] * rows[r, :] for n rows (one expert's rows: no token twice).
+void moe_scatter_add(float* sum, const float* rows, const float* w, const int32_t* src, int64_t n, void* stream);
+/// The same for several experts' rows (row r at rows[r - r0]), where a token may recur: token tok[b] adds its rows
+/// list[start[b] .. start[b + 1]) in that order, so it matches moe_scatter_add per expert in the list's order.
+void moe_gather_add(float* sum, const float* rows, int64_t r0, const float* w, const int32_t* tok, const int32_t* start,
+                    const int32_t* list, int64_t n_tok, void* stream);
+
+// ---- QSA helpers
+/// In place: x[r, :] = x[r, :] * rsqrt(mean x^2 + eps) * w  over rows of `cols` (row stride `ld`).
+void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, float eps, void* stream);
+/// NEOX rotary on the first 64 dims of each head: x [T, heads, dim] at positions pos0 + t.
+void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t pos0,
+          const lamina::kernels::RopeScaling& scaling, void* stream);
+/// q_full [T, 24, 512] (q | gate per head) -> q [T, 24, 256]
+void split_q(const float* q_full, float* q, int64_t T, void* stream);
+/// attn[t, h, d] *= sigmoid(q_full[t, h, 256 + d]) -> out16 (fp16 bits: the o-projection is quantized)
+void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t T, void* stream);
+
+/// K and V of T consecutive cells (positions pos0..pos0+T-1; K normed and rotated) into the paged pools: FP16
+/// (`k_pool`/`v_pool`) or INT8 codes + FP16 scale per 64 (`k_q`...), the decode append's arithmetic.
+/// K, V: [T, 2, 256].  `sides`: 3 K and V, 1 K alone (k8v4's INT8 half), 2 V alone.
+void kv_append(const float* K, const float* V, int64_t T, int64_t pos0, const int32_t* page_table, int64_t page_size,
+               uint16_t* k_pool, uint16_t* v_pool, int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale,
+               void* stream, int sides = 3);
+
+/// fp32 -> fp16 bits and fp32 -> bf16, n elements (the two activation images of the prompt GEMMs).
+void to_f16(const float* x, uint16_t* y, int64_t n, void* stream);
+void to_bf16(const float* x, uint16_t* y, int64_t n, void* stream);
+/// BF16 of int8 codes times their f16 scale a 32 values (n codes), rounded as the pack rounds Q8_0 to BF16.
+void q8_to_bf16(const int8_t* q, const uint16_t* scales, int64_t n, uint16_t* y, void* stream);
+
+}  // namespace lamina::prefill

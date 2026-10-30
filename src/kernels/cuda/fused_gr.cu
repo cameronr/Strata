@@ -1,6 +1,6 @@
-// src/kernels/cuda/fused_gr.cu - see include/strata/kernels/fused_gr.hpp.
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/warp.cuh"
+// src/kernels/cuda/fused_gr.cu - see include/lamina/kernels/fused_gr.hpp.
+#include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/warp.cuh"
 #include "xor_scatter.cuh"
 
 #include <cuda_runtime.h>
@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int N = 2560;         // n_embd
@@ -593,29 +593,29 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void* 
         for (int k = 0; k < md.T; ++k) md.a[k] = a[t0 + k];
         if (a[0].q_down != nullptr) {
             switch (md.T) {
-#define STRATA_DOWN(T) case T: gr_down_q8_split_kernel<T><<<down_grid, DTH, 0, st>>>(md, scratch); break;
-                STRATA_DOWN(1) STRATA_DOWN(2) STRATA_DOWN(3) STRATA_DOWN(4)
-#undef STRATA_DOWN
+#define LAMINA_DOWN(T) case T: gr_down_q8_split_kernel<T><<<down_grid, DTH, 0, st>>>(md, scratch); break;
+                LAMINA_DOWN(1) LAMINA_DOWN(2) LAMINA_DOWN(3) LAMINA_DOWN(4)
+#undef LAMINA_DOWN
             }
             continue;
         }
         switch (md.T) {
-#define STRATA_DOWN(T) case T: gr_down_split_kernel<T><<<down_grid, DTH, 0, st>>>(md, scratch); break;
-            STRATA_DOWN(1) STRATA_DOWN(2) STRATA_DOWN(3) STRATA_DOWN(4)
-#undef STRATA_DOWN
+#define LAMINA_DOWN(T) case T: gr_down_split_kernel<T><<<down_grid, DTH, 0, st>>>(md, scratch); break;
+            LAMINA_DOWN(1) LAMINA_DOWN(2) LAMINA_DOWN(3) LAMINA_DOWN(4)
+#undef LAMINA_DOWN
         }
     }
     if (a[0].q_up != nullptr)
         switch (n_tok) {
-#define STRATA_UP(T) case T: gr_up_q8_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
-            STRATA_UP(1) STRATA_UP(2) STRATA_UP(3) STRATA_UP(4) STRATA_UP(5) STRATA_UP(6) STRATA_UP(7) STRATA_UP(8)
-#undef STRATA_UP
+#define LAMINA_UP(T) case T: gr_up_q8_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+            LAMINA_UP(1) LAMINA_UP(2) LAMINA_UP(3) LAMINA_UP(4) LAMINA_UP(5) LAMINA_UP(6) LAMINA_UP(7) LAMINA_UP(8)
+#undef LAMINA_UP
         }
     else
     switch (n_tok) {
-#define STRATA_UP(T) case T: gr_up_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
-        STRATA_UP(1) STRATA_UP(2) STRATA_UP(3) STRATA_UP(4) STRATA_UP(5) STRATA_UP(6) STRATA_UP(7) STRATA_UP(8)
-#undef STRATA_UP
+#define LAMINA_UP(T) case T: gr_up_multi_kernel<T><<<UPM_BLOCKS, THREADS, 0, st>>>(m); break;
+        LAMINA_UP(1) LAMINA_UP(2) LAMINA_UP(3) LAMINA_UP(4) LAMINA_UP(5) LAMINA_UP(6) LAMINA_UP(7) LAMINA_UP(8)
+#undef LAMINA_UP
     }
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) {
@@ -628,4 +628,4 @@ bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr) {
     return n_embd == N && hc == HC && hc_lr == LR;
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

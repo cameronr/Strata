@@ -1,6 +1,6 @@
 // tests/core/prompt_cache_spread_test.cpp - the prompt cache's checkpoint retention (spread_victim, prompt_cache.hpp)
 // against least recent use, on conversations checkpointed as the engine does it (CPU only).
-#include "strata/core/prompt_cache.hpp"
+#include "lamina/core/prompt_cache.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <vector>
 
-using strata::core::spread_victim;
+using lamina::core::spread_victim;
 
 namespace {
 

@@ -2,8 +2,8 @@
 //
 // The picture reader needs the text model for one thing: its tokenizer (and the header values that go with it).  llama.cpp's
 // loader reads the whole tensor directory first and refuses a file with a tensor type it does not know - and a Gyro
-// quantization (TQK6 / TQK7, ids 145 and 146) and other Strata-private types are exactly that - so even a vocab-only
-// load failed with "cannot open the text model".  strata_open_text_model() therefore copies the key/value header of the
+// quantization (TQK6 / TQK7, ids 145 and 146) and other engine-private types are exactly that - so even a vocab-only
+// load failed with "cannot open the text model".  lamina_open_text_model() therefore copies the key/value header of the
 // GGUF (everything before the tensor directory) into a small temporary GGUF without tensors, and loads THAT vocab-only.
 // The weights are never read, mapped or type-checked, and the split keys are dropped so the loader does not go looking
 // for the other shards.  If the header cannot be read (a type this reader does not know), it falls back to loading the
@@ -22,13 +22,13 @@
 
 #if defined(_WIN32)
 #include <process.h>
-#define STRATA_GETPID _getpid
+#define LAMINA_GETPID _getpid
 #else
 #include <unistd.h>
-#define STRATA_GETPID getpid
+#define LAMINA_GETPID getpid
 #endif
 
-namespace strata_gguf {
+namespace lamina_gguf {
 
 struct Reader {
     FILE* f = nullptr;
@@ -130,20 +130,20 @@ inline bool copy_meta(const std::string& src, const std::string& dst, std::strin
     return true;
 }
 
-}  // namespace strata_gguf
+}  // namespace lamina_gguf
 
 // The text model for the picture reader: vocabulary and header only.  `how` says which way it was opened.
-inline llama_model* strata_open_text_model(const std::string& model, std::string* how = nullptr) {
+inline llama_model* lamina_open_text_model(const std::string& model, std::string* how = nullptr) {
     llama_model_params mp = llama_model_default_params();
     mp.vocab_only = true;
     const char* tmpdir = std::getenv("TMPDIR");
     if (!tmpdir || !*tmpdir) tmpdir = std::getenv("TEMP");
     if (!tmpdir || !*tmpdir) tmpdir = std::getenv("TMP");
     if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
-    const std::string meta = std::string(tmpdir) + "/strata-vision-meta-" + std::to_string((long) STRATA_GETPID()) + ".gguf";
+    const std::string meta = std::string(tmpdir) + "/lamina-vision-meta-" + std::to_string((long) LAMINA_GETPID()) + ".gguf";
     std::string err;
     llama_model* m = nullptr;
-    if (strata_gguf::copy_meta(model, meta, err)) {
+    if (lamina_gguf::copy_meta(model, meta, err)) {
         m = llama_model_load_from_file(meta.c_str(), mp);
         if (how) *how = m ? "header only" : "header copy was not accepted";
     } else if (how) *how = "header copy failed: " + err;

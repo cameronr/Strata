@@ -13,8 +13,8 @@
 // Compiled with -msse4.2 -mavx -mno-avx2 -mno-fma -mno-f16c (CMakeLists.txt, the iq_avx1.cpp pattern) and called
 // only behind cpu_avx1_ok() && !cpu_avx2_ok(), so no CPU that lacks those features can reach it - and no CPU that
 // has AVX2 changes what it runs.
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include <immintrin.h>
 
@@ -27,7 +27,7 @@
 #error "q2_avx1.cpp must be compiled without AVX2, FMA and F16C (see the per-source flags in CMakeLists.txt)"
 #endif
 
-namespace strata::kernels::cpu {
+namespace lamina::kernels::cpu {
 namespace {
 
 // fp16 -> fp32 without F16C (the written-out conversion, subnormals included; iq_avx1.cpp's copy).
@@ -122,7 +122,7 @@ void rows(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a,
     }
 }
 
-// ---- the bit-plane row kernel (STRATA_Q2_BITPLANE=1), 128-bit lanes: one 64-value block at a time instead of
+// ---- the bit-plane row kernel (LAMINA_Q2_BITPLANE=1), 128-bit lanes: one 64-value block at a time instead of
 // a pair per 256-bit register.  The integer part is exact; the float summation order is this kernel's own (the
 // same statement as for the AVX-2 one), and every row reduces with the same tree alone or in a group (#152).
 template <int NT>
@@ -176,7 +176,7 @@ void rows_bp(const uint8_t* w, size_t row_bytes, int npairs, const ActQ* const* 
 }
 
 const bool kBitplane = [] {
-    const char* e = std::getenv("STRATA_Q2_BITPLANE");
+    const char* e = std::getenv("LAMINA_Q2_BITPLANE");
     return e != nullptr && e[0] == '1';
 }();
 
@@ -261,4 +261,4 @@ void act_quant_q8_1_avx1(const float* x, int n, ActQ& a) {
     else a.bp_pairs = 0;
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace lamina::kernels::cpu

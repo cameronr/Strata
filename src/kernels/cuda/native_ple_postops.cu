@@ -18,10 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "strata/kernels/native_ple_postops.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/native_gr_norm.hpp"
-#include "strata/kernels/ngram.hpp"
+#include "lamina/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/native_gr_norm.hpp"
+#include "lamina/kernels/ngram.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
@@ -31,7 +31,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 constexpr int N = 2560, H = 4, D = N * H, HISTORY = 9;
 __global__ void gate_kernel(const float* key, const float* query, float* gate, float scale) {
@@ -216,4 +216,4 @@ void native_ple_postops_tokens(const float* projected_key, const float* hidden, 
     history_tokens_kernel<<<D/256,256,0,st>>>(history,b.normalized,n_tok,snaps);
     launch_check();
 }
-} // namespace strata::kernels
+} // namespace lamina::kernels

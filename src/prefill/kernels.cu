@@ -1,9 +1,9 @@
-// src/prefill/kernels.cu - see include/strata/prefill/kernels.hpp.
-#include "strata/prefill/kernels.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/bf16_bits.hpp"
-#include "strata/kernels/mrope.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+// src/prefill/kernels.cu - see include/lamina/prefill/kernels.hpp.
+#include "lamina/prefill/kernels.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -15,15 +15,15 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::prefill {
+namespace lamina::prefill {
 namespace {
 
-using strata::kernels::warp_max;
-using strata::kernels::warp_sum;
+using lamina::kernels::warp_max;
+using lamina::kernels::warp_sum;
 constexpr int N = 2560, HC = 4, D = N * HC, LR = 320;
 constexpr int S = 128, HK = 16, HV = 48, C = 10240;
 
-__device__ __forceinline__ uint16_t bf(float f) { return strata::kernels::bf16_from_f32(f); }
+__device__ __forceinline__ uint16_t bf(float f) { return lamina::kernels::bf16_from_f32(f); }
 __device__ __forceinline__ float sigm(float x) { return 1.0f / (1.0f + __expf(-x)); }
 __device__ __forceinline__ uint16_t hf(float f) { return __half_as_ushort(__float2half_rn(f)); }
 // A SwiGLU product for an FP16 GEMM, saturated: a token with a massive activation would turn into inf there and NaN
@@ -366,7 +366,7 @@ __global__ void route_kernel(const float* __restrict__ logits, int32_t* __restri
     selected_sum = fmaxf(warp_sum(selected_sum), 6.103515625e-5f);
     if (lane < 10) wout[t * 10 + lane] = selected / selected_sum;
 }
-// Strata blob: gate/up codes [1280][640 B], down codes [2560][160 B], gate/up scales [1280][40] f16, down scales [2560][10] f16
+// Lamina blob: gate/up codes [1280][640 B], down codes [2560][160 B], gate/up scales [1280][40] f16, down scales [2560][10] f16
 template <bool HALF>
 __global__ void blob_dequant_kernel(const uint8_t* __restrict__ blob, uint16_t* __restrict__ gu16,
                                     uint16_t* __restrict__ d16) {
@@ -453,14 +453,14 @@ __global__ void rms_rows_kernel(float* __restrict__ x, const float* __restrict__
 }
 template <int MODE>
 __global__ void rope_kernel(float* __restrict__ x, int64_t heads, int64_t dim, int64_t ld, int64_t pos0,
-                            float theta_scale, const int32_t* __restrict__ mtab, strata::kernels::RopeKernelArgs k,
-                            strata::kernels::RopeTab rt) {
+                            float theta_scale, const int32_t* __restrict__ mtab, lamina::kernels::RopeKernelArgs k,
+                            lamina::kernels::RopeTab rt) {
     const int64_t row = blockIdx.x;             // t * heads + h
     const int pair = threadIdx.x;               // 0..31
     const int64_t t = row / heads, h = row % heads;
     float* p = x + t * ld + h * dim;
     float c, s;
-    strata::kernels::rope_cs<MODE>(rt, k, theta_scale, strata::kernels::mrope_pos(mtab, (int) (pos0 + t), pair), pair, c,
+    lamina::kernels::rope_cs<MODE>(rt, k, theta_scale, lamina::kernels::mrope_pos(mtab, (int) (pos0 + t), pair), pair, c,
                                    s);
     const float a = p[pair], b = p[pair + 32];
     p[pair] = a * c - b * s;
@@ -986,7 +986,7 @@ void gdn_gates(const float* ab, const float* dt, const float* ssm_a, float* gate
 }
 void gdn_conv(float* history, const float* qkv, const float* conv_w, float* h, int64_t T, float eps, void* stream) {
     for (int64_t t0 = 0; t0 < T; t0 += 65535)
-        strata::kernels::gdn_conv_l2_multi(history, qkv, conv_w, h, C, 2 * HK, eps, (int) std::min<int64_t>(65535, T - t0),
+        lamina::kernels::gdn_conv_l2_multi(history, qkv, conv_w, h, C, 2 * HK, eps, (int) std::min<int64_t>(65535, T - t0),
                                            stream, (int) t0);
     gdn_conv_hist_kernel<<<C / 256, 256, 0, (cudaStream_t) stream>>>(history, qkv, T);
     check("gdn_conv");
@@ -1088,8 +1088,8 @@ void rms_rows(float* x, const float* w, int64_t rows, int64_t cols, int64_t ld, 
     check("rms_rows");
 }
 void rope(float* x, int64_t T, int64_t heads, int64_t dim, int64_t ld, int64_t pos0,
-          const strata::kernels::RopeScaling& scaling, void* stream) {
-    using namespace strata::kernels;
+          const lamina::kernels::RopeScaling& scaling, void* stream) {
+    using namespace lamina::kernels;
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / 64.0f);
     const RopeKernelArgs k = scaling.kernel_args(64);
     RopeTab rt;
@@ -1113,4 +1113,4 @@ void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t 
     check("gate_attn");
 }
 
-}  // namespace strata::prefill
+}  // namespace lamina::prefill

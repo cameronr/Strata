@@ -1,7 +1,7 @@
-#include "strata/core/native_dense.hpp"
-#include "strata/core/weights.hpp"
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/kernels/native_mmvq.hpp"
+#include "lamina/core/native_dense.hpp"
+#include "lamina/core/weights.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
 #include <immintrin.h>
@@ -17,7 +17,7 @@
 #include <set>
 #include <thread>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 bool eligible(const std::string& name, bool include_ple_key) {
     if (name.rfind("blk.", 0) != 0) return false;
@@ -104,9 +104,9 @@ bool NativeDense::served_names(const std::vector<std::string>& shards, bool incl
                                std::set<std::string>& out, std::string& err) {
     try {
         for (const auto& path : shards) {
-            strata::GgufFile gguf(path);
+            lamina::GgufFile gguf(path);
             for (const auto& tensor : gguf.tensors())
-                if (eligible(tensor.name, include_ple_key) && strata::kernels::native_mmvq_supported(tensor.type) &&
+                if (eligible(tensor.name, include_ple_key) && lamina::kernels::native_mmvq_supported(tensor.type) &&
                     tensor.shape.size() == 2)
                     out.insert(tensor.name);
         }
@@ -136,7 +136,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         bool have_architecture = false;
         std::string first_arch;
         for (const auto& path : shards) {
-            strata::GgufFile gguf(path);
+            lamina::GgufFile gguf(path);
             const auto* count = gguf.get("split.count");
             const auto* number = gguf.get("split.no");
             const auto* tensors = gguf.get("split.tensors.count");
@@ -148,7 +148,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
             // architecture's numeric keys (block_count ...) on the first one only: the full guard is the first
             // shard's (or a single file's); a later shard that names an architecture must name the same one
             if (architecture && (!number || number->u == 0)) {
-                err = strata::check_architecture(gguf);
+                err = lamina::check_architecture(gguf);
                 if (!err.empty()) return false;
                 have_architecture = true;
                 first_arch = architecture->s;
@@ -174,7 +174,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
             for (const auto& tensor : gguf.tensors()) {
                 int block_elements = 0, block_bytes = 0;
                 uint64_t elements = 1;
-                if (tensor.shape.empty() || !strata::block_geometry(tensor.type, block_elements, block_bytes) ||
+                if (tensor.shape.empty() || !lamina::block_geometry(tensor.type, block_elements, block_bytes) ||
                     tensor.shape[0] % (uint64_t) block_elements != 0) {
                     err = "native dense: invalid block geometry " + tensor.name; return false;
                 }
@@ -209,13 +209,13 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 }
                 auto& ref = found->second;
                 if (ref.native_data) { err = "native dense: override already attached"; return false; }
-                if (!strata::kernels::native_mmvq_supported(tensor.type)) continue;
+                if (!lamina::kernels::native_mmvq_supported(tensor.type)) continue;
                 if (!ref.quantized() || tensor.shape.size() != 2 ||
                     ref.ne0 <= 0 || ref.ne0 > INT_MAX || ref.ne1 <= 0 || ref.ne1 > INT_MAX ||
                     tensor.shape[0] != (uint64_t) ref.ne0 || tensor.shape[1] != (uint64_t) ref.ne1) {
                     err = "native dense: incompatible matrix " + tensor.name; return false;
                 }
-                const auto bytes = strata::kernels::native_mmvq_weight_bytes(
+                const auto bytes = lamina::kernels::native_mmvq_weight_bytes(
                     tensor.type, (int) ref.ne0, (int) ref.ne1);
                 // a zeroed tail: the prompt path's MMQ reads past the last row of a matrix whose rows are not whole
                 // 256-value steps (the shared expert's down projection, 640), and NaN times a zero input is NaN
@@ -236,7 +236,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         }
         if (pending.empty()) { err = "native dense: no supported GDN/QSA matrices in supplied shards"; return false; }
         void* allocation = nullptr;
-        const auto status = cudaMalloc(&allocation, strata::kernels::native_q8_1_bytes(max_in));
+        const auto status = cudaMalloc(&allocation, lamina::kernels::native_q8_1_bytes(max_in));
         DevicePtr scratch(allocation);
         if (status != cudaSuccess) { err = std::string("native dense scratch: ") + cudaGetErrorString(status); return false; }
         // All checks and allocations finish before publishing any reference.
@@ -259,9 +259,9 @@ namespace {
 // GCC/Clang only take the F16C intrinsics below in a function compiled for F16C (MSVC takes them anywhere); every
 // CPU with the engine's AVX2 floor has F16C.
 #if defined(__GNUC__) && !defined(__F16C__)
-#define STRATA_F16C_FN __attribute__((target("f16c")))
+#define LAMINA_F16C_FN __attribute__((target("f16c")))
 #else
-#define STRATA_F16C_FN
+#define LAMINA_F16C_FN
 #endif
 bool hc_matrix(const std::string& name) {
     if (name.rfind("blk.", 0) != 0) return name == "output_hc_down.weight" || name == "output_hc_up.weight";
@@ -269,7 +269,7 @@ bool hc_matrix(const std::string& name) {
            name.ends_with(".hc_ffn_down.weight") || name.ends_with(".hc_ffn_up.weight");
 }
 // one row's values as ggml's quantize_row_q8_0_ref: per 32, d = amax / 127 stored as f16, codes round(x / d)
-STRATA_F16C_FN void q8_0_row(const float* x, int64_t n, int8_t* q, uint16_t* s) {
+LAMINA_F16C_FN void q8_0_row(const float* x, int64_t n, int8_t* q, uint16_t* s) {
     for (int64_t b = 0; b < n / 32; ++b) {
         float amax = 0.0f;
         for (int j = 0; j < 32; ++j) amax = std::max(amax, std::fabs(x[b * 32 + j]));
@@ -278,13 +278,13 @@ STRATA_F16C_FN void q8_0_row(const float* x, int64_t n, int8_t* q, uint16_t* s) 
         for (int j = 0; j < 32; ++j) q[b * 32 + j] = (int8_t) std::roundf(x[b * 32 + j] * id);
     }
 }
-STRATA_F16C_FN float f16_to_f32(uint16_t h) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h))); }
+LAMINA_F16C_FN float f16_to_f32(uint16_t h) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h))); }
 }  // namespace
 
 bool HcQ8::names(const std::vector<std::string>& shards, std::set<std::string>& out, std::string& err) {
     try {
         for (const auto& path : shards) {
-            strata::GgufFile gguf(path);
+            lamina::GgufFile gguf(path);
             for (const auto& t : gguf.tensors())
                 if (hc_matrix(t.name)) out.insert(t.name);
         }
@@ -304,7 +304,7 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
         int device = 0;
         if (cudaGetDevice(&device) != cudaSuccess) { err = "hc q8: no device"; return false; }
         struct Job {
-            const strata::TensorInfo* t;
+            const lamina::TensorInfo* t;
             WeightRef* ref;
             bool q8_0;    // the GGUF's own Q8_0 blocks, split into codes and scales
             int kind;     // else the rows' type: 0 F32, 1 F16, 2 BF16
@@ -312,7 +312,7 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
             void* ds = nullptr;
         };
         for (const auto& path : shards) {
-            strata::GgufFile gguf(path);
+            lamina::GgufFile gguf(path);
             std::vector<Job> jobs;
             for (const auto& t : gguf.tensors()) {
                 if (!hc_matrix(t.name)) continue;
@@ -413,4 +413,4 @@ bool HcQ8::load(const std::vector<std::string>& shards, WeightTable& table, std:
         return false;
     }
 }
-} // namespace strata::core
+} // namespace lamina::core

@@ -109,7 +109,7 @@ class Build(unittest.TestCase):
             src = QI.unpack_source(d, z1, z2)
             self.assertEqual((src / "ggml" / "CMakeLists.txt").read_text(), "project(ggml)")
             self.assertTrue(QI.source_ok(src))
-            (src / ".strata-pin").write_text("0" * 40 + "\n" + QI.SD_GGML_COMMIT + "\n")
+            (src / ".lamina-pin").write_text("0" * 40 + "\n" + QI.SD_GGML_COMMIT + "\n")
             self.assertFalse(QI.source_ok(src))          # another pin: unpacked again
 
     def test_build_is_skipped_when_the_stamp_matches(self):

@@ -2,20 +2,20 @@
 # the vision encoder is chosen).  Uses llama.cpp's mtmd library at the same pinned commit as the engine's ggml.
 #
 #   cmake -S tools/vision -B build-vision -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLAMA_DIR=third_party/llama.cpp
-#         [-DSTRATA_VISION_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native] [-DSTRATA_PORTABLE=OFF]
+#         [-DLAMINA_VISION_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=native] [-DLAMINA_PORTABLE=OFF]
 #   cmake --build build-vision --target lamina-vision
 #
 # Portable (AVX2 baseline) is the default, so an encoder built without extra flags runs on any AVX2 PC: the 0.1.32
 # release's encoder was built native on an AVX-512 machine and stopped with an illegal instruction elsewhere
-# (#411 #412 #419).  setup.py, which builds for the PC it runs on, passes -DSTRATA_PORTABLE=OFF.  The option is
+# (#411 #412 #419).  setup.py, which builds for the PC it runs on, passes -DLAMINA_PORTABLE=OFF.  The option is
 # kept in CMakeCache.txt, so a build folder configured before this default still needs the flag (or a fresh folder).
 cmake_minimum_required(VERSION 3.21)
-project(strata_vision C CXX)
+project(lamina_vision C CXX)
 
 set(LLAMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llama.cpp" CACHE PATH "llama.cpp checkout")
-option(STRATA_VISION_CUDA "run the vision encoder on the GPU (builds ggml-cuda)" OFF)
-option(STRATA_PORTABLE "build for other PCs: AVX2 baseline, static MSVC runtime" ON)
-if(STRATA_PORTABLE AND MSVC)
+option(LAMINA_VISION_CUDA "run the vision encoder on the GPU (builds ggml-cuda)" OFF)
+option(LAMINA_PORTABLE "build for other PCs: AVX2 baseline, static MSVC runtime" ON)
+if(LAMINA_PORTABLE AND MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
 
@@ -29,7 +29,7 @@ set(LLAMA_BUILD_APP OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_MTMD ON CACHE BOOL "" FORCE)
 set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
-if(STRATA_PORTABLE)
+if(LAMINA_PORTABLE)
   set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
   set(GGML_OPENMP OFF CACHE BOOL "" FORCE)        # no vcomp140.dll / libgomp needed on the user's PC
   foreach(_f GGML_AVX GGML_AVX2 GGML_FMA GGML_F16C GGML_BMI2)
@@ -48,14 +48,14 @@ else()
   foreach(_f GGML_AVX GGML_AVX2 GGML_FMA GGML_F16C GGML_BMI2)
     set(${_f} OFF CACHE BOOL "" FORCE)
   endforeach()
-  message(STATUS "lamina-vision: native build for this CPU (STRATA_PORTABLE=OFF) - not for other PCs")
+  message(STATUS "lamina-vision: native build for this CPU (LAMINA_PORTABLE=OFF) - not for other PCs")
 endif()
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
-set(GGML_CUDA ${STRATA_VISION_CUDA} CACHE BOOL "" FORCE)
+set(GGML_CUDA ${LAMINA_VISION_CUDA} CACHE BOOL "" FORCE)
 
 add_subdirectory(${LLAMA_DIR} llama EXCLUDE_FROM_ALL)
 
-add_executable(lamina-vision strata_vision.cpp)
+add_executable(lamina-vision lamina_vision.cpp)
 target_link_libraries(lamina-vision PRIVATE mtmd llama)
 target_compile_features(lamina-vision PRIVATE cxx_std_17)
 install(TARGETS lamina-vision RUNTIME DESTINATION bin COMPONENT lamina)

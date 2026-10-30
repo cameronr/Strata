@@ -1,6 +1,6 @@
 // src/kernels/cpu/pool.cpp - P2.S3: the CPU expert pool.  Read pool.hpp first; it explains the protocol.
-#include "strata/kernels/cpu/pool.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -21,7 +21,7 @@
 #include <string>
 #endif
 
-namespace strata::kernels::cpu {
+namespace lamina::kernels::cpu {
 
 std::vector<std::vector<int>> physical_cores() {
     std::vector<std::vector<int>> cores;
@@ -563,4 +563,4 @@ void ExpertPool::run(ExpertJob* jobs, int n) {
     ms_close_ += std::chrono::duration<double, std::milli>(t_d - t_c).count();
 }
 
-}  // namespace strata::kernels::cpu
+}  // namespace lamina::kernels::cpu

@@ -1,4 +1,4 @@
-"""batch_gate.py - the parallel-requests gate for strata-q36 (the tools/batch_test.py idea over the serve protocol).
+"""batch_gate.py - the parallel-requests gate for lamina-q36 (the tools/batch_test.py idea over the serve protocol).
 
   python q36_batch_gate.py --exe E --args "--model M --max-context 8192 --batch 4" --slots 4 --n 128 [--golden G.json]
                        [--long 3000] [--keys "temperature=0.7 seed=3"] [--out F.json]

@@ -1,9 +1,9 @@
 // tools/qwen35/q36_mtmd_dump.cpp - llama.cpp's side of the Qwen3.6 PICTURE check: the same GGUF and mmproj, llama.cpp's own
 // mtmd library and graph (the M-RoPE positions of mtmd_helper_eval_chunk_single, qwen35moe's IMROPE).  Prints the prompt's
 // chunks (the text ids, the picture's token count) and the greedy ids, and dumps every step's full logits (f32,
-// [step][vocab]) so the first token's logits can be compared with strata-q36's (--dump-full-logits there).
+// [step][vocab]) so the first token's logits can be compared with lamina-q36's (--dump-full-logits there).
 //
-// Built against a llama.cpp checkout with its mtmd library (not part of Strata's build):
+// Built against a llama.cpp checkout with its mtmd library (not part of Lamina's build):
 //   g++ -O2 -std=c++17 q36_mtmd_dump.cpp -I<llama>/include -I<llama>/ggml/include -I<llama>/tools/mtmd -L<llama>/build/bin
 //       -lllama -lmtmd -lggml -lggml-base -Wl,-rpath,<llama>/build/bin -o q36_mtmd_dump
 // Usage: q36_mtmd_dump --model GGUF --mmproj F --image F [--image F2 ...] --prompt TEXT [--n 32] [--ngl 99] [--max-tokens N] [--mm-cpu 1]
@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
         else if (a == "--n") n_gen = std::atoi(v.c_str());
         else if (a == "--ngl") ngl = std::atoi(v.c_str());
         else if (a == "--max-tokens") max_tokens = std::atoi(v.c_str());
-        else if (a == "--mm-cpu") mm_cpu = std::atoi(v.c_str());   // the encoder on the CPU (as strata-vision's default)
+        else if (a == "--mm-cpu") mm_cpu = std::atoi(v.c_str());   // the encoder on the CPU (as lamina-vision's default)
         else if (a == "--dump-full-logits") dump_full = v;
         else if (a == "--force") force = v;
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }

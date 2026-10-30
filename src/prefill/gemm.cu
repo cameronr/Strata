@@ -1,6 +1,6 @@
-// src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
-#include "strata/prefill/gemm.hpp"
-#include "strata/kernels/dequant_bf16.hpp"
+// src/prefill/gemm.cu - see include/lamina/prefill/gemm.hpp.
+#include "lamina/prefill/gemm.hpp"
+#include "lamina/kernels/dequant_bf16.hpp"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -10,7 +10,7 @@
 #include <cstdlib>
 #include <vector>
 
-namespace strata::prefill {
+namespace lamina::prefill {
 namespace {
 
 void ck(cublasStatus_t s, const char* what) {
@@ -143,13 +143,13 @@ void Gemm::native(const uint16_t* X, int ggml_type, const void* W_blocks, float*
         if (ldy <= 0) ldy = N;
         for (int64_t r0 = 0; r0 < N; r0 += rows) {
             const int64_t n = (N - r0 < rows) ? N - r0 : rows;
-            strata::kernels::dequant_f16(ggml_type, W_blocks, r0, n, K, scratch_, stream_);
+            lamina::kernels::dequant_f16(ggml_type, W_blocks, r0, n, K, scratch_, stream_);
             f16(X, scratch_, Y + r0, T, n, K, ldy, beta);
         }
         return;
     }
-    strata::kernels::dequant_f16(ggml_type, W_blocks, 0, N, K, scratch_, stream_);
+    lamina::kernels::dequant_f16(ggml_type, W_blocks, 0, N, K, scratch_, stream_);
     f16(X, scratch_, Y, T, N, K, ldy, beta);
 }
 
-}  // namespace strata::prefill
+}  // namespace lamina::prefill

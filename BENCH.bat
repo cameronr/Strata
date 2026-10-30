@@ -10,7 +10,7 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-".venv\Scripts\python.exe" tools\strata_bench.py %*
+".venv\Scripts\python.exe" tools\lamina_bench.py %*
 set "RC=%ERRORLEVEL%"
 pause
 exit /b %RC%

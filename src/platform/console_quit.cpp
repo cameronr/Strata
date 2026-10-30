@@ -1,5 +1,5 @@
-// src/platform/console_quit.cpp - see include/strata/platform/console_quit.hpp.
-#include "strata/platform/console_quit.hpp"
+// src/platform/console_quit.cpp - see include/lamina/platform/console_quit.hpp.
+#include "lamina/platform/console_quit.hpp"
 
 #include <mutex>
 #include <utility>
@@ -9,7 +9,7 @@
 #include <windows.h>
 #endif
 
-namespace strata::platform {
+namespace lamina::platform {
 
 #if defined(_WIN32)
 namespace {
@@ -35,4 +35,4 @@ void set_console_quit(std::function<void()> quit) {
 void set_console_quit(std::function<void()>) {}
 #endif
 
-}  // namespace strata::platform
+}  // namespace lamina::platform

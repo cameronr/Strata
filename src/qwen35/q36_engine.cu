@@ -1,7 +1,7 @@
-// src/qwen35/q36_engine.cu - strata-q36: the engine path for Qwen3.6-35B-A3B (GGUF architecture qwen35moe) and
+// src/qwen35/q36_engine.cu - lamina-q36: the engine path for Qwen3.6-35B-A3B (GGUF architecture qwen35moe) and
 // Qwen3.8-27B (qwen35: the same layers with a dense FFN in place of the experts),
 // NEW-MODELS-PLAN.md T1.  A driver of its own beside Flash-Next's (generate/verify/prefill stay untouched, so the
-// Flash-Next identity gate cannot move), built from Strata's kernels:
+// Flash-Next identity gate cannot move), built from Lamina's kernels:
 //
 //   * weights straight from the GGUF: dense Q8_0 / K-quant matrices in their blocks (native MMVQ), the 1-D tensors and
 //     the F32 projections (ssm_alpha/beta, the router, the shared-expert gate) as f32, the routed experts repacked at
@@ -18,24 +18,24 @@
 //
 // Modes: --serve (lamina-server's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS or --tokens-file F
 // [--n N] [--force IDS] [--dump-full-logits F] (tools/qwen35/kl.py's reference interface), --bench-pp N / --bench-tg N.
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/core/cuda_host.hpp"
-#include "strata/core/family_layout.hpp"
-#include "strata/kernels/fused_gdn.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_moe.hpp"
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/prefill/gemm.hpp"
-#include "strata/prefill/moe_mmq.hpp"
-#include "strata/qwen35/engine.hpp"
-#include "strata/program/serve_io.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/core/family_layout.hpp"
+#include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_moe.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/prefill/gemm.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
+#include "lamina/qwen35/engine.hpp"
+#include "lamina/program/serve_io.hpp"
 #include "q36_attn.cuh"
 #include "q36_kernels.cuh"
-#if defined(STRATA_Q36_CPU_POOL)
-#include "strata/kernels/cpu/native_expert.hpp"
-#include "strata/kernels/cpu/pool.hpp"
+#if defined(LAMINA_Q36_CPU_POOL)
+#include "lamina/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
 #endif
 
 #include <cublas_v2.h>
@@ -65,12 +65,12 @@
 #include <type_traits>
 #include <vector>
 
-using strata::program::serve_print;   // the --serve protocol's replies (serve_io.hpp)
+using lamina::program::serve_print;   // the --serve protocol's replies (serve_io.hpp)
 
 namespace {
 
-namespace K = strata::kernels;
-namespace MMQ = strata::prefill::mmq;
+namespace K = lamina::kernels;
+namespace MMQ = lamina::prefill::mmq;
 
 #define CK(x)                                                                                                          \
     do {                                                                                                               \
@@ -160,10 +160,10 @@ void* heap_new(size_t n) {
 }
 
 using Clock = std::chrono::steady_clock;
-using strata::core::ms_since;
-using strata::kernels::block128_sum;
-using strata::kernels::warp_max;
-using strata::kernels::warp_sum;
+using lamina::core::ms_since;
+using lamina::kernels::block128_sum;
+using lamina::kernels::warp_max;
+using lamina::kernels::warp_sum;
 
 constexpr int kThreads = 256;
 constexpr int kChunkCells = 256;   // attention split-K chunk
@@ -1037,9 +1037,9 @@ struct Layer {
 };
 
 struct Model {
-    strata::core::ModelGeometry g;
+    lamina::core::ModelGeometry g;
     bool moe = true;                           // qwen35moe: the routed and shared experts; qwen35: a dense FFN
-    std::shared_ptr<strata::GgufModel> file;   // mapped until the experts are placed (after the engine's buffers)
+    std::shared_ptr<lamina::GgufModel> file;   // mapped until the experts are placed (after the engine's buffers)
     bool hybrid = false;                       // not every expert fits in VRAM: slots + the CPU pool
     bool kv_q8 = false;                        // --kv q8_0: K and V in q8_0 rows (kKvQ8Row), else FP16
     /// A KV head's cell of K or V, in bytes
@@ -1076,12 +1076,12 @@ size_t gcd_sz(size_t a, size_t b) { return b ? gcd_sz(b, a % b) : a; }
 size_t lcm_sz(size_t a, size_t b) { return a / gcd_sz(a, b) * b; }
 size_t block_bytes(int type) {
     int be = 0, bb = 0;
-    return strata::block_geometry((uint32_t) type, be, bb) ? (size_t) bb : 1;
+    return lamina::block_geometry((uint32_t) type, be, bb) ? (size_t) bb : 1;
 }   // zeroed bytes after the last expert (MMQ reads a little past a matrix)
 
 size_t row_bytes(int type, int64_t n) {
     int be = 0, bb = 0;
-    if (!strata::block_geometry((uint32_t) type, be, bb)) return 0;
+    if (!lamina::block_geometry((uint32_t) type, be, bb)) return 0;
     return (size_t) (n / be) * (size_t) bb;
 }
 
@@ -1122,7 +1122,7 @@ float f16_to_f32(uint16_t h) {
 }
 
 /// A tensor as f32 on the device (F32 as it is, BF16 / F16 widened).
-float* upload_f32(const strata::TensorInfo& t, const uint8_t* src) {
+float* upload_f32(const lamina::TensorInfo& t, const uint8_t* src) {
     std::vector<float> h((size_t) t.elements());
     if (t.type == 0) std::memcpy(h.data(), src, h.size() * 4);
     else if (t.type == 30)
@@ -1165,7 +1165,7 @@ uint64_t buffer_bytes_per_row(const Model& m) {
 /// less the engine's buffers at a `chunk`-token prompt chunk and 1.5 GiB: a layer's tensors, the attention layers'
 /// K / V at `ctx` cells; the first stage's the embedding, the last's the head and the MTP block) but a layer for each
 /// later stage, and the last the rest. A model with experts that no split holds runs on the first GPU alone (hybrid).
-bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& devs, const std::vector<int>& split,
+bool plan_stages(Model& m, const lamina::GgufModel& gm, const std::vector<int>& devs, const std::vector<int>& split,
                  int ctx, int chunk, std::string& err) {
     const auto& g = m.g;
     const size_t nl = (size_t) g.n_layers;
@@ -1198,8 +1198,8 @@ bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& 
     std::vector<uint64_t> cost(nl + 1, 0);   // per layer (the MTP block at nl); the rest: the embedding, the head
     uint64_t embd = 0, tail = 0;
     for (size_t si = 0; si < gm.size(); ++si)
-        for (const strata::TensorInfo& t : gm.shard(si).tensors()) {
-            const uint64_t b = strata::tensor_payload_bytes(t);
+        for (const lamina::TensorInfo& t : gm.shard(si).tensors()) {
+            const uint64_t b = lamina::tensor_payload_bytes(t);
             if (t.name.rfind("blk.", 0) == 0) {
                 const size_t l = (size_t) std::strtoull(t.name.c_str() + 4, nullptr, 10);
                 if (l <= nl) cost[l] += b;
@@ -1211,7 +1211,7 @@ bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& 
         }
     const uint64_t kv = (uint64_t) g.n_head_kv * m.kv_row() * 2 * (uint64_t) ctx;
     for (size_t l = 0; l <= nl; ++l)
-        if (l == nl ? g.n_mtp_layers > 0 : strata::core::is_qsa_layer(g, (int64_t) l)) cost[l] += kv;
+        if (l == nl ? g.n_mtp_layers > 0 : lamina::core::is_qsa_layer(g, (int64_t) l)) cost[l] += kv;
     tail += cost[nl];
     const uint64_t overhead = ((uint64_t) 3 << 29) + (uint64_t) chunk * buffer_bytes_per_row(m);
     std::vector<uint64_t> room(devs.size());
@@ -1277,16 +1277,16 @@ bool plan_stages(Model& m, const strata::GgufModel& gm, const std::vector<int>& 
 bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, const std::vector<int>& devs,
           const std::vector<int>& split, int ctx, int chunk) {
     const auto t0 = Clock::now();
-    m.file = std::make_shared<strata::GgufModel>(strata::GgufModel::open(path));
-    const strata::GgufModel& gm = *m.file;
-    if (!strata::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
-    if (m.g.family != strata::ModelFamily::Qwen35Moe && m.g.family != strata::ModelFamily::Qwen35) {
+    m.file = std::make_shared<lamina::GgufModel>(lamina::GgufModel::open(path));
+    const lamina::GgufModel& gm = *m.file;
+    if (!lamina::core::geometry_from_gguf(gm.meta(), m.g, m.top_k, err)) return false;
+    if (m.g.family != lamina::ModelFamily::Qwen35Moe && m.g.family != lamina::ModelFamily::Qwen35) {
         err = "this path runs Qwen3.6-35B-A3B (qwen35moe) and Qwen3.8-27B (qwen35) files";
         return false;
     }
-    m.moe = m.g.family == strata::ModelFamily::Qwen35Moe;
+    m.moe = m.g.family == lamina::ModelFamily::Qwen35Moe;
     size_t checked = 0;
-    if (!strata::core::check_gguf_layout(gm, m.g, err, &checked)) return false;
+    if (!lamina::core::check_gguf_layout(gm, m.g, err, &checked)) return false;
     const auto& g = m.g;
     if (g.head_dim != 256 || g.ssm_state_size != 128 || g.ssm_d_conv != 4 || (m.moe && (g.n_expert > 512 || m.top_k > 15)) ||
         g.n_head_kv < 1 || g.n_head % g.n_head_kv != 0 || g.n_head / g.n_head_kv > 8) {
@@ -1294,14 +1294,14 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
               "<= 8 query heads a KV head)";
         return false;
     }
-    const std::string p = std::string(strata::model_family_arch(m.g.family)) + ".";
-    if (const strata::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
-    if (const strata::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
-    if (const strata::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
+    const std::string p = std::string(lamina::model_family_arch(m.g.family)) + ".";
+    if (const lamina::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
+    if (const lamina::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
+    if (const lamina::MetaValue* v = gm.meta().get(p + "rope.dimension_count")) m.n_rot = (int) v->u;
     if (!plan_stages(m, gm, devs, split, ctx, chunk, err)) return false;
     uint64_t bytes = 0;
-    auto find = [&](const std::string& name, size_t& s) -> const strata::TensorInfo* {
-        const strata::TensorInfo* t = gm.find(name, &s);
+    auto find = [&](const std::string& name, size_t& s) -> const lamina::TensorInfo* {
+        const lamina::TensorInfo* t = gm.find(name, &s);
         if (!t) {
             std::fprintf(stderr, "lamina: missing %s\n", name.c_str());
             throw Fatal{1};
@@ -1310,13 +1310,13 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     };
     auto f32 = [&](const std::string& name) -> const float* {
         size_t s = 0;
-        const strata::TensorInfo* t = find(name, s);
+        const lamina::TensorInfo* t = find(name, s);
         bytes += t->elements() * 4;
         return upload_f32(*t, gm.shard(s).tensor_data(*t));
     };
     auto mat = [&](const std::string& name) -> Mat {
         size_t s = 0;
-        const strata::TensorInfo* t = find(name, s);
+        const lamina::TensorInfo* t = find(name, s);
         Mat w;
         w.type = (int) t->type;
         w.n_in = (int) t->shape[0];
@@ -1325,7 +1325,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
             std::fprintf(stderr, "lamina: %s is %s, which the native MMVQ does not take\n", name.c_str(), t->type_name());
             throw Fatal{1};
         }
-        const uint64_t nb = strata::tensor_payload_bytes(*t);
+        const uint64_t nb = lamina::tensor_payload_bytes(*t);
         uint8_t* d = nullptr;
         CK(dmalloc(&d, nb));
         CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
@@ -1343,7 +1343,7 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
         const bool is_mtp = l == g.n_layers;
         CK(cudaSetDevice(m.dev_of(l)));   // a layer's tensors on its stage's GPU
         Layer& y = is_mtp ? m.mtp : m.layers[(size_t) l];
-        y.attn = is_mtp || strata::core::is_qsa_layer(g, l);
+        y.attn = is_mtp || lamina::core::is_qsa_layer(g, l);
         y.attn_norm = f32(L(l, "attn_norm.weight"));
         y.post_norm = f32(L(l, "post_attention_norm.weight"));
         if (!y.attn) {
@@ -1382,16 +1382,16 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
         bytes += (size_t) (g.n_expert + 1) * g.n_embd * 4;
         // the routed experts: [gate | up | down] per expert, the native expert layout
         size_t sg = 0, su = 0, sd = 0;
-        const strata::TensorInfo* tg = find(L(l, "ffn_gate_exps.weight"), sg);
-        const strata::TensorInfo* tu = find(L(l, "ffn_up_exps.weight"), su);
-        const strata::TensorInfo* td = find(L(l, "ffn_down_exps.weight"), sd);
+        const lamina::TensorInfo* tg = find(L(l, "ffn_gate_exps.weight"), sg);
+        const lamina::TensorInfo* tu = find(L(l, "ffn_up_exps.weight"), su);
+        const lamina::TensorInfo* td = find(L(l, "ffn_down_exps.weight"), sd);
         if (tg->type != tu->type) {
             err = L(l, "ffn_gate_exps / ffn_up_exps differ in type");
             return false;
         }
         if (!K::native_expert_supported((int) tg->type, (int) td->type, g.n_embd, g.n_ff)) {
             err = L(l, "experts are ") + tg->type_name() + "/" + td->type_name() + ", which the native expert kernels " +
-                  "do not take (build with -DSTRATA_Q6K_EXPERTS=ON for Q6_K)";
+                  "do not take (build with -DLAMINA_Q6K_EXPERTS=ON for Q6_K)";
             return false;
         }
         y.L = K::native_expert_layout((int) tg->type, (int) td->type, g.n_embd, g.n_ff);
@@ -1418,10 +1418,10 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp, co
     CK(cudaSetDevice(m.stage_dev.front()));
     {
         size_t s = 0;
-        const strata::TensorInfo* t = find("token_embd.weight", s);
+        const lamina::TensorInfo* t = find("token_embd.weight", s);
         m.embd_type = (int) t->type;
         m.embd_row = row_bytes(m.embd_type, (int64_t) t->shape[0]);
-        const uint64_t nb = strata::tensor_payload_bytes(*t);
+        const uint64_t nb = lamina::tensor_payload_bytes(*t);
         uint8_t* d = nullptr;
         CK(dmalloc(&d, nb));
         CK(cudaMemcpy(d, gm.shard(s).tensor_data(*t), nb, cudaMemcpyHostToDevice));
@@ -1482,13 +1482,13 @@ struct Engine {
     float* hlast = nullptr;   // [N] that of the last processed position (zeros before the first): the current session's
     void *q8, *xq, *escr;
     // a window's q8_1 rows of xq and q8 interleaved (native_mmvq_il, 2-8 rows), each flag whether its copy is the
-    // buffer's rows; il_mode (STRATA_Q36_IL): 0 native_mmvq, 1 the interleaved kernels (bitwise native_mmvq), 2 and
+    // buffer's rows; il_mode (LAMINA_Q36_IL): 0 native_mmvq, 1 the interleaved kernels (bitwise native_mmvq), 2 and
     // the tensor-core ones where their table takes the matrix (to float rounding); il_quant: quant() writes the copy
     // with the rows (the model has K-quant projections, which take it from 2 or 3 rows), else it is made on first use
     void *xq_il = nullptr, *q8_il = nullptr;
     bool xq_il_ok = false, q8_il_ok = false, il_quant = false;
-    const int il_mode = !std::getenv("STRATA_Q36_IL") ? 2 : std::string(std::getenv("STRATA_Q36_IL")) == "exact" ? 1
-                        : std::atoi(std::getenv("STRATA_Q36_IL")) ? 2 : 0;
+    const int il_mode = !std::getenv("LAMINA_Q36_IL") ? 2 : std::string(std::getenv("LAMINA_Q36_IL")) == "exact" ? 1
+                        : std::atoi(std::getenv("LAMINA_Q36_IL")) ? 2 : 0;
     int32_t *ids, *grp_start, *n_groups, *ent_dst, *ent_tok, *tok, *pos0, *pick;
     int32_t* hpin = nullptr;   // pinned staging: [0] decode token, [1] position, [2..9] picks, [10] max rows, [16..] tokens
     unsigned long long* grp_ptr;
@@ -1510,7 +1510,7 @@ struct Engine {
     };
     std::vector<GSet> gsets;
     GSet& gs() { return gsets[(size_t) cur]; }
-    strata::prefill::Gemm gemm;
+    lamina::prefill::Gemm gemm;
     cublasHandle_t blas = nullptr;
     static constexpr int kSplitK = 16;
     float* sk_part = nullptr;          // the split-K partials of the F32 projections: [kSplitK][tmax][the widest]
@@ -1615,8 +1615,8 @@ struct Engine {
         std::vector<int> slot_of, exp_in_slot;
         std::vector<double> score;   // routing counts, halved at each rebalance
         int32_t* slot_of_d = nullptr;
-#if defined(STRATA_Q36_CPU_POOL)
-        strata::kernels::cpu::NativeFmt fmt;
+#if defined(LAMINA_Q36_CPU_POOL)
+        lamina::kernels::cpu::NativeFmt fmt;
 #endif
     };
     std::vector<Hy> hy;
@@ -1629,9 +1629,9 @@ struct Engine {
         const Layer& L = li < m->layers.size() ? m->layers[li] : m->mtp;
         return L.n_slots < (int) m->g.n_expert;
     }
-#if defined(STRATA_Q36_CPU_POOL)
-    std::unique_ptr<strata::kernels::cpu::ExpertPool> pool;
-    std::vector<strata::kernels::cpu::ExpertJobMulti> jobs;
+#if defined(LAMINA_Q36_CPU_POOL)
+    std::unique_ptr<lamina::kernels::cpu::ExpertPool> pool;
+    std::vector<lamina::kernels::cpu::ExpertJobMulti> jobs;
 #endif
     float *h_h = nullptr, *cpu_out = nullptr, *ecpu = nullptr;
     int32_t *h_ids = nullptr, *h_miss = nullptr, *d_miss = nullptr, *h_cnt = nullptr;
@@ -1761,7 +1761,7 @@ struct Engine {
         }
         // the F32 projections' widest output: the router with the shared expert's gate (n_expert + 1), or GDN alpha / beta
         sk_part = dalloc((size_t) kSplitK * T * (size_t) std::max<int64_t>(g.n_expert + 1, g.ssm_v_heads));
-        const bool mmq_built = MMQ::built() && std::getenv("STRATA_Q36_NO_MMQ") == nullptr;
+        const bool mmq_built = MMQ::built() && std::getenv("LAMINA_Q36_NO_MMQ") == nullptr;
         use_mmq = mmq_built && m->moe;   // the prompt's experts on MMQ
         auto mmq_ok = [&](const Layer& L) {
             return MMQ::supported(L.L.gu_type) && MMQ::supported(L.L.d_type) && MMQ::fits(L.L.gu_type, 2 * g.n_ff) &&
@@ -1956,7 +1956,7 @@ struct Engine {
             k_gemv_f32<<<dim3(rows8(n_out), T), kThreads, 0, st>>>(W, xin, out, n_in, n_out);
             return;
         }
-        static const bool blas_f32 = std::getenv("STRATA_Q36_BLAS_F32") != nullptr;   // the hipBLAS / cuBLAS SGEMM (A/B)
+        static const bool blas_f32 = std::getenv("LAMINA_Q36_BLAS_F32") != nullptr;   // the hipBLAS / cuBLAS SGEMM (A/B)
         if (!blas_f32 && n_in % 4 == 0) {
             // K split so that about 128 blocks run (the partials summed in a fixed order: deterministic); TM = 4 rows per
             // thread for the 256-wide router, 1 for the narrow ones (alpha / beta 32, the gate 1)
@@ -2040,9 +2040,9 @@ struct Engine {
         default: return false;
         }
     }
-    // ---- decode kernels of this engine (q36_kernels.cuh), each the old kernel's bits (STRATA_Q36_VERIFY=1 compares)
-    bool fast_k = std::getenv("STRATA_Q36_OLD_KERNELS") == nullptr;
-    bool verify_k = std::getenv("STRATA_Q36_VERIFY") != nullptr;
+    // ---- decode kernels of this engine (q36_kernels.cuh), each the old kernel's bits (LAMINA_Q36_VERIFY=1 compares)
+    bool fast_k = std::getenv("LAMINA_Q36_OLD_KERNELS") == nullptr;
+    bool verify_k = std::getenv("LAMINA_Q36_VERIFY") != nullptr;
     float* vbuf = nullptr;                       // verify scratch
     long long v_calls = 0, v_bad = 0;
     std::map<std::string, long long> v_by;   // mismatches per check
@@ -2057,7 +2057,7 @@ struct Engine {
             size_t i = 0;
             while (i < n && std::memcmp(&ha[i], &hb[i], 4) == 0) ++i;
             if (++v_by[what] <= 3)
-                std::fprintf(stderr, "strata-q36 VERIFY MISMATCH %s%s: first at %zu of %zu: new %g old %g (bits %08x %08x)\n", what,
+                std::fprintf(stderr, "lamina-q36 VERIFY MISMATCH %s%s: first at %zu of %zu: new %g old %g (bits %08x %08x)\n", what,
                              tag.c_str(), i, n, (double) ha[i], (double) hb[i], *(unsigned*) &ha[i], *(unsigned*) &hb[i]);
         }
     }
@@ -2101,7 +2101,7 @@ struct Engine {
         K::native_quantize_q8_1(hsrc, vq, N * T, 1, st);
         const long long before = v_bad;
         verify_cmp(what, (const float*) xq, (const float*) vq, qb * (size_t) T / 4, tag);
-        if (v_bad != before && std::getenv("STRATA_Q36_VDEBUG") && v_by[what] <= 2) {   // a mismatching block, on the host
+        if (v_bad != before && std::getenv("LAMINA_Q36_VDEBUG") && v_by[what] <= 2) {   // a mismatching block, on the host
             std::vector<uint8_t> a(qb * (size_t) T), b(qb * (size_t) T);
             std::vector<float> hv((size_t) N * T);
             CK(cudaMemcpy(a.data(), xq, a.size(), cudaMemcpyDeviceToHost));
@@ -2250,7 +2250,7 @@ struct Engine {
         }
         if (bad) {
             ++v_bad;
-            if (v_bad <= 20) std::fprintf(stderr, "strata-q36 VERIFY MISMATCH group (T %d, groups %d vs %d)\n", T, nn, no);
+            if (v_bad <= 20) std::fprintf(stderr, "lamina-q36 VERIFY MISMATCH group (T %d, groups %d vs %d)\n", T, nn, no);
         }
     }
     bool grouped_by_route = false;   // route_group already filled the group arrays of this layer
@@ -2381,7 +2381,7 @@ struct Engine {
                                                                      d_gslot, d_grow0, d_gcnt);
             } else {
                 // one token, a window or a chunk: the same kernels (every token in one launch each), so a decode step and a
-                // verify window compute bitwise the same rows and the MTP's greedy text is the plain greedy text.  (Strata's
+                // verify window compute bitwise the same rows and the MTP's greedy text is the plain greedy text.  (Lamina's
                 // fused single-token kernels are not used here: fused_gdn_conv_l2's 4-tap sum contracts into FMAs
                 // differently from k_conv_seq's, a 1-ulp difference in h that the Q8_1 activation rounding can turn into a
                 // flipped near-tie later; with them the KL is the same, 1.05x / 0.81x the floor, but MTP would not be exact.)
@@ -2445,7 +2445,7 @@ struct Engine {
         const bool one = T == 1;
         // a decode batch of up to 8 rows takes the router and the shared expert's gate in one product too (rows of 257) when the fused
         // router follows; the prompt chunks and the checks keep the separate products
-        const bool ext = one || (fast_k && std::getenv("STRATA_Q36_NO_EXT") == nullptr && !verify_k && T <= kGemmT && g.n_expert == 256 && Kp == 8);
+        const bool ext = one || (fast_k && std::getenv("LAMINA_Q36_NO_EXT") == nullptr && !verify_k && T <= kGemmT && g.n_expert == 256 && Kp == 8);
         if (ext) f32mm(L.router_ext, h, logits_r, N, (int) g.n_expert + 1, T);
         else f32mm(L.router, h, logits_r, N, (int) g.n_expert, T);
         // the hybrid rows path: a batch of up to hybrid_t rows; when only the MTP block is hybrid, its every batch
@@ -2692,9 +2692,9 @@ struct Engine {
         const Layer& L = layer_at(stream_seq[(size_t) i]);
         CK(cudaStreamWaitEvent(cst, ev_used[b], 0));
         // the experts with a VRAM slot come from it (device to device, at VRAM speed), only the others over PCIe; runs
-        // of consecutive experts from the same source in one copy each.  STRATA_Q36_STREAM_ALL=1: the whole layer from
+        // of consecutive experts from the same source in one copy each.  LAMINA_Q36_STREAM_ALL=1: the whole layer from
         // host memory (the first version: PCIe-bound)
-        static const bool all = std::getenv("STRATA_Q36_STREAM_ALL") != nullptr;
+        static const bool all = std::getenv("LAMINA_Q36_STREAM_ALL") != nullptr;
         const int ne = (int) m->g.n_expert;
         const Hy& H = hy[(size_t) stream_seq[(size_t) i]];
         // fewer than half the experts resident (a 12 GB card): the one whole-layer copy is faster than many small ones
@@ -2754,8 +2754,8 @@ struct Engine {
     /// The CPU half: the entries without a slot on the pool (ggml-cpu's arithmetic for the layer's formats), their
     /// rows uploaded and merged into the entries' rows.
     void moe_hybrid_cpu(size_t li, int T) {
-#if defined(STRATA_Q36_CPU_POOL)
-        namespace C = strata::kernels::cpu;
+#if defined(LAMINA_Q36_CPU_POOL)
+        namespace C = lamina::kernels::cpu;
         const auto& g = m->g;
         const int N = (int) g.n_embd, Kp = (int) m->top_k;
         const int n_ent = T * Kp;
@@ -2814,7 +2814,7 @@ struct Engine {
     /// The slots to the experts the routing used most (the counts halved each time): at most max_swaps replacements
     /// over all layers, between forwards (the copies are on the engine's stream).
     void rebalance(int max_swaps) {
-        static const bool off = std::getenv("STRATA_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
+        static const bool off = std::getenv("LAMINA_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
         if (!m->hybrid || off || warming) return;
         const int64_t ne = m->g.n_expert;
         int left = max_swaps;
@@ -2978,7 +2978,7 @@ struct Engine {
             on_chunk(1);
             return 1;
         }
-        static const bool serial = std::getenv("STRATA_Q36_SERIAL_CHUNKS") != nullptr;   // A/B: the stages in turn
+        static const bool serial = std::getenv("LAMINA_Q36_SERIAL_CHUNKS") != nullptr;   // A/B: the stages in turn
         if (split && n > tmax && !img_active && !serial) {
             // several chunks over a layer split, no picture: the stages overlap (pass_chunk); a chunk goes in once the
             // callback of the one before is done, so a cancel leaves every stage at the same chunk
@@ -3385,11 +3385,11 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     // the MAIN layers' experts fit, the MTP block's not all (UD-Q6_K_XL on 32 GB): the main layers all in VRAM - the
     // text is the all-in-VRAM text, the decode graph stays - and the MTP block's experts on slots + the CPU pool (its
     // drafts only).  When that needs it: the reserve at 256 MiB instead of 768 (said in the log; --expert-vram sets the
-    // budget instead).  STRATA_Q36_NO_MTP_CPU=1: the plain hybrid mode for every layer.
+    // budget instead).  LAMINA_Q36_NO_MTP_CPU=1: the plain hybrid mode for every layer.
     size_t total_main = 0;
     for (size_t l = E.l0; l < E.l1; ++l) total_main += m.layers[l].stride * (size_t) ne + kMmqTail;
     bool mtp_only = false;
-    if (slots <= 0 && vram_gib < 0 && m.has_mtp && total > budget2 && std::getenv("STRATA_Q36_NO_MTP_CPU") == nullptr) {
+    if (slots <= 0 && vram_gib < 0 && m.has_mtp && total > budget2 && std::getenv("LAMINA_Q36_NO_MTP_CPU") == nullptr) {
         const size_t small_reserve = (size_t) 256 << 20;
         const size_t room = fr > small_reserve ? fr - small_reserve : 0;
         if (total_main + ((size_t) 64 << 20) <= budget2) {
@@ -3418,14 +3418,14 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
                      ms_since(t0) / 1000.0);
         return true;
     }
-#if !defined(STRATA_Q36_CPU_POOL)
+#if !defined(LAMINA_Q36_CPU_POOL)
     (void) threads;
     (void) hybrid_t;
     err = "the routed experts (" + std::to_string(total >> 20) + " MiB) do not fit in VRAM, and this build has no CPU "
-          "expert pool (STRATA_NATIVE_EXPERTS=OFF)";
+          "expert pool (LAMINA_NATIVE_EXPERTS=OFF)";
     return false;
 #else
-    namespace C = strata::kernels::cpu;
+    namespace C = lamina::kernels::cpu;
     m.hybrid = true;
     E.main_hybrid = !mtp_only;
     if (E.main_hybrid) E.use_graph = false;   // the host takes part in every layer
@@ -3623,14 +3623,14 @@ struct ImgReq {
     int32_t delta = 0;               // the text after the prompt: rotary position = cell + delta
 };
 
-/// Reads a strata-vision file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, in prompt
+/// Reads a lamina-vision file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, in prompt
 /// order) and lays the pictures over the prompt's <|image_pad|> runs.  Positions as mtmd's: text counts up by one; a
 /// picture's cells take (t, h, w) = (p, p + row, p + column) and the text after it continues at p + max(nx, ny).  "" or
 /// the error.  `keys`: the server's key for each picture (img_keys=), else the embeddings' hash.
 std::string build_images(const std::string& path, const std::vector<int32_t>& ids, int64_t n_embd,
                          const std::vector<uint64_t>& keys, ImgReq& r) {
-    std::vector<strata::program::VisionImage> imgs;
-    if (std::string ve = strata::program::read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
+    std::vector<lamina::program::VisionImage> imgs;
+    if (std::string ve = lamina::program::read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
     const int64_t n = (int64_t) ids.size();
     r.cell_row.assign((size_t) n, -1);
     r.mrope.assign((size_t) n * 3, 0);
@@ -3644,8 +3644,8 @@ std::string build_images(const std::string& path, const std::vector<int32_t>& id
     while (i < n) {
         if (ids[(size_t) i] != kImagePad) { put(i, p, p, p); ++p; ++i; continue; }
         if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
-        const strata::program::VisionImage& im = imgs[k++];
-        const uint64_t h = strata::program::vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr,
+        const lamina::program::VisionImage& im = imgs[k++];
+        const uint64_t h = lamina::program::vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr,
                                                              r.rows.data(), n_embd);
         r.imgs.push_back({i, im.n, h});
         for (int64_t j = 0; j < im.n; ++j)
@@ -3696,12 +3696,12 @@ struct Serve {
     std::vector<Slot> slots;
     int n_active = 0;
     std::vector<float> lg;
-    // decode windows of the other slots between two chunks of a prompt read: STRATA_Q36_READ_WINDOWS (default 1; a chunk
+    // decode windows of the other slots between two chunks of a prompt read: LAMINA_Q36_READ_WINDOWS (default 1; a chunk
     // takes ~0.15 s at 512 tokens, a window ~0.012 s: more windows give the decoding slots more of the time a read takes)
     int read_windows = 1;
 
     explicit Serve(Engine& e) : E(e), slots((size_t) e.n_sess) {
-        if (const char* v = std::getenv("STRATA_Q36_READ_WINDOWS")) read_windows = std::max(0, std::min(64, std::atoi(v)));
+        if (const char* v = std::getenv("LAMINA_Q36_READ_WINDOWS")) read_windows = std::max(0, std::min(64, std::atoi(v)));
     }
 
     /// BSTOP / BYIELD lines among the queued ones: applied now (a window is a moment away at most).
@@ -4176,7 +4176,7 @@ struct Serve {
     int run() {
         if (E.n_sess > 1) serve_print("INFO batch_slots=%d slot_cache=1\n", E.n_sess);
         serve_print("READY %d stop\n", E.ctx);
-        const strata::program::ServeIo& io = strata::program::serve_io();
+        const lamina::program::ServeIo& io = lamina::program::serve_io();
         std::thread reader([&] {
             std::string l;
             while (io.read_line(l)) {
@@ -4190,7 +4190,7 @@ struct Serve {
             eof = true;
             cv.notify_one();
         });
-        strata::program::ReaderEnd reader_end{reader, io};
+        lamina::program::ReaderEnd reader_end{reader, io};
         for (;;) {
             std::string line;
             bool have = false;
@@ -4258,12 +4258,12 @@ static int run_engine(int argc, char** argv) {
             if (i + 1 >= argc) { std::fprintf(stderr, "lamina: %s needs a value\n", a.c_str()); throw Fatal{2}; }
             return argv[++i];
         };
-        // strata's names where they mean the same thing (the family switch passes strata's command line on)
+        // lamina's names where they mean the same thing (the family switch passes lamina's command line on)
         if (a == "--model" || a == "--native") model = next();
         else if (a == "--max-new") n_gen = std::atoi(next().c_str());
         else if (a == "--no-token-graph") graph = false;
         else if (a == "--pool-workers") cpu_threads = std::atoi(next().c_str());
-        else if (a == "--gpu") (void) next();   // applied by strata before the switch (CUDA/HIP_VISIBLE_DEVICES)
+        else if (a == "--gpu") (void) next();   // applied by lamina before the switch (CUDA/HIP_VISIBLE_DEVICES)
         else if (a == "--greedy") {}            // --tokens decodes greedily here anyway
         else if (a == "--serve") serve_mode = true;
         else if (a == "--max-context" || a == "--ctx") ctx = std::atoi(next().c_str());
@@ -4280,7 +4280,7 @@ static int run_engine(int argc, char** argv) {
         }
         else if (a == "--n") n_gen = std::atoi(next().c_str());
         else if (a == "--force") force = next();
-        else if (a == "--emb") emb_file = next();   // --tokens with pictures: a strata-vision file (the ids carry <|image_pad|> runs)
+        else if (a == "--emb") emb_file = next();   // --tokens with pictures: a lamina-vision file (the ids carry <|image_pad|> runs)
         else if (a == "--dump-full-logits") dump_full = next();
         else if (a == "--bench-pp") bench_pp = std::atoi(next().c_str());
         else if (a == "--bench-tg") bench_tg = std::atoi(next().c_str());
@@ -4296,7 +4296,7 @@ static int run_engine(int argc, char** argv) {
         else if (a == "--draft-vocab") draft_vocab = std::atoi(next().c_str());   // the MTP drafts pick among the first N token ids
         else if (a == "--kv") kv = next();                                        // the K / V cache's format: fp16 or q8_0
         else if (a == "--spec-min-p") spec_min_p = (float) std::atof(next().c_str());   // drafts while this sure (0: --mtp of them)
-        else if (a == "--vision") vision = true;                                  // pictures (GENI): the encoder is strata-vision's
+        else if (a == "--vision") vision = true;                                  // pictures (GENI): the encoder is lamina-vision's
         else if (a == "--batch" || a == "--slots") batch = std::atoi(next().c_str());   // sessions decoding together
         else if (a == "--batch-mtp") batch_mtp = true;                                  // ... each verifying an MTP proposal
         else if (a == "--expert-vram") expert_vram = std::atof(next().c_str());   // GiB for the routed experts
@@ -4314,7 +4314,7 @@ static int run_engine(int argc, char** argv) {
             if (val) ++i;
         } else {
             std::fprintf(stderr,
-                         "usage: strata-q36 --model GGUF [--max-context 32768] [--chunk 512] [--no-graph]\n"
+                         "usage: lamina-q36 --model GGUF [--max-context 32768] [--chunk 512] [--no-graph]\n"
                          "       (--serve | --tokens IDS [--n 64] [--force IDS] [--dump-full-logits F] | --bench-pp N "
                          "--bench-tg N)\n");
             return 2;
@@ -4413,8 +4413,8 @@ static int run_engine(int argc, char** argv) {
             const double fr_gib = (double) fr / GiB;
             chunk = fr_gib >= 7.5 ? 2048 : fr_gib >= 5.5 ? 1024 : 512;
         }
-        if (const char* cv = std::getenv("STRATA_Q36_CHUNK")) chunk = std::max(256, std::min(4096, std::atoi(cv)));   // force a chunk (512: the old default)
-        if (std::getenv("STRATA_Q36_PLACE_DEBUG"))
+        if (const char* cv = std::getenv("LAMINA_Q36_CHUNK")) chunk = std::max(256, std::min(4096, std::atoi(cv)));   // force a chunk (512: the old default)
+        if (std::getenv("LAMINA_Q36_PLACE_DEBUG"))
             std::fprintf(stderr, "lamina: chunk rule: free %.2f GiB, main experts %.2f GiB, chunk %d\n",
                          fr / 1073741824.0, experts / 1073741824.0, chunk);
     }
@@ -4439,10 +4439,10 @@ static int run_engine(int argc, char** argv) {
     struct Report {
         Engine& E;
         ~Report() {
-            if (E.verify_k) std::fprintf(stderr, "strata-q36 VERIFY: %lld comparisons, %lld mismatches\n", E.v_calls, E.v_bad);
+            if (E.verify_k) std::fprintf(stderr, "lamina-q36 VERIFY: %lld comparisons, %lld mismatches\n", E.v_calls, E.v_bad);
             if (E.verify_k)
                 for (const auto& kv : E.v_by)
-                    std::fprintf(stderr, "strata-q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);
+                    std::fprintf(stderr, "lamina-q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);
             if (!E.m->hybrid) return;
             const long long n = E.hy_cpu + E.hy_gpu;
             std::fprintf(stderr, "lamina: hybrid experts: %lld of %lld batch entries on the GPU (%.1f%%), %lld on the "
@@ -4451,13 +4451,13 @@ static int run_engine(int argc, char** argv) {
         }
     } report{E};
     E.reset();
-    if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));
+    if (draft_vocab < 0 && std::getenv("LAMINA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("LAMINA_Q36_DRAFT_VOCAB"));
     for (auto& S : stages) {
         S->mtp_d = m.has_mtp ? mtp_d : 0;
         S->draft_n = std::max(0, draft_vocab);
         S->draft_min_p = spec_min_p;
     }
-    E.bmtp = (batch_mtp || (std::getenv("STRATA_BATCH_MTP") != nullptr && std::string(std::getenv("STRATA_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
+    E.bmtp = (batch_mtp || (std::getenv("LAMINA_BATCH_MTP") != nullptr && std::string(std::getenv("LAMINA_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
     if (batch_mtp && !E.bmtp) std::fprintf(stderr, "lamina: --batch-mtp needs --batch N (2 or more) and --mtp N: ignored\n");
     if (warm) E.warmup();
     if (serve_mode) return serve(E);
@@ -4551,7 +4551,7 @@ static int run_engine(int argc, char** argv) {
     return 0;
 }
 
-int strata::qwen35::run(int argc, char** argv) {
+int lamina::qwen35::run(int argc, char** argv) {
     // what the run allocates goes when it ends, on an error too (Fatal: its message is printed)
     Owned owned;
     g_owned = &owned;

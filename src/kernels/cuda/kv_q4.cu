@@ -1,6 +1,6 @@
-// src/kernels/cuda/kv_q4.cu - see include/strata/kernels/kv_q4.hpp.
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/f16_bits.hpp"
+// src/kernels/cuda/kv_q4.cu - see include/lamina/kernels/kv_q4.hpp.
+#include "lamina/kernels/kv_q4.hpp"
+#include "lamina/kernels/f16_bits.hpp"
 
 #include "fwht.cuh"
 
@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 void check(const char* what) {
@@ -98,4 +98,4 @@ void kv_append_q4_rows(uint8_t* k_q4, uint16_t* k_q4s, uint8_t* v_q4, uint16_t* 
     check("kv_append_q4_rows launch");
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

@@ -22,7 +22,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "strata/kernels/native_gr_norm.hpp"
+#include "lamina/kernels/native_gr_norm.hpp"
 
 #include <cuda_runtime.h>
 #include <cmath>
@@ -31,7 +31,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 __device__ __forceinline__ float norm_warp_sum(float value) {
@@ -106,4 +106,4 @@ void native_gr_rms_norm_weighted_repeat(const float* input, const float* gamma, 
         throw std::runtime_error(std::string("native GR RMSNorm launch: ") + cudaGetErrorString(error));
 }
 
-} // namespace strata::kernels
+} // namespace lamina::kernels

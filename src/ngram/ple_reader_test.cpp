@@ -6,9 +6,9 @@
 //
 // Every row the synthetic table holds encodes its own index, so a wrong offset, a straddle mishandled or a
 // dedup slot mixed up shows as a mismatch rather than as plausible data.
-#include "strata/kernels/ngram.hpp"
-#include "strata/ngram/ple_reader.hpp"
-#include "strata/platform/direct_file.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/ngram/ple_reader.hpp"
+#include "lamina/platform/direct_file.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -23,9 +23,9 @@
 #include <thread>
 #include <vector>
 
-namespace ng = strata::ngram;
-namespace k = strata::kernels;
-using strata::platform::now_us;
+namespace ng = lamina::ngram;
+namespace k = lamina::kernels;
+using lamina::platform::now_us;
 
 namespace {
 
@@ -113,7 +113,7 @@ std::string write_format_table(const std::string& dir, const Format& f, uint32_t
     };
     const auto str = [&](const char* s) { return le((uint64_t) std::strlen(s), 8) + std::string(s); };
     std::string head = "GGUF" + le(3u, 4) + le(1ull, 8) + le(1ull, 8);
-    head += str("general.architecture") + le(8u, 4) + str("strata-ple");
+    head += str("general.architecture") + le(8u, 4) + str("lamina-ple");
     head += str("per_layer_token_embd.weight") + le(2u, 4);
     head += le((uint64_t) k::PLE_HEAD_DIM, 8) + le(claimed_rows != 0 ? claimed_rows : (uint64_t) rows, 8);
     head += le(f.gguf_type, 4) + le(0ull, 8);

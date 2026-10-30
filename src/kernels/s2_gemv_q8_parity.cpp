@@ -9,10 +9,10 @@
 //      fixed without being fixed.
 //   3. The measured size of that difference is reported, so the number in the state file is one this test
 //      produces rather than one quoted from elsewhere.
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/s_gemv.hpp"
-#include "strata/kernels/s2_gemv_q8.hpp"
+#include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/s_gemv.hpp"
+#include "lamina/kernels/s2_gemv_q8.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     check(cudaMemcpy(d_codes, codes.data(), codes.size(), cudaMemcpyHostToDevice), "c codes");
     check(cudaMemcpy(d_scales, scales.data(), scales.size() * sizeof(float), cudaMemcpyHostToDevice), "c scales");
 
-    strata::kernels::quantize_q8_0(d_x, d_act, n_in, nullptr);
+    lamina::kernels::quantize_q8_0(d_x, d_act, n_in, nullptr);
 
     // ---- host reference: quantize the activation with the project's own rule, then dot
     std::vector<uint8_t> h_act((size_t) (n_in / 32) * 34);
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
         }
         ref[(size_t) o] = acc;
     }
-    strata::kernels::s2_gemv_q8(d_act, d_codes, d_scales, d_y_q8, n_in, n_out, tpr, nullptr);
+    lamina::kernels::s2_gemv_q8(d_act, d_codes, d_scales, d_y_q8, n_in, n_out, tpr, nullptr);
     std::vector<float> got((size_t) n_out);
     check(cudaMemcpy(got.data(), d_y_q8, got.size() * sizeof(float), cudaMemcpyDeviceToHost), "c y2");
 
@@ -121,12 +121,12 @@ int main(int argc, char** argv) {
     // unrelated activations and the comparison reported 2770%.  The number was a symptom of the fixture, and
     // the fixture is what the check exists to be able to trust.
     std::vector<uint16_t> hx((size_t) n_in);
-    for (long long i = 0; i < n_in; ++i) hx[(size_t) i] = strata::kernels::f16_from_f32(x[(size_t) i]);
+    for (long long i = 0; i < n_in; ++i) hx[(size_t) i] = lamina::kernels::f16_from_f32(x[(size_t) i]);
     uint16_t* d_hx = nullptr;
     check(cudaMalloc(&d_hx, hx.size() * sizeof(uint16_t)), "m hx");
     check(cudaMemcpy(d_hx, hx.data(), hx.size() * sizeof(uint16_t), cudaMemcpyHostToDevice), "c hx");
-    strata::kernels::SForm form{2, -1, 64, strata::kernels::Codebook::Affine, false};
-    strata::kernels::s_gemv_split(d_hx, d_codes, d_scales, nullptr, d_y_fp16, n_in, n_out, form, tpr);
+    lamina::kernels::SForm form{2, -1, 64, lamina::kernels::Codebook::Affine, false};
+    lamina::kernels::s_gemv_split(d_hx, d_codes, d_scales, nullptr, d_y_fp16, n_in, n_out, form, tpr);
     std::vector<float> y16((size_t) n_out);
     check(cudaMemcpy(y16.data(), d_y_fp16, y16.size() * sizeof(float), cudaMemcpyDeviceToHost), "c y1");
 

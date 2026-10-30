@@ -20,10 +20,10 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/q8_1_finite.hpp"
-#include "strata/kernels/bf16_bits.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
 #include "hit_plan.cuh"
 #include "mmvf_multi.cuh"
 #include <cuda_fp16.h>
@@ -34,7 +34,7 @@
 #include <cstdint>
 #include <stdexcept>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 // A float as a uint32 in the same order (sign flipped for positives, all bits for negatives), and back.
 __device__ __forceinline__ unsigned order_key(float f) {
@@ -380,10 +380,10 @@ void verify_router(const VerifyRouterArgs& a, void* stream) {
                        : a.x_out != nullptr ? (a.n_tok * a.n_embd / 4 + VR_THREADS - 1) / VR_THREADS
                                             : 0;
     switch (a.n_tok) {
-#define STRATA_VR(T) \
+#define LAMINA_VR(T) \
     case T: verify_router_kernel<T><<<unsigned(n_copy + a.n_expert), VR_THREADS, 0, st>>>(a, n_copy); break;
-        STRATA_VR(1) STRATA_VR(2) STRATA_VR(3) STRATA_VR(4) STRATA_VR(5) STRATA_VR(6) STRATA_VR(7) STRATA_VR(8)
-#undef STRATA_VR
+        LAMINA_VR(1) LAMINA_VR(2) LAMINA_VR(3) LAMINA_VR(4) LAMINA_VR(5) LAMINA_VR(6) LAMINA_VR(7) LAMINA_VR(8)
+#undef LAMINA_VR
     }
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));

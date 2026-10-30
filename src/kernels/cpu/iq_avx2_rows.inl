@@ -1,17 +1,17 @@
 // src/kernels/cpu/iq_avx2_rows.inl - the row kernels of iq_avx2.cpp.  Not a header: iq_avx2.cpp includes it twice,
 //
-//   STRATA_ROWS_VNNI 0   the AVX2 forms (namespace plain);
-//   STRATA_ROWS_VNNI 1   the same loops with AVX-VNNI (namespace vnni, built with STRATA_AVXVNNI): vpdpwssd for each
+//   LAMINA_ROWS_VNNI 0   the AVX2 forms (namespace plain);
+//   LAMINA_ROWS_VNNI 1   the same loops with AVX-VNNI (namespace vnni, built with LAMINA_AVXVNNI): vpdpwssd for each
 //                        madd + add, vpdpbusd for maddubs + madd(ones).  Integer sums, so the same bits.
 //
-// Every function here is STRATA_ROWS_FN: nothing in the plain copy, GCC/Clang's target("avxvnni") in the VNNI copy, so
+// Every function here is LAMINA_ROWS_FN: nothing in the plain copy, GCC/Clang's target("avxvnni") in the VNNI copy, so
 // the AVX-VNNI intrinsics compile in these functions only and the plain copy stays AVX2 (-mavxvnni on the whole file
 // would let the compiler use the extension anywhere).  MSVC takes the intrinsics under /arch:AVX2.  The VNNI copy is
 // called only where cpu_avxvnni_ok().
 
 // acc + madd(p16, sc).  vpdpwssd is the madd and the add in one uop; both wrap the same way.
-STRATA_ROWS_FN inline __m256i madd_add(__m256i acc, __m256i p16, __m256i sc) {
-#if STRATA_ROWS_VNNI
+LAMINA_ROWS_FN inline __m256i madd_add(__m256i acc, __m256i p16, __m256i sc) {
+#if LAMINA_ROWS_VNNI
     return _mm256_dpwssd_avx_epi32(acc, p16, sc);
 #else
     return _mm256_add_epi32(acc, _mm256_madd_epi16(p16, sc));
@@ -20,25 +20,25 @@ STRATA_ROWS_FN inline __m256i madd_add(__m256i acc, __m256i p16, __m256i sc) {
 
 // Four u8 x s8 products per int32 lane.  vpdpbusd does not saturate where maddubs would, but maddubs cannot here: the
 // u8 side is an IQ4_NL |w| <= 127, so a pair is at most 2 * 127 * 128.
-STRATA_ROWS_FN inline __m256i dot4u(__m256i u8, __m256i s8) {
-#if STRATA_ROWS_VNNI
+LAMINA_ROWS_FN inline __m256i dot4u(__m256i u8, __m256i s8) {
+#if LAMINA_ROWS_VNNI
     return _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), u8, s8);
 #else
     return _mm256_madd_epi16(_mm256_maddubs_epi16(u8, s8), _mm256_set1_epi16(1));
 #endif
 }
 
-STRATA_ROWS_FN inline float ggml_hsum8(__m256 x) {
+LAMINA_ROWS_FN inline float ggml_hsum8(__m256 x) {
     __m128 s = _mm_add_ps(_mm256_extractf128_ps(x, 1), _mm256_castps256_ps128(x));
     s = _mm_add_ps(s, _mm_movehl_ps(s, s));
     s = _mm_add_ss(s, _mm_movehdup_ps(s));
     return _mm_cvtss_f32(s);
 }
 
-template <int NT, bool GGML = false> STRATA_ROWS_FN
+template <int NT, bool GGML = false> LAMINA_ROWS_FN
 inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res);
 
-template <int TY> STRATA_ROWS_FN
+template <int TY> LAMINA_ROWS_FN
 inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K* y) {
     if constexpr (TY == 17) {
         const block_q8_K* act[1] = {y};
@@ -68,7 +68,7 @@ inline float row_dot_ggml_one(const uint8_t* row, int nblocks, const block_q8_K*
     else return ggml_hsum8(accum);
 }
 
-template <int TY> STRATA_ROWS_FN
+template <int TY> LAMINA_ROWS_FN
 void gu_ggml_one(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const block_q8_K* y, float* ff,
                  int r0, int r1) {
     for (int r = r0; r < r1; ++r) {
@@ -78,7 +78,7 @@ void gu_ggml_one(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const
     }
 }
 
-template <int TY, int NT> STRATA_ROWS_FN
+template <int TY, int NT> LAMINA_ROWS_FN
 inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     const int pf = prefetch_distance();
     __m256 accf[NT];
@@ -113,7 +113,7 @@ inline void row_dot(const uint8_t* row, int nblocks, const block_q8_K* const* y,
 // 32-byte load.  The 8 scale bytes become all 16 half-scales with ggml's unpack trick.  The grid lookups
 // stay scalar loads into set_epi64x (ggml does the same).  Every token still only pays a load, a sign,
 // a maddubs, a madd and an add per half, into alternating accumulators.
-template <int NT, bool GGML> STRATA_ROWS_FN
+template <int NT, bool GGML> LAMINA_ROWS_FN
 inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     static const uint8_t bit_sel[32] = {
         1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80, 1, 2, 4, 8, 16, 32, 64, (uint8_t) 0x80,
@@ -197,13 +197,13 @@ inline void row_dot_iq2xs(const uint8_t* row, int nblocks, const block_q8_K* con
     for (int t = 0; t < NT; ++t) res[t] = GGML ? 0.125f * ggml_hsum8(accf[t]) : hsum8(accf[t]);
 }
 
-template <int TY, int NT> STRATA_ROWS_FN
+template <int TY, int NT> LAMINA_ROWS_FN
 inline void row_dot_any(const uint8_t* row, int nblocks, const block_q8_K* const* y, float* res) {
     if constexpr (TY == 17) row_dot_iq2xs<NT>(row, nblocks, y, res);
     else                    row_dot<TY, NT>(row, nblocks, y, res);
 }
 
-template <int TY, int NT> STRATA_ROWS_FN
+template <int TY, int NT> LAMINA_ROWS_FN
 void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, float* const* ff,
              int r0, int r1) {
     const block_q8_K* y[NT];
@@ -217,7 +217,7 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const voi
     }
 }
 
-template <int TY, int NT> STRATA_ROWS_FN
+template <int TY, int NT> LAMINA_ROWS_FN
 void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0, int r1) {
     const block_q8_K* y[NT];
     for (int t = 0; t < NT; ++t) y[t] = (const block_q8_K*) act[t];
@@ -228,7 +228,7 @@ void dot_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act,
     }
 }
 
-template <int TY> STRATA_ROWS_FN
+template <int TY> LAMINA_ROWS_FN
 void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
                 float* const* ff, int r0, int r1) {
     switch (nt) {
@@ -243,7 +243,7 @@ void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n
     }
 }
 
-template <int TY> STRATA_ROWS_FN
+template <int TY> LAMINA_ROWS_FN
 void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0,
                  int r1) {
     switch (nt) {
@@ -259,7 +259,7 @@ void dot_rows_nt(int nt, const uint8_t* w, size_t row_bytes, int n, const void* 
 }
 
 // The decode of each format for a variant: the gathered one (kIq256Gather) for IQ3_XXS, IQ3_S and IQ2_S.
-template <bool G> STRATA_ROWS_FN
+template <bool G> LAMINA_ROWS_FN
 void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act,
              float* const* ff, int r0, int r1) {
     switch (type) {
@@ -273,7 +273,7 @@ void gu_type(int type, int nt, const uint8_t* blob, size_t gu_row, size_t up_off
     }
 }
 
-template <bool G> STRATA_ROWS_FN
+template <bool G> LAMINA_ROWS_FN
 void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out,
               int r0, int r1) {
     switch (type) {
@@ -292,7 +292,7 @@ void dot_type(int type, int nt, const uint8_t* w, size_t row_bytes, int n, const
 // kvalues_iq4nl pshufb decode and the |w| half of the signed x signed product.  Here both are computed once
 // per block; every token then costs a sign, a maddubs, a madd and an fmadd.  The arithmetic is ggml's - only
 // the order of the float additions differs.
-template <int NT> STRATA_ROWS_FN
+template <int NT> LAMINA_ROWS_FN
 void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, float* const* out,
                 int r0, int r1) {
     const __m128i values = _mm_loadu_si128((const __m128i*) kvalues_iq4nl);
@@ -324,7 +324,7 @@ void iq4nl_rows(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* con
     }
 }
 
-STRATA_ROWS_FN void iq4nl_nt(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, int nt,
+LAMINA_ROWS_FN void iq4nl_nt(const uint8_t* w, size_t row_bytes, int n, const block_q8_0* const* y, int nt,
                              float* const* out, int r0, int r1) {
     switch (nt) {
         case 1: iq4nl_rows<1>(w, row_bytes, n, y, out, r0, r1); break;
@@ -338,5 +338,5 @@ STRATA_ROWS_FN void iq4nl_nt(const uint8_t* w, size_t row_bytes, int n, const bl
     }
 }
 
-#undef STRATA_ROWS_VNNI
-#undef STRATA_ROWS_FN
+#undef LAMINA_ROWS_VNNI
+#undef LAMINA_ROWS_FN

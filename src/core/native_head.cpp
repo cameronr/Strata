@@ -1,7 +1,7 @@
-#include "strata/core/native_head.hpp"
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/native_mmvq.hpp"
+#include "lamina/core/native_head.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
 #include <climits>
@@ -9,7 +9,7 @@
 #include <cstring>
 #include <exception>
 
-namespace strata::core {
+namespace lamina::core {
 
 NativeHead::~NativeHead() {
     if (scratch_) cudaFree(scratch_);
@@ -41,18 +41,18 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
         return false;
     }
     try {
-        const strata::GgufModel model(shards);
-        err = strata::check_architecture(model.shard(0));
+        const lamina::GgufModel model(shards);
+        err = lamina::check_architecture(model.shard(0));
         if (!err.empty()) return false;
         size_t at = 0;
-        const strata::TensorInfo* tensor = model.find("output.weight", &at);
-        const strata::GgufFile& gguf = model.shard(at);
-        if (!tensor || !strata::kernels::native_mmvq_supported((int) tensor->type) || tensor->shape.size() != 2 ||
+        const lamina::TensorInfo* tensor = model.find("output.weight", &at);
+        const lamina::GgufFile& gguf = model.shard(at);
+        if (!tensor || !lamina::kernels::native_mmvq_supported((int) tensor->type) || tensor->shape.size() != 2 ||
             tensor->shape[0] != (uint64_t) n_in || tensor->shape[1] != (uint64_t) n_out) {
             err = "native head: expected a natively supported output.weight with the canonical head dimensions";
             return false;
         }
-        const uint64_t bytes = strata::kernels::native_mmvq_weight_bytes((int) tensor->type, (int) n_in, (int) n_out);
+        const uint64_t bytes = lamina::kernels::native_mmvq_weight_bytes((int) tensor->type, (int) n_in, (int) n_out);
         const uint64_t payload = gguf.file_size() - gguf.data_start();
         if (tensor->offset > payload || bytes > payload - tensor->offset) {
             err = "native head: truncated output.weight payload";
@@ -62,7 +62,7 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
         void* scratch = nullptr;
         cudaError_t status = cudaMalloc(&weights, bytes);
         if (status == cudaSuccess)
-            status = cudaMalloc(&scratch, strata::kernels::native_q8_1_bytes((int) n_in, 1));
+            status = cudaMalloc(&scratch, lamina::kernels::native_q8_1_bytes((int) n_in, 1));
         if (status == cudaSuccess)
             status = cudaMemcpy(weights, gguf.tensor_data(*tensor), bytes, cudaMemcpyHostToDevice);
         if (status != cudaSuccess) {
@@ -92,10 +92,10 @@ bool NativeHead::run(const float* mixed, float* logits, void* stream, std::strin
     }
     try {
         if (type_ == 13) {
-            strata::kernels::native_q5_k_f32(weights_, mixed, scratch_, logits, n_in_, n_out_, 1, stream);
+            lamina::kernels::native_q5_k_f32(weights_, mixed, scratch_, logits, n_in_, n_out_, 1, stream);
         } else {
-            strata::kernels::native_quantize_q8_1(mixed, scratch_, n_in_, 1, stream);
-            strata::kernels::native_mmvq(type_, weights_, scratch_, logits, n_in_, n_out_, 1, stream);
+            lamina::kernels::native_quantize_q8_1(mixed, scratch_, n_in_, 1, stream);
+            lamina::kernels::native_mmvq(type_, weights_, scratch_, logits, n_in_, n_out_, 1, stream);
         }
     } catch (const std::exception& error) {
         err = std::string("native head launch: ") + error.what();
@@ -124,17 +124,17 @@ NativeEmbed::~NativeEmbed() {
 
 bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, int64_t n_vocab, std::string& err) {
     try {
-        const strata::GgufModel model(shards);
+        const lamina::GgufModel model(shards);
         size_t at = 0;
-        const strata::TensorInfo* t = model.find("token_embd.weight", &at);
-        const strata::GgufFile& gguf = model.shard(at);
+        const lamina::TensorInfo* t = model.find("token_embd.weight", &at);
+        const lamina::GgufFile& gguf = model.shard(at);
         if (!t || t->shape.size() != 2 || t->shape[0] != (uint64_t) n_embd || t->shape[1] != (uint64_t) n_vocab ||
-            !strata::kernels::iq_supported((int) t->type) || n_embd % 256) {
+            !lamina::kernels::iq_supported((int) t->type) || n_embd % 256) {
             err = "native embedding: token_embd.weight is absent, of another shape, or of a type without a GPU "
                   "dequantizer";
             return false;
         }
-        row_ = strata::kernels::iq_row_bytes((int) t->type, n_embd);
+        row_ = lamina::kernels::iq_row_bytes((int) t->type, n_embd);
         bytes_ = (uint64_t) row_ * (uint64_t) n_vocab;
         if (cudaHostAlloc(&host_, bytes_, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
             // Under WSL2 the driver's pinned/mapped host budget (~1 GiB) can be spent by the GPU contexts
@@ -173,7 +173,7 @@ bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, i
 }
 
 void NativeEmbed::gather_dev(const int32_t* tokens, int64_t n_tok, float* out, void* stream) const {
-    strata::kernels::iq_embed_rows(type_, dev_, row_, tokens, n_tok, n_embd_, out, stream);
+    lamina::kernels::iq_embed_rows(type_, dev_, row_, tokens, n_tok, n_embd_, out, stream);
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

@@ -1,7 +1,7 @@
 """tools/qwen35/compare_dumps.py - two runs of the Qwen3.6 parity dumps against each other (e.g. llama.cpp GPU vs
-llama.cpp CPU: the noise floor the strata-q36ref comparison is judged against).
+llama.cpp CPU: the noise floor the lamina-q36ref comparison is judged against).
 
-    python tools/qwen35/compare_dumps.py DIR_A KIND_A DIR_B KIND_B      (KIND: llama or strata)
+    python tools/qwen35/compare_dumps.py DIR_A KIND_A DIR_B KIND_B      (KIND: llama or lamina)
 Per prompt: greedy tokens equal up to the answer's end (llama.cpp's first <|im_end|> in run A), the first divergence's
 top-1/top-2 margins, and the layer outputs' median and max ||a-b||/||b|| over the positions before the divergence.
 """
@@ -16,7 +16,7 @@ N_EMBD, N_LAYER, EOS = 2048, 40, 248046
 
 
 def gen_of(d: Path, tag: str, kind: str) -> list[int]:
-    f = d / (f"{tag}.strata.gen" if kind == "strata" else f"{tag}.llama.log")
+    f = d / (f"{tag}.lamina.gen" if kind == "lamina" else f"{tag}.llama.log")
     for line in f.read_text(encoding="utf-8").splitlines():
         if line.startswith("gen:"):
             return [int(x) for x in line.split(":", 1)[1].split()]

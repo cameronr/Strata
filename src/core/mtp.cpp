@@ -1,28 +1,28 @@
-// src/core/mtp.cpp - see include/strata/core/mtp.hpp.
-#include "strata/core/mtp.hpp"
+// src/core/mtp.cpp - see include/lamina/core/mtp.hpp.
+#include "lamina/core/mtp.hpp"
 
-#include "strata/core/cuda_host.hpp"
-#include "strata/core/native_head.hpp"
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/draft_proxy.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/gr.hpp"
-#include "strata/kernels/kv_q8.hpp"
-#include "strata/kernels/native_moe.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_qsa.hpp"
-#include "strata/kernels/native_rope.hpp"
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/rope.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
-#include "strata/kernels/sampler.hpp"
-#include "strata/kernels/shared_expert.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/core/native_head.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/draft_proxy.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/gr.hpp"
+#include "lamina/kernels/kv_q8.hpp"
+#include "lamina/kernels/native_moe.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_qsa.hpp"
+#include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/rope.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/sampler.hpp"
+#include "lamina/kernels/shared_expert.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -35,7 +35,7 @@
 #include <sstream>
 #include <vector>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 constexpr float EPS = 1e-6f;
@@ -94,7 +94,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     ss_ = &ss;
     max_t_ = max_t;
     rt_dir_ = rt_dir;
-    if (max_t < 1 || max_t > strata::kernels::kVerifyMaxT) { err = "mtp: max_t out of range"; return false; }
+    if (max_t < 1 || max_t > lamina::kernels::kVerifyMaxT) { err = "mtp: max_t out of range"; return false; }
     // ---- the index and the dense weights
     {
         std::ifstream idx(rt_dir + "/dense.txt");
@@ -117,17 +117,17 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     // ---- the 512 routed experts, one blob each: raw GGUF blocks [gate | up | down] in the formats experts.txt names
     //      (the ggml type ids of gate/up and down), or without it the Q2_0 blob layout of cpu/expert.hpp
     {
-        blob_ = strata::kernels::cpu::BLOB;
+        blob_ = lamina::kernels::cpu::BLOB;
         if (std::ifstream fmt(rt_dir + "/experts.txt"); fmt) {
             int gu = -1, dn = -1;
             fmt >> gu >> dn;
-            if (!strata::kernels::native_expert_supported(gu, dn, g.n_embd, g.n_ff)) {
+            if (!lamina::kernels::native_expert_supported(gu, dn, g.n_embd, g.n_ff)) {
                 err = "mtp: experts.txt names formats the GPU expert kernels lack";
                 return false;
             }
             // the fast kernels under either --expert-math: drafts are verified, and both runs of a comparison
             // compute them here
-            nat_ = strata::kernels::native_expert_layout(gu, dn, g.n_embd, g.n_ff);
+            nat_ = lamina::kernels::native_expert_layout(gu, dn, g.n_embd, g.n_ff);
             blob_ = nat_.bytes;
         }
         const uint64_t bytes = (uint64_t) g.n_expert * blob_;
@@ -151,7 +151,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     for (const char* n : required) if (!q8(n)) { err = std::string("mtp: ") + n + " is missing (q8_0)"; return false; }
 
     // ---- the layer's own K/V (dense attention: no indexer state is read), FP16 or INT8 (qsa_draft_kv_format)
-    const strata::kernels::QsaShapes s = strata::kernels::qsa_shapes(g);
+    const lamina::kernels::QsaShapes s = lamina::kernels::qsa_shapes(g);
     const int64_t max_cells = ss.qsa_states[0].max_cells;
     const uint64_t sb = qsa_state_bytes(g, max_cells, false, qsa_draft_kv_format());
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
@@ -166,7 +166,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     // ---- buffers
     window_ = (window > 0 && window < max_cells) ? window : 0;
     cap_ = (((window_ > 0 ? window_ : max_cells) + 63) / 64) * 64;
-    attn_scratch_floats_ = (int64_t) strata::kernels::qsa_decode_attn_scratch_floats(cap_, s);
+    attn_scratch_floats_ = (int64_t) lamina::kernels::qsa_decode_attn_scratch_floats(cap_, s);
     const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
     const uint64_t NH = (uint64_t) g.n_head, HD = (uint64_t) g.head_dim, NKV = (uint64_t) g.n_head_kv;
     const uint64_t R2 = 2 * T;   // step/pos rows: T catch-up rows + up to T-2 chain steps
@@ -185,8 +185,8 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         hn_ = b.take<float>(T * HC * N); h2_ = b.take<float>(T * HC * N);
         mixed_ = b.take<float>(T * N); inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
         lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC); bo_ = b.take<float>(T * N);
-        grs_ = (float*) b.take<uint8_t>(strata::kernels::fused_gr_scratch_bytes());
-        xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes((int) (NH * HD), 8));
+        grs_ = (float*) b.take<uint8_t>(lamina::kernels::fused_gr_scratch_bytes());
+        xq_ = b.take<uint8_t>(lamina::kernels::native_q8_1_bytes((int) (NH * HD), 8));
         qfull_ = b.take<float>(T * NH * 2 * HD); qcur_ = b.take<float>(T * NH * HD);
         kcur_ = b.take<float>(T * NKV * HD); vcur_ = b.take<float>(T * NKV * HD);
         attn32_ = b.take<float>(T * NH * HD);
@@ -202,14 +202,14 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         rseq_ = b.take<uint32_t>(4);
         rcount_ = b.take<unsigned>(4);
         hit_scratch_ = b.take<uint8_t>(std::max<uint64_t>(
-            strata::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
-            strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
-        sh_scratch_ = (float*) b.take<uint8_t>(strata::kernels::shared_expert_scratch_bytes(g.n_ff));
+            lamina::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
+            lamina::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
+        sh_scratch_ = (float*) b.take<uint8_t>(lamina::kernels::shared_expert_scratch_bytes(g.n_ff));
         x_bf16_ = b.take<uint16_t>(N);
         out_ids_ = b.take<int32_t>(T + 4);
         probs_ = b.take<float>(T + 4);
-        arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
-        top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));
+        arg_scratch_ = b.take<uint8_t>(lamina::kernels::argmax_rows_scratch_bytes((int) T));
+        top_scratch_ = b.take<uint8_t>(lamina::kernels::row_top_prob_scratch_bytes((int) T));
         dummy_inj_ = b.take<float>(HC);
     };
     Bump count;
@@ -279,23 +279,23 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
                 return false;
             }
             cudaMemcpy(dvocab_, raw.data(), raw.size(), cudaMemcpyHostToDevice);
-            strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
+            lamina::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
             cudaDeviceSynchronize();
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
             std::fprintf(stderr, "lamina mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
-            // its 2-bit copy finds each draft's row (STRATA_DRAFT_PROXY=0: the exact head over every row)
-            const char* px = std::getenv("STRATA_DRAFT_PROXY");
+            // its 2-bit copy finds each draft's row (LAMINA_DRAFT_PROXY=0: the exact head over every row)
+            const char* px = std::getenv("LAMINA_DRAFT_PROXY");
             const bool copy = px == nullptr || std::atoi(px) != 0;
-            if (copy && strata::kernels::draft_proxy_supported(head->type(), (int) g_->n_embd)) {
-                const size_t pb = strata::kernels::draft_proxy_bytes(n_dvocab_);
-                const size_t sb = strata::kernels::draft_proxy_scratch_bytes(n_dvocab_);
+            if (copy && lamina::kernels::draft_proxy_supported(head->type(), (int) g_->n_embd)) {
+                const size_t pb = lamina::kernels::draft_proxy_bytes(n_dvocab_);
+                const size_t sb = lamina::kernels::draft_proxy_scratch_bytes(n_dvocab_);
                 if (cudaMalloc((void**) &proxy_, pb) != cudaSuccess || cudaMalloc(&proxy_scratch_, sb) != cudaSuccess) {
                     err = "mtp: the draft head's 2-bit copy does not fit";
                     return false;
                 }
                 cudaMemset(proxy_scratch_, 0, sb);
-                strata::kernels::draft_proxy_pack(head->type(), dhead_, n_dvocab_, proxy_, nullptr);
+                lamina::kernels::draft_proxy_pack(head->type(), dhead_, n_dvocab_, proxy_, nullptr);
                 cudaDeviceSynchronize();
                 vram_ += pb + sb;
             } else if (copy) {   // a head type or width the copy does not take
@@ -317,10 +317,10 @@ bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::stri
 }
 
 bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const ModelGeometry& g = *g_;
     const int64_t N = g.n_embd, HC = g.hc, NH = g.n_head, HD = g.head_dim, NKV = g.n_head_kv;
-    const QsaShapes s = strata::kernels::qsa_shapes(g);
+    const QsaShapes s = lamina::kernels::qsa_shapes(g);
     const int32_t* step = step_ + row0 * 4;
     const int32_t* pos = pos_ + row0 * NH;
     try {
@@ -371,19 +371,19 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
 }
 
 void MtpDrafter::norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs) {
-    using namespace strata::kernels;
-    const QsaShapes s = strata::kernels::qsa_shapes(*g_);
+    using namespace lamina::kernels;
+    const QsaShapes s = lamina::kernels::qsa_shapes(*g_);
     native_qsa_rms_norm_weighted(data, gamma, data, cols, rows, EPS, cs);
     native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), p, cs);
 }
 
 bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
     const int T = 1;
     const int64_t N = g.n_embd, HC = g.hc, K = ss.k, NH = g.n_head, HD = g.head_dim;
-    const QsaShapes s = strata::kernels::qsa_shapes(g);
+    const QsaShapes s = lamina::kernels::qsa_shapes(g);
     const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
     const int32_t* step = step_ + step_row * 4;
     const int32_t* pos = pos_ + step_row * NH;
@@ -515,7 +515,7 @@ bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char*
 
 bool MtpDrafter::capture_round(int T, std::string& err) {
     if (round_exec_[T]) return true;
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
     bool ok = true;
@@ -544,7 +544,7 @@ bool MtpDrafter::capture_round(int T, std::string& err) {
 // residual and token (left in Rin_[0] / tok_[0] by mtp_select); draft j and its probability to the mapped outputs.
 bool MtpDrafter::capture_step(int j, std::string& err) {
     if (step_exec_[j]) return true;
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
     const int row = max_t_ + j - 1;
     if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
@@ -647,4 +647,4 @@ bool MtpDrafter::draft_first(const float* R_row, int32_t token, int64_t cell, in
     return draft(1, &token, cell, 0, drafts, err, probs, min_p, n_drafts);
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

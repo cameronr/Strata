@@ -1,6 +1,6 @@
-// src/ngram/ple_reader.cpp - see include/strata/ngram/ple_reader.hpp.
-#include "strata/ngram/ple_reader.hpp"
-#include "strata/platform/aux_cpus.hpp"
+// src/ngram/ple_reader.cpp - see include/lamina/ngram/ple_reader.hpp.
+#include "lamina/ngram/ple_reader.hpp"
+#include "lamina/platform/aux_cpus.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -12,7 +12,7 @@
 #include <thread>
 #include <unordered_map>
 
-namespace strata::ngram {
+namespace lamina::ngram {
 
 using platform::Completion;
 using platform::DirectFile;
@@ -364,7 +364,7 @@ bool PleReader::open(const std::string& path, uint64_t table_offset, uint64_t n_
     impl_->threaded = io_thread;
     if (io_thread) {
         try {
-            impl_->worker = std::thread([this] { strata::aux_cpus::pin_current_thread(); impl_->worker_loop(); });
+            impl_->worker = std::thread([this] { lamina::aux_cpus::pin_current_thread(); impl_->worker_loop(); });
         } catch (const std::exception& e) {
             err = std::string("PleReader: cannot create I/O worker: ") + e.what();
             close();
@@ -545,4 +545,4 @@ void PleReader::reset_stats() {
 uint64_t PleReader::cache_capacity() const { return impl_->cache.sets * WAYS; }
 uint64_t PleReader::cache_size() const { return impl_->cache.used; }
 
-}  // namespace strata::ngram
+}  // namespace lamina::ngram

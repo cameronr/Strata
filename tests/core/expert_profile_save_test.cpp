@@ -7,7 +7,7 @@
 //
 // With files: blend_learned_profile over a run's counts (scratch/bh/patch_dump.py's dump) against a profile ranked from
 // them by scratch/bh/rank.py blend:1.
-#include "strata/core/expert_cache.hpp"
+#include "lamina/core/expert_cache.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -40,12 +40,12 @@ int main(int argc, char** argv) {
         int64_t slots = 0;
         std::string err;
         const int64_t layers = 48, experts = n / 48;
-        if (!ok || !strata::core::read_expert_profile(argv[2], layers, experts, prior, slots, err) ||
-            !strata::core::read_expert_profile(argv[3], layers, experts, want, slots, err)) {
+        if (!ok || !lamina::core::read_expert_profile(argv[2], layers, experts, prior, slots, err) ||
+            !lamina::core::read_expert_profile(argv[3], layers, experts, want, slots, err)) {
             std::printf("FAIL: %s\n", err.c_str());
             return 1;
         }
-        const bool same = strata::core::blend_learned_profile(layers, experts, heat, prior) == want;
+        const bool same = lamina::core::blend_learned_profile(layers, experts, heat, prior) == want;
         std::puts(same ? "expert_profile_save_test: the blend is rank.py's" : "FAIL: the blend differs from rank.py's");
         return same ? 0 : 1;
     }
@@ -59,21 +59,21 @@ int main(int argc, char** argv) {
     heat[11] = 9.0;               // (2, 3): the hottest, but not resident
     heat[0] = 3.0;
     const std::vector<Pair> prior = {{2, 0}, {1, 3}, {0, 1}};   // a profile that ranks three pairs
-    const std::vector<Pair> r = strata::core::rank_learned_profile(L, E, resident, heat, prior);
+    const std::vector<Pair> r = lamina::core::rank_learned_profile(L, E, resident, heat, prior);
     check(r.size() == 12, "every pair is ranked");
     const std::vector<Pair> head = {{1, 1}, {0, 2}, {2, 3}, {0, 0}, {2, 0}, {1, 3}, {0, 1}, {0, 3}};
     for (size_t i = 0; i < head.size() && i < r.size(); ++i)
         check(r[i] == head[i], "resident by heat, then the rest by heat, then the prior, then the index");
     // no counts at all: the resident ones, then the prior's order
-    const std::vector<Pair> r0 = strata::core::rank_learned_profile(L, E, resident, {}, prior);
+    const std::vector<Pair> r0 = lamina::core::rank_learned_profile(L, E, resident, {}, prior);
     check(r0.size() == 12 && r0[0] == Pair(0, 2) && r0[1] == Pair(1, 1) && r0[2] == Pair(2, 0) &&
           r0[3] == Pair(1, 3) && r0[4] == Pair(0, 1) && r0[5] == Pair(0, 0), "without heat: resident, then prior");
 
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "strata_profile_save_test";
+    const std::filesystem::path dir = std::filesystem::temp_directory_path() / "lamina_profile_save_test";
     std::filesystem::create_directories(dir);
     const std::string path = (dir / "learned.bin").string();
     std::string err;
-    check(strata::core::write_expert_profile(path, L, E, r, err), "written");
+    check(lamina::core::write_expert_profile(path, L, E, r, err), "written");
     check(!std::filesystem::exists(path + ".tmp"), "no temporary file left");
     // the bytes make_profile.write_profile would write for the same ranking
     std::vector<uint8_t> want(4);
@@ -93,13 +93,13 @@ int main(int argc, char** argv) {
     check(got == want, "the file is make_profile.py's format, byte for byte");
     std::vector<Pair> back;
     int64_t slots = 0;
-    check(strata::core::read_expert_profile(path, L, E, back, slots, err) && back == r && slots == 12,
+    check(lamina::core::read_expert_profile(path, L, E, back, slots, err) && back == r && slots == 12,
           "read back by the loader");
     // a second save replaces the first (the rename over an existing file)
-    check(strata::core::write_expert_profile(path, L, E, r0, err), "written again");
-    check(strata::core::read_expert_profile(path, L, E, back, slots, err) && back == r0, "replaced");
-    check(!strata::core::write_expert_profile(path, L, E, {{3, 0}}, err), "a pair out of range is refused");
-    check(strata::core::read_expert_profile(path, L, E, back, slots, err) && back == r0,
+    check(lamina::core::write_expert_profile(path, L, E, r0, err), "written again");
+    check(lamina::core::read_expert_profile(path, L, E, back, slots, err) && back == r0, "replaced");
+    check(!lamina::core::write_expert_profile(path, L, E, {{3, 0}}, err), "a pair out of range is refused");
+    check(lamina::core::read_expert_profile(path, L, E, back, slots, err) && back == r0,
           "a refused save keeps the file");
     std::filesystem::remove_all(dir);
 
@@ -107,16 +107,16 @@ int main(int argc, char** argv) {
     // shares e1 0.75, e3 0.25 -> scores e1 0.87, e2 0.48, e3 0.41, e0 0.24
     const std::vector<Pair> prior1 = {{0, 2}, {0, 0}, {0, 3}, {0, 1}};
     const std::vector<double> heat1 = {0.0, 6.0, 0.0, 2.0};
-    check(strata::core::blend_learned_profile(1, 4, heat1, prior1) == std::vector<Pair>{{0, 1}, {0, 2}, {0, 3}, {0, 0}},
+    check(lamina::core::blend_learned_profile(1, 4, heat1, prior1) == std::vector<Pair>{{0, 1}, {0, 2}, {0, 3}, {0, 0}},
           "the blend: counted and estimated shares added");
-    check(strata::core::blend_learned_profile(1, 4, {}, prior1) == prior1, "the blend without counts: the prior");
-    check(strata::core::blend_learned_profile(1, 4, heat1, prior1, 0.0) ==
+    check(lamina::core::blend_learned_profile(1, 4, {}, prior1) == prior1, "the blend without counts: the prior");
+    check(lamina::core::blend_learned_profile(1, 4, heat1, prior1, 0.0) ==
               std::vector<Pair>{{0, 1}, {0, 3}, {0, 2}, {0, 0}},
           "the blend at w 0: the counts, then the prior");
     // two layers ranked across: layer 1's shares outrank layer 0's prior-only pairs
     const std::vector<Pair> prior2 = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
     const std::vector<double> heat2 = {0.0, 0.0, 0.0, 5.0};
-    const std::vector<Pair> b2 = strata::core::blend_learned_profile(2, 2, heat2, prior2);
+    const std::vector<Pair> b2 = lamina::core::blend_learned_profile(2, 2, heat2, prior2);
     check(b2.size() == 4 && b2[0] == Pair(1, 1) && b2[1] == Pair(0, 0), "the blend ranks across layers by score");
     if (fails == 0) std::puts("expert_profile_save_test: OK");
     return fails == 0 ? 0 : 1;

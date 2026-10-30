@@ -3,49 +3,49 @@
 // the CPU pool.  Generate mode reads pretokenized ids (--tokens) and prints the tokens it decodes; --serve keeps
 // the model loaded and takes requests on stdin (serve/server.py speaks to it).
 
-#include "strata/artifact/gguf_split.hpp"
-#if defined(STRATA_HAVE_QWEN35)
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/qwen35/engine.hpp"
+#include "lamina/artifact/gguf_split.hpp"
+#if defined(LAMINA_HAVE_QWEN35)
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/qwen35/engine.hpp"
 #endif
-#include "strata/program/engine.hpp"
-#include "strata/program/serve_io.hpp"
-#include "strata/core/adaptive_tier.hpp"
-#include "strata/core/expert_cache.hpp"
-#include "strata/core/gpu_select.hpp"
-#include "strata/core/second_gpu.hpp"
-#include "strata/core/split_head.hpp"
-#include "strata/core/expert_source.hpp"
-#include "strata/core/layer.hpp"
-#include "strata/core/layout.hpp"
-#include "strata/core/session.hpp"
-#include "strata/core/weights.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/pool.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/ngram.hpp"
-#include "strata/kernels/rope_scaling.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
-#include "strata/kernels/sampler.hpp"
-#include "strata/kernels/shared_expert.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/mrope.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_select.hpp"
-#include "strata/kernels/verify_kernels.hpp"
-#include "strata/core/native_head.hpp"
-#include "strata/core/verify.hpp"
-#include "strata/core/mtp.hpp"
-#include "strata/core/prompt_cache.hpp"
-#include "strata/prefill/experts.hpp"
-#include "strata/prefill/prefill.hpp"
-#include "strata/prefill/split.hpp"
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/spec/suffix_drafter.hpp"
-#include "strata/core/native_dense.hpp"
-#include "strata/core/pack_image.hpp"
-#include "strata/platform/console_quit.hpp"
+#include "lamina/program/engine.hpp"
+#include "lamina/program/serve_io.hpp"
+#include "lamina/core/adaptive_tier.hpp"
+#include "lamina/core/expert_cache.hpp"
+#include "lamina/core/gpu_select.hpp"
+#include "lamina/core/second_gpu.hpp"
+#include "lamina/core/split_head.hpp"
+#include "lamina/core/expert_source.hpp"
+#include "lamina/core/layer.hpp"
+#include "lamina/core/layout.hpp"
+#include "lamina/core/session.hpp"
+#include "lamina/core/weights.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/kernels/rope_scaling.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/sampler.hpp"
+#include "lamina/kernels/shared_expert.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/qsa_select.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
+#include "lamina/core/native_head.hpp"
+#include "lamina/core/verify.hpp"
+#include "lamina/core/mtp.hpp"
+#include "lamina/core/prompt_cache.hpp"
+#include "lamina/prefill/experts.hpp"
+#include "lamina/prefill/prefill.hpp"
+#include "lamina/prefill/split.hpp"
+#include "lamina/kernels/f16_bits.hpp"
+#include "lamina/spec/suffix_drafter.hpp"
+#include "lamina/core/native_dense.hpp"
+#include "lamina/core/pack_image.hpp"
+#include "lamina/platform/console_quit.hpp"
 
 #include <cuda_runtime.h>
 
@@ -73,7 +73,7 @@
 #include <vector>
 #include <array>
 
-using strata::program::serve_print;   // the --serve protocol's replies (serve_io.hpp)
+using lamina::program::serve_print;   // the --serve protocol's replies (serve_io.hpp)
 
 namespace {
 
@@ -202,7 +202,7 @@ struct Options {
     /// The prompt path in two stages (prefill/split.hpp): the second GPU runs each chunk's layers from this one on
     /// while the main GPU runs the next chunk (0: off).  Prompts of more than one chunk.
     double prompt_split = 0.0;
-    /// The elastic K/V (--kv-grow, STRATA_KV_GROW=1): the K/V takes VRAM as the context grows, the expert cache the rest.
+    /// The elastic K/V (--kv-grow, LAMINA_KV_GROW=1): the K/V takes VRAM as the context grows, the expert cache the rest.
     bool kv_grow = false;
     bool hc_q8 = false;   ///< the hyper-connection matrices only in 8 bits (core::HcQ8)
     double head_split = 0.45;                ///< the second GPU's share of the head's rows (0: all on the main GPU)
@@ -221,7 +221,7 @@ struct Options {
     /// 0 = off.
     int spec_lookup = 0;
     /// The verify windows' capacity: --spec, or the kernels' maximum with prompt lookup.
-    int max_window() const { return spec_lookup > 0 ? std::max(spec, strata::kernels::kVerifyMaxT) : spec; }
+    int max_window() const { return spec_lookup > 0 ? std::max(spec, lamina::kernels::kVerifyMaxT) : spec; }
     /// Stop when the model emits an end-of-turn token (<|endoftext|> 248044, <|im_end|> 248046, or --eos-ids).
     bool stop_eos = false;
     std::vector<int64_t> eos_ids = {248044, 248046};
@@ -392,9 +392,9 @@ void usage() {
                  "                       them from the drive.  Off by default\n"
                  "  --kv-grow            with --serve: the K/V takes VRAM only for the cells the requests\n"
                  "                       reach and the expert cache holds the rest, giving slots up as a conversation\n"
-                 "                       grows and taking them back after (STRATA_KV_GROW=1/0 too).  Default: the\n"
+                 "                       grows and taking them back after (LAMINA_KV_GROW=1/0 too).  Default: the\n"
                  "                       whole --max-context allocated at start\n"
-                 "  --no-kv-grow         the whole --max-context allocated at start, whatever STRATA_KV_GROW says\n"
+                 "  --no-kv-grow         the whole --max-context allocated at start, whatever LAMINA_KV_GROW says\n"
                  "  --hc-q8              with --native: the hyper-connection projections only in 8 bits (int8, an\n"
                  "                       f16 scale a 32: the GGUF's Q8_0 as stored, BF16 ones rounded so); the verify\n"
                  "                       windows read them, the prompt path takes them in BF16 a layer at a time\n"
@@ -472,7 +472,7 @@ void exit_on_cuda_fault() {
 
 /// The pool's adapter plus the wall-clock it spent, so the report can say how much of the token was the CPU.
 struct Drive {
-    strata::core::ExpertDispatch d;
+    lamina::core::ExpertDispatch d;
     double cpu_ms = 0;
     int64_t calls = 0;
     int64_t records = 0;   // --dump-routing's
@@ -489,9 +489,9 @@ struct Drive {
     /// window's moves are staged before it (`drive_window`).  Without a second GPU the pieces cannot carry what the
     /// tier moves (the CPU takes every miss; pieces during the pool too slowed its RAM reads): `burst`, a window's
     /// start sends all the queued moves, and an update waits for the previous one's.
-    strata::core::AdaptiveTier* tier1 = nullptr;
+    lamina::core::AdaptiveTier* tier1 = nullptr;
     /// Where the host and the pool's workers run: checked before each window, once a second (CorePlacement::tick).
-    strata::kernels::cpu::CorePlacement* placement = nullptr;
+    lamina::kernels::cpu::CorePlacement* placement = nullptr;
     bool burst = false;
     std::vector<double> ring_us;   // by window size and layer
     Clock::time_point rows_at{};   // this window's last CPU rows (none yet: the epoch)
@@ -502,7 +502,7 @@ struct Drive {
     /// they held up the prefetch copies.  An update is ranked at a window's tail, and each tier's copies go out as far
     /// as they end before the next window's first pool (`gap_ms`, a running average of that gap, at that tier's
     /// measured copy rate), the rest at the last tail before the next update.
-    std::vector<strata::core::AdaptiveTier*> paced;
+    std::vector<lamina::core::AdaptiveTier*> paced;
     double gap_ms = 0;
     Clock::time_point tail_at{};                   // the last window's CPU rows done
     std::vector<Clock::time_point> copies_end;     // per paced tier: the gap's queued copies end
@@ -529,7 +529,7 @@ struct Drive {
 /// The second GPU's prefetch from a layer's predicted routing (Verifier::set_predict).
 void drive_predict(void* user, int64_t layer, const int32_t* ids, const float* w, int64_t n_tok, int64_t k) {
     Drive* t = (Drive*) user;
-    strata::core::expert_prefetch_multi(t->d, layer, ids, w, n_tok, k);
+    lamina::core::expert_prefetch_multi(t->d, layer, ids, w, n_tok, k);
 }
 
 // The first tier's piece ends this long before the next ring: the router (20-30 us), the doorbell, and the copy's
@@ -551,7 +551,7 @@ void drive_window(Drive* t, int T) {
         const std::string moved = t->placement->tick(*t->d.pool);
         if (!moved.empty()) std::fprintf(stderr, "lamina: %s\n", moved.c_str());
     }
-    for (strata::core::AdaptiveTier* p : t->paced) p->apply_pending(false);
+    for (lamina::core::AdaptiveTier* p : t->paced) p->apply_pending(false);
     if (t->tier1 == nullptr) return;
     t->tier1->apply_pending(false);
     if (t->burst) {   // all of them, at once
@@ -584,7 +584,7 @@ void drive_rows_in(void* user, int64_t layer) {
 /// link and copy engine, at its own rate.
 bool pump_gap(Drive* t, std::string& err, bool all = false) {
     for (size_t i = 0; i < t->paced.size(); ++i) {
-        strata::core::AdaptiveTier* p = t->paced[i];
+        lamina::core::AdaptiveTier* p = t->paced[i];
         Clock::time_point& end = t->copies_end[i];
         const Clock::time_point start = std::max(Clock::now(), end);
         // 1.3 of the gap: the moves may reach into the next window's first pool, as many as the gap's own length is
@@ -643,7 +643,7 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const fl
         const double gap = std::chrono::duration<double, std::milli>(a - t->tail_at).count();
         if (gap < 20.0) t->gap_ms = t->gap_ms > 0 ? 0.8 * t->gap_ms + 0.2 * gap : gap;
     }
-    strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
+    lamina::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out);
     t->rows_at = Clock::now();
     t->cpu_ms += std::chrono::duration<double, std::milli>(t->rows_at - a).count();
     ++t->calls;
@@ -659,11 +659,11 @@ void drive_pool_multi(void* user, const float* x_f, const int32_t* ids, const fl
         }
 }
 
-/// STRATA_TRACE=1: the VRAM left at a step of the startup (finds what fills the card after the cache is sized).
-/// STRATA_TRACE=2 also waits for the device at each mark and names the first step after which it reports an error:
+/// LAMINA_TRACE=1: the VRAM left at a step of the startup (finds what fills the card after the cache is sized).
+/// LAMINA_TRACE=2 also waits for the device at each mark and names the first step after which it reports an error:
 /// a sticky failure that surfaces in a later, unrelated call is pinned to the step that ran the faulting work.
 void mem_mark(const char* where) {
-    static const char* const env = std::getenv("STRATA_TRACE");
+    static const char* const env = std::getenv("LAMINA_TRACE");
     if (env == nullptr) return;
     size_t free_b = 0, total_b = 0;
     cudaMemGetInfo(&free_b, &total_b);
@@ -718,7 +718,7 @@ static cudaError_t res_put(int32_t* dst, const std::vector<int32_t>& res) {
 /// buffers, while at least 128 stay.  `lend` takes their experts out of the residency table (the prompt path
 /// streams them instead), `give_back` copies them in again from the arena once the prompt is done.
 struct SlotLoan {
-    strata::core::ExpertCache* cache = nullptr;
+    lamina::core::ExpertCache* cache = nullptr;
     std::vector<int32_t>* res = nullptr;
     int32_t* d_res = nullptr;   // the table's device copy, or null
     int device = 0;             // the cache's GPU; `main_device` is current again after `give_back`
@@ -747,17 +747,17 @@ struct SlotLoan {
         for (size_t i = 0; i < r.size(); ++i)
             if (r[i] >= first) {
                 lent.emplace_back((int32_t) i, r[i]);
-                r[i] = strata::core::kNotResident;
+                r[i] = lamina::core::kNotResident;
             }
         if (d_res != nullptr) res_put(d_res, r);
     }
     /// After the borrower's last use: its GPU work is waited for first.
-    bool give_back(strata::core::ExpertSource& src, int64_t n_expert, std::string& err) {
+    bool give_back(lamina::core::ExpertSource& src, int64_t n_expert, std::string& err) {
         if (lent.empty()) return true;
         cudaSetDevice(device);
         cudaDeviceSynchronize();
         bool ok = true;
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         for (const auto& [i, slot] : lent) {
             const int64_t l = i / n_expert;
             const uint8_t* b = src.blob(l, i % n_expert);
@@ -798,7 +798,7 @@ static void add_prompt_usage(std::vector<T>& usage, const std::vector<uint32_t>&
 /// holds or takes back; this loan's are added to it.
 static std::vector<std::array<int32_t, 3>> refill_plan(const SlotLoan& loan, const std::vector<uint32_t>* routed,
                                                        std::vector<uint8_t>& taken, int64_t n_expert,
-                                                       strata::core::ExpertSource& src) {
+                                                       lamina::core::ExpertSource& src) {
     std::vector<std::array<int32_t, 3>> out;
     std::vector<std::pair<int32_t, int32_t>> lent = loan.lent;   // (residency index, slot), by layer
     std::sort(lent.begin(), lent.end());
@@ -870,7 +870,7 @@ struct DraftDump {
         cudaMemcpy(rows.data(), dev, rows.size() * 4, cudaMemcpyDeviceToHost);
         for (size_t i = 0; i < rows.size(); ++i) {
             if (std::fabs(rows[i]) > 65000.0f) ++overflow;
-            h16[i] = strata::kernels::f16_from_f32(rows[i]);
+            h16[i] = lamina::kernels::f16_from_f32(rows[i]);
         }
         std::fwrite(h16.data(), 2, h16.size(), r16);
         positions += n;
@@ -908,11 +908,11 @@ struct DraftDump {
 /// The batched prompt path's device buffers on each GPU: expert-cache slots lent for every prompt, as many as its
 /// chunk needs, else allocated once for the longest chunk.
 struct PromptBuffers {
-    strata::prefill::Prefill* prefill = nullptr;
-    strata::prefill::ExpertRunner* offload = nullptr;   // the second GPU's share, or null
-    strata::prefill::PromptSplit* split = nullptr;      // --prompt-split, or null
-    const strata::core::ModelGeometry* g = nullptr;
-    const strata::core::SessionState* ss = nullptr;
+    lamina::prefill::Prefill* prefill = nullptr;
+    lamina::prefill::ExpertRunner* offload = nullptr;   // the second GPU's share, or null
+    lamina::prefill::PromptSplit* split = nullptr;      // --prompt-split, or null
+    const lamina::core::ModelGeometry* g = nullptr;
+    const lamina::core::SessionState* ss = nullptr;
     SlotLoan loan, loan2;   // each GPU's cache (a null cache lends nothing)
     bool lend = false, lend2 = false;
     void* split_region = nullptr;   // take's region of the second GPU's loan for the split (null: none this prompt)
@@ -921,9 +921,9 @@ struct PromptBuffers {
     /// After the prompt path and its second GPU's runner have been initialized.
     bool init(int64_t max_chunk, bool borrow, std::string& err) {
         lend = borrow && loan.cache != nullptr && loan.res != nullptr && !loan.res->empty() &&
-               loan.plan(strata::prefill::Prefill::bytes_needed(*g, *ss, max_chunk, offload != nullptr));
+               loan.plan(lamina::prefill::Prefill::bytes_needed(*g, *ss, max_chunk, offload != nullptr));
         lend2 = offload != nullptr && borrow && loan2.cache != nullptr && loan2.res != nullptr && !loan2.res->empty() &&
-                loan2.plan(strata::prefill::ExpertRunner::bytes_needed(max_chunk, g->n_expert, true, true));
+                loan2.plan(lamina::prefill::ExpertRunner::bytes_needed(max_chunk, g->n_expert, true, true));
         return (lend || prefill->bind(nullptr, 0, max_chunk, err)) &&
                (offload == nullptr || lend2 || offload->bind(nullptr, 0, max_chunk, err));
     }
@@ -954,20 +954,20 @@ struct PromptBuffers {
         return true;
     }
     /// After it: the lent slots refilled.
-    bool give_back(strata::core::ExpertSource& src, std::string& err) {
+    bool give_back(lamina::core::ExpertSource& src, std::string& err) {
         return loan.give_back(src, g->n_expert, err) && loan2.give_back(src, g->n_expert, err);
     }
     /// After it, through the tiers of the loans' GPUs (null or off: that loan's blocking give_back): what the lent
     /// slots take back (refill_plan, `routed` the prompt's counts) goes out as their moves at once, each admitted as
     /// it lands while the first windows run (the blocking refill held a prompt up 0.12 s after 2K tokens, 0.31 s
     /// after 16K: the 3090's share over its x4 link).
-    bool give_back_tiers(strata::core::AdaptiveTier* t1, strata::core::AdaptiveTier* t2,
-                         const std::vector<uint32_t>* routed, strata::core::ExpertSource& src, std::string& err) {
+    bool give_back_tiers(lamina::core::AdaptiveTier* t1, lamina::core::AdaptiveTier* t2,
+                         const std::vector<uint32_t>* routed, lamina::core::ExpertSource& src, std::string& err) {
         std::vector<uint8_t> taken(loan.res ? loan.res->size() : loan2.res ? loan2.res->size() : 0, 0);
         for (const SlotLoan* l : {&loan, &loan2})
             if (l->res != nullptr)
                 for (size_t i = 0; i < taken.size(); ++i) taken[i] |= (*l->res)[i] >= 0 ? 1 : 0;
-        const std::pair<SlotLoan*, strata::core::AdaptiveTier*> loans[2] = {{&loan, t1}, {&loan2, t2}};
+        const std::pair<SlotLoan*, lamina::core::AdaptiveTier*> loans[2] = {{&loan, t1}, {&loan2, t2}};
         for (const auto& [l, t] : loans) {
             if (l->lent.empty()) continue;
             if (t == nullptr || !t->on()) {
@@ -985,7 +985,7 @@ struct PromptBuffers {
     }
 };
 
-#if defined(STRATA_HAVE_QWEN35)
+#if defined(LAMINA_HAVE_QWEN35)
 constexpr int kNotQwen35 = -1;
 /// The family switch: kNotQwen35 for a file this engine runs, else the exit code of the engine path of Qwen3.6-35B-A3B
 /// and Qwen3.8-27B (src/qwen35), which qwen35moe and qwen35 files (--native's header) run on.  That path runs on
@@ -993,7 +993,7 @@ constexpr int kNotQwen35 = -1;
 /// --second-gpu's GPUs where one does not hold them; it gets the command line without either, the GPUs as --stage-gpus.
 int qwen35_switch(int argc, char** argv) {
     std::string model, main_gpu = "0", second;
-    strata::ModelFamily family = strata::ModelFamily::Unknown;
+    lamina::ModelFamily family = lamina::ModelFamily::Unknown;
     std::vector<char*> rest{argv[0]};
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--main-gpu") == 0 && i + 1 < argc) {
@@ -1010,15 +1010,15 @@ int qwen35_switch(int argc, char** argv) {
     }
     if (model.empty()) return kNotQwen35;
     try {
-        const strata::GgufFile meta(strata::gguf_split_paths(model).front());
-        family = strata::model_family(meta);
-        if (family != strata::ModelFamily::Qwen35Moe && family != strata::ModelFamily::Qwen35) return kNotQwen35;
+        const lamina::GgufFile meta(lamina::gguf_split_paths(model).front());
+        family = lamina::model_family(meta);
+        if (family != lamina::ModelFamily::Qwen35Moe && family != lamina::ModelFamily::Qwen35) return kNotQwen35;
     } catch (const std::exception&) {
         return kNotQwen35;   // not readable here: the engine below says why
     }
-    const std::vector<strata::core::GpuInfo> gpus = strata::core::list_gpus();
+    const std::vector<lamina::core::GpuInfo> gpus = lamina::core::list_gpus();
     std::string why;
-    const int dev = strata::core::find_gpu(gpus, main_gpu, why);
+    const int dev = lamina::core::find_gpu(gpus, main_gpu, why);
     if (dev < 0 || cudaSetDevice(dev) != cudaSuccess) {
         std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", main_gpu.c_str(), dev < 0 ? why.c_str() : "cannot use it");
         return 2;
@@ -1028,14 +1028,14 @@ int qwen35_switch(int argc, char** argv) {
     // model
     std::vector<int> stages{dev};
     if (second == "auto") {
-        for (const strata::core::GpuInfo& gi : gpus)
+        for (const lamina::core::GpuInfo& gi : gpus)
             if (gi.ordinal != dev) stages.push_back(gi.ordinal);
     } else if (!second.empty() && second != "-1") {
         for (size_t at = 0; at <= second.size();) {
             const size_t comma = std::min(second.find(',', at), second.size());
             const std::string name = second.substr(at, comma - at);
             at = comma + 1;
-            const int d = strata::core::find_gpu(gpus, name, why);
+            const int d = lamina::core::find_gpu(gpus, name, why);
             const bool twice = d >= 0 && std::find(stages.begin(), stages.end(), d) != stages.end();
             if (d < 0 || twice) {
                 std::fprintf(stderr, "lamina: --second-gpu %s left out: %s\n", name.c_str(),
@@ -1054,16 +1054,16 @@ int qwen35_switch(int argc, char** argv) {
         rest.push_back(flag.data());
         rest.push_back(list.data());
     }
-    std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s%s%s\n", strata::model_family_title(family),
-                 strata::model_family_arch(family), dev, gpus[(size_t) dev].name.c_str(),
+    std::fprintf(stderr, "lamina: %s (%s) on GPU %d, %s%s%s\n", lamina::model_family_title(family),
+                 lamina::model_family_arch(family), dev, gpus[(size_t) dev].name.c_str(),
                  more.empty() ? "" : "; a layer split may add ", more.c_str());
-    return strata::qwen35::run((int) rest.size(), rest.data());
+    return lamina::qwen35::run((int) rest.size(), rest.data());
 }
 #endif
 
 }  // namespace
 
-int strata::program::run(int argc, char** argv) {
+int lamina::program::run(int argc, char** argv) {
     // device ordinals in nvidia-smi's order, not CUDA's fastest-first guess (before the first CUDA call)
     if (std::getenv("CUDA_DEVICE_ORDER") == nullptr) {
 #if defined(_WIN32)
@@ -1072,7 +1072,7 @@ int strata::program::run(int argc, char** argv) {
         setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
 #endif
     }
-#if defined(STRATA_HAVE_QWEN35)
+#if defined(LAMINA_HAVE_QWEN35)
     if (const int rc = qwen35_switch(argc, argv); rc != kNotQwen35) return rc;
 #endif
     // The engine may run in the server's process (lamina-server), which starts it again after an unload: what it holds
@@ -1270,40 +1270,40 @@ int strata::program::run(int argc, char** argv) {
         o.adapt_every = 0;
     }
     // before anything builds an expert layout or runs an expert: the GPU's kernels and the CPU pool's SwiGLU
-    strata::kernels::set_expert_math(o.expert_math == "exact" ? strata::kernels::ExpertMath::Exact
-                                                              : strata::kernels::ExpertMath::Fast);
-    strata::kernels::cpu::set_native_exact_swiglu(o.expert_math == "exact");
-    const int q5k_mins = strata::kernels::cpu::ggml_q5_K_mins_rounding();
-    strata::kernels::set_exact_q5_K_fma(q5k_mins == 1);
+    lamina::kernels::set_expert_math(o.expert_math == "exact" ? lamina::kernels::ExpertMath::Exact
+                                                              : lamina::kernels::ExpertMath::Fast);
+    lamina::kernels::cpu::set_native_exact_swiglu(o.expert_math == "exact");
+    const int q5k_mins = lamina::kernels::cpu::ggml_q5_K_mins_rounding();
+    lamina::kernels::set_exact_q5_K_fma(q5k_mins == 1);
     // every CUDA call from here on uses this device; the adaptive tier sets it on its own thread too
-    const std::vector<strata::core::GpuInfo> gpus = strata::core::list_gpus();
+    const std::vector<lamina::core::GpuInfo> gpus = lamina::core::list_gpus();
     std::string gpu_why;
-    o.main_gpu = strata::core::find_gpu(gpus, o.main_gpu_name, gpu_why);
+    o.main_gpu = lamina::core::find_gpu(gpus, o.main_gpu_name, gpu_why);
     if (o.main_gpu < 0 || cudaSetDevice(o.main_gpu) != cudaSuccess) {
         std::fprintf(stderr, "lamina: --main-gpu %s: %s\n", o.main_gpu_name.c_str(),
                      o.main_gpu < 0 ? gpu_why.c_str() : "cannot use it");
         return 2;
     }
     {
-        const strata::core::GpuInfo& gi = gpus[(size_t) o.main_gpu];
+        const lamina::core::GpuInfo& gi = gpus[(size_t) o.main_gpu];
         std::fprintf(stderr, "lamina: main GPU %d, %s (%s, %s)\n", o.main_gpu, gi.name.c_str(),
                      gi.bus_id.c_str(), gi.uuid.c_str());
     }
     // the GPU tiers: the ones named, a name no visible GPU answers to (a card taken out, a failed driver) left out, or
     // with "auto" every other GPU, ordered by the probe below
     const bool tier_auto = o.tier_names.size() == 1 && o.tier_names[0] == "auto";
-    for (const strata::core::GpuInfo& gi : gpus)
+    for (const lamina::core::GpuInfo& gi : gpus)
         if (tier_auto && gi.ordinal != o.main_gpu) o.tier_gpus.push_back(gi.ordinal);
     if (tier_auto && o.tier_gpus.empty()) std::fprintf(stderr, "lamina: --second-gpu auto: no other GPU\n");
     for (size_t i = 0; i < o.tier_names.size() && !tier_auto; ++i) {
-        const int d = strata::core::find_gpu(gpus, o.tier_names[i], gpu_why);
+        const int d = lamina::core::find_gpu(gpus, o.tier_names[i], gpu_why);
         const bool twice = std::find(o.tier_gpus.begin(), o.tier_gpus.end(), d) != o.tier_gpus.end();
-        const bool full = (int) o.tier_gpus.size() == strata::core::kMaxGpuTiers;
+        const bool full = (int) o.tier_gpus.size() == lamina::core::kMaxGpuTiers;
         if (d < 0 || d == o.main_gpu || twice || full) {
             const std::string why = d < 0 ? gpu_why
                                     : d == o.main_gpu ? "it is the main GPU"
                                     : twice ? "it is named twice"
-                                    : "the tiers are at most " + std::to_string(strata::core::kMaxGpuTiers);
+                                    : "the tiers are at most " + std::to_string(lamina::core::kMaxGpuTiers);
             std::fprintf(stderr, "lamina: --second-gpu %s left out: %s\n", o.tier_names[i].c_str(),
                          why.c_str());
             continue;
@@ -1330,10 +1330,10 @@ int strata::program::run(int argc, char** argv) {
             if (cudaSetDevice(dev) == cudaSuccess) (void) cudaFree(nullptr);
             (void) cudaGetLastError();   // a failure shows where the GPU is first used
         });
-    strata::core::qsa_set_kv_format(o.kv == "int8"   ? strata::core::KvFormat::Int8
-                                    : o.kv == "k8v4" ? strata::core::KvFormat::K8V4
-                                    : o.kv == "q4_0" ? strata::core::KvFormat::Q4
-                                                     : strata::core::KvFormat::F16);
+    lamina::core::qsa_set_kv_format(o.kv == "int8"   ? lamina::core::KvFormat::Int8
+                                    : o.kv == "k8v4" ? lamina::core::KvFormat::K8V4
+                                    : o.kv == "q4_0" ? lamina::core::KvFormat::Q4
+                                                     : lamina::core::KvFormat::F16);
     std::vector<std::string> native_shards;   // the --native model's GGUF shards
     if (o.native_preset.empty()) {
         std::fprintf(stderr, "lamina: --native MODEL.gguf is required\n");
@@ -1341,12 +1341,12 @@ int strata::program::run(int argc, char** argv) {
     }
     {
         try {
-            native_shards = strata::gguf_split_paths(o.native_preset);
+            native_shards = lamina::gguf_split_paths(o.native_preset);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "lamina: --native: %s\n", e.what());
             return 2;
         }
-        if (o.ple_gguf.empty()) o.ple_gguf = strata::kernels::ple_table_shard(native_shards);
+        if (o.ple_gguf.empty()) o.ple_gguf = lamina::kernels::ple_table_shard(native_shards);
         if (o.ple_gguf.empty()) {
             std::fprintf(stderr, "lamina: no shard of the --native model holds per_layer_token_embd; "
                                  "name the file with --ple-gguf\n");
@@ -1361,7 +1361,7 @@ int strata::program::run(int argc, char** argv) {
         std::fprintf(stderr, "lamina: --max-context must be below 2^31\n");
         return 2;
     }
-    if (const int64_t cells = strata::kernels::qsa_select_max_cells(strata::kernels::qsa_real_shapes());
+    if (const int64_t cells = lamina::kernels::qsa_select_max_cells(lamina::kernels::qsa_real_shapes());
         o.max_context > cells) {
         std::fprintf(stderr, "lamina: --max-context %lld is past the QSA selection's %lld cells on this GPU\n",
                      (long long) o.max_context, (long long) cells);
@@ -1380,17 +1380,17 @@ int strata::program::run(int argc, char** argv) {
     std::string err;
     // The pack, computed from --native's GGUF here (core::PackImage: the index and the expert table, dense.bin's bytes
     // made as the loader reads them; nothing on disk).
-    strata::core::PackImage pack_image;
+    lamina::core::PackImage pack_image;
     {
         const Clock::time_point t0 = Clock::now();
-        if (!strata::core::PackImage::build(o.native_preset, pack_image, err)) {
+        if (!lamina::core::PackImage::build(o.native_preset, pack_image, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
         // the dequantized ones are rounded to the engine's form (UD-Q4_K_XL's Q8_0 projections; GSQ-RCO files have none)
         size_t converted = 0, dequantized = 0;
-        for (const strata::core::PackImage::Piece& p : pack_image.pieces()) {
-            converted += p.conv != strata::core::PackImage::Conv::Copy;
+        for (const lamina::core::PackImage::Piece& p : pack_image.pieces()) {
+            converted += p.conv != lamina::core::PackImage::Conv::Copy;
             dequantized += p.dequantized();
         }
         std::fprintf(stderr, "lamina: %s in %.0f ms: %zu float tensors (dense.bin %.0f MiB; %zu converted to the "
@@ -1403,23 +1403,23 @@ int strata::program::run(int argc, char** argv) {
     // Plan v0.3 P6: where the experts live.  The pack keeps every quantized tensor in its GGUF form (the dense
     // projections, head and embedding come from the model file), and its experts run in verify windows only (--spec).
     {
-        const strata::core::ModelGeometry g0;
-        if (!strata::kernels::cpu::expert_layout_load_text(pack_image.native_experts_text(), g0.n_layers, g0.n_expert,
+        const lamina::core::ModelGeometry g0;
+        if (!lamina::kernels::cpu::expert_layout_load_text(pack_image.native_experts_text(), g0.n_layers, g0.n_expert,
                                                            err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
     }
-    for (int64_t l = 0; l < strata::kernels::cpu::expert_layout().n_layers; ++l) {
-        const auto& f = strata::kernels::cpu::expert_layout().fmt[(size_t) l];
-        if (!strata::kernels::native_expert_supported(f.gu_type, f.d_type, f.n_embd, f.n_ff)) {
+    for (int64_t l = 0; l < lamina::kernels::cpu::expert_layout().n_layers; ++l) {
+        const auto& f = lamina::kernels::cpu::expert_layout().fmt[(size_t) l];
+        if (!lamina::kernels::native_expert_supported(f.gu_type, f.d_type, f.n_embd, f.n_ff)) {
             std::fprintf(stderr, "lamina: layer %lld's experts (GGML types %d / %d) have no GPU kernels\n",
                          (long long) l, f.gu_type, f.d_type);
             return 1;
         }
         // exact's kernels cover the K-quant files' formats: refuse others here rather than at the first hit
-        if (strata::kernels::expert_math() == strata::kernels::ExpertMath::Exact &&
-            (!strata::kernels::native_expert_exact_supported(f.gu_type, f.d_type, f.gu_act, f.d_act) ||
+        if (lamina::kernels::expert_math() == lamina::kernels::ExpertMath::Exact &&
+            (!lamina::kernels::native_expert_exact_supported(f.gu_type, f.d_type, f.gu_act, f.d_act) ||
              ((f.gu_type == 13 || f.d_type == 13) && q5k_mins < 0))) {
             std::fprintf(stderr, "lamina: --expert-math exact has no bit-exact GPU kernels for layer "
                                  "%lld's experts (GGML types %d / %d, activations %d / %d; Q5_K needs this build's "
@@ -1430,35 +1430,35 @@ int strata::program::run(int argc, char** argv) {
     }
     // the PCIe share of the missed experts (the paper, finding on PCIe)
     if (o.pcie_frac < 0.0) o.pcie_frac = 0.55;
-    if (!strata::kernels::cpu::cpu_avx512_ok())
+    if (!lamina::kernels::cpu::cpu_avx512_ok())
         std::fprintf(stderr, "lamina: this CPU has no AVX-512: the expert kernels run on AVX2\n");
-    strata::core::NativeEmbed native_embed;
+    lamina::core::NativeEmbed native_embed;
     {
         if (o.spec < 2 || (o.prefill_chunk <= 0 && o.tokens.size() > 1)) {
             std::fprintf(stderr, "lamina: the engine needs --spec T (T >= 2) and --prefill CHUNK\n");
             return 2;
         }
-        const strata::core::ModelGeometry g0;
+        const lamina::core::ModelGeometry g0;
         if (!native_embed.load(native_shards, g0.n_embd, 248320, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
-        strata::core::set_native_embed(&native_embed);
+        lamina::core::set_native_embed(&native_embed);
         std::fprintf(stderr, "lamina: %s: the experts' largest blob %.2f MB, token embedding type %d in mapped "
                              "host memory (%.0f MiB)\n",
-                     pack_name.c_str(), (double) strata::kernels::cpu::expert_layout().max_blob / 1e6,
+                     pack_name.c_str(), (double) lamina::kernels::cpu::expert_layout().max_blob / 1e6,
                      native_embed.type(), (double) native_embed.bytes() / 1048576.0);
     }
     // the tensors served in their GGUF form are not loaded from the pack
     std::set<std::string> skip;
     {
-        if (!strata::core::NativeDense::served_names(o.native_dense_gguf, true, skip, err)) {
+        if (!lamina::core::NativeDense::served_names(o.native_dense_gguf, true, skip, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
         skip.insert("output.weight");
-        strata::prefill::set_hc_q8(o.hc_q8);
-        if (o.hc_q8 && !strata::core::HcQ8::names(native_shards, skip, err)) {   // their 8-bit planes instead
+        lamina::prefill::set_hc_q8(o.hc_q8);
+        if (o.hc_q8 && !lamina::core::HcQ8::names(native_shards, skip, err)) {   // their 8-bit planes instead
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
@@ -1466,7 +1466,7 @@ int strata::program::run(int argc, char** argv) {
     }
     uint64_t pool_bytes = 0;
     const std::set<std::string>* skipped = skip.empty() ? nullptr : &skip;
-    if (!strata::core::WeightTable::pool_bytes(pack_image, pool_bytes, err, skipped)) {
+    if (!lamina::core::WeightTable::pool_bytes(pack_image, pool_bytes, err, skipped)) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
     }
@@ -1477,7 +1477,7 @@ int strata::program::run(int argc, char** argv) {
         return 1;
     }
     at_exit.undo.push_back([arena] { cudaFree(arena); });
-    strata::core::WeightTable wt;
+    lamina::core::WeightTable wt;
     if (!wt.load(pack_image, arena, pool_bytes, err, skipped)) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
@@ -1486,7 +1486,7 @@ int strata::program::run(int argc, char** argv) {
                          "served natively)\n",
                  (unsigned long long) (pool_bytes >> 20), pack_name.c_str(), skip.size());
 
-    strata::core::NativeDense native_dense;
+    lamina::core::NativeDense native_dense;
     {
         if (!native_dense.load(o.native_dense_gguf, wt, err, true)) {
             std::fprintf(stderr, "lamina: native dense projections: %s\n", err.c_str());
@@ -1496,7 +1496,7 @@ int strata::program::run(int argc, char** argv) {
                      native_dense.tensor_count(), (double) native_dense.weight_bytes() / (1024.0 * 1024.0));
     }
 
-    strata::core::HcQ8 hc_q8;
+    lamina::core::HcQ8 hc_q8;
     if (o.hc_q8) {
         if (!hc_q8.load(native_shards, wt, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
@@ -1507,9 +1507,9 @@ int strata::program::run(int argc, char** argv) {
     }
 
     // the native GR write and shared expert (the parity tests switch them off to compare)
-    strata::kernels::gr_set_native_mmvf(true);
-    strata::kernels::shared_expert_set_native_bf16(true);
-    // The vision path: every rope kernel reads a cell's (t, h, w) from this table (strata/kernels/mrope.hpp).  It is
+    lamina::kernels::gr_set_native_mmvf(true);
+    lamina::kernels::shared_expert_set_native_bf16(true);
+    // The vision path: every rope kernel reads a cell's (t, h, w) from this table (lamina/kernels/mrope.hpp).  It is
     // the identity until an image request, and it is set here, before any CUDA graph captures a rope kernel.
     int32_t* d_mrope = nullptr;
     std::vector<int32_t> mrope_host;
@@ -1539,7 +1539,7 @@ int strata::program::run(int argc, char** argv) {
         }
         at_exit.undo.push_back([d_mrope, dev = o.main_gpu] {
             cudaSetDevice(dev);
-            strata::kernels::mrope_table_set(nullptr);
+            lamina::kernels::mrope_table_set(nullptr);
             cudaFree(d_mrope);
         });
         if (cudaMemcpy(d_mrope, mrope_host.data(), mrope_host.size() * sizeof(int32_t), cudaMemcpyHostToDevice) !=
@@ -1547,9 +1547,9 @@ int strata::program::run(int argc, char** argv) {
             std::fprintf(stderr, "lamina: cannot allocate the image position table\n");
             return 1;
         }
-        strata::kernels::mrope_table_set(d_mrope);
+        lamina::kernels::mrope_table_set(d_mrope);
     }
-    const strata::core::ModelGeometry g;
+    const lamina::core::ModelGeometry g;
     const int64_t K = 10;
     if (o.max_context < (int64_t) o.tokens.size() + o.max_new) {
         std::fprintf(stderr, "lamina: --max-context %lld cannot hold %zu prompt + %lld new tokens\n",
@@ -1562,30 +1562,30 @@ int strata::program::run(int argc, char** argv) {
     // it gives up.  The ranges are the main GPU's alone: nothing here reads another card's memory directly (the
     // second GPU's tier gets its rows through the host), so --second-gpu keeps it.
     {
-        const char* ev = std::getenv("STRATA_KV_GROW");
+        const char* ev = std::getenv("LAMINA_KV_GROW");
         const bool asked = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
         const bool on = asked && o.serve && !o.expert_profile.empty() && o.expert_cache != 0 && !o.disable_hit &&
-                        strata::core::vmm_available();
+                        lamina::core::vmm_available();
         if (asked && !on)
             std::fprintf(stderr, "lamina: --kv-grow is off here: it needs --serve, --expert-profile, an expert "
                                  "cache with GPU hits (not --disable-hit) and CUDA virtual memory\n");
-        const char* iv = std::getenv("STRATA_KV_GROW_INIT");
-        strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
-        strata::core::ExpertCache::set_vmm(on);
+        const char* iv = std::getenv("LAMINA_KV_GROW_INIT");
+        lamina::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
+        lamina::core::ExpertCache::set_vmm(on);
     }
 
     void* sbuf = nullptr;
-    if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context)) != cudaSuccess) {
+    if (cudaMalloc(&sbuf, lamina::core::session_bytes(g, o.max_context)) != cudaSuccess) {
         std::fprintf(stderr, "lamina: session state allocation failed\n");
         return 1;
     }
     at_exit.undo.push_back([sbuf] { cudaFree(sbuf); });
-    at_exit.undo.push_back([] { strata::core::qsa_kv_elastic_release(); });   // the session's and the drafter's
+    at_exit.undo.push_back([] { lamina::core::qsa_kv_elastic_release(); });   // the session's and the drafter's
     // ---- the rope scaling, validated as a whole, then the process constant: session_init builds the rope table from
     // it and the captured graphs bake the rotation kernels' arguments
     {
-        using RST = strata::kernels::RopeScalingType;
-        strata::kernels::RopeScaling rope_cfg;
+        using RST = lamina::kernels::RopeScalingType;
+        lamina::kernels::RopeScaling rope_cfg;
         if (o.rope_scaling == "none") rope_cfg.type = RST::None;
         else if (o.rope_scaling == "linear") rope_cfg.type = RST::Linear;
         else if (o.rope_scaling == "yarn") rope_cfg.type = RST::YaRN;
@@ -1622,7 +1622,7 @@ int strata::program::run(int argc, char** argv) {
         rope_cfg.attn_factor = o.yarn_attn_factor;
         rope_cfg.beta_fast = o.yarn_beta_fast;
         rope_cfg.beta_slow = o.yarn_beta_slow;
-        if (const char* why = strata::kernels::rope_scaling_invalid(rope_cfg)) {
+        if (const char* why = lamina::kernels::rope_scaling_invalid(rope_cfg)) {
             std::fprintf(stderr, "lamina: invalid rope scaling configuration: %s (factor %g, base %g, "
                                  "original context %g)\n", why, rope_cfg.factor, rope_cfg.freq_base, rope_cfg.orig_ctx);
             return 2;
@@ -1635,13 +1635,13 @@ int strata::program::run(int argc, char** argv) {
         } else if (o.rope_scale > 1.0 || o.rope_freq_scale > 0 || o.yarn_ext_factor > 0) {
             std::fprintf(stderr, "lamina: note: --rope-scaling none, so the scaling knobs have no effect\n");
         }
-        strata::kernels::rope_scaling_set(rope_cfg);
+        lamina::kernels::rope_scaling_set(rope_cfg);
     }
-    strata::core::SessionState ss;
+    lamina::core::SessionState ss;
     struct SessionFree {   // what session_init takes outside sbuf, after everything below that uses it
-        strata::core::SessionState& s;
-        const strata::core::ModelGeometry& g;
-        ~SessionFree() { strata::core::session_free(s, g); }
+        lamina::core::SessionState& s;
+        const lamina::core::ModelGeometry& g;
+        ~SessionFree() { lamina::core::session_free(s, g); }
     } ss_free{ss, g};
     // the engine's own non-blocking stream: on WDDM the legacy default stream costs ~8x a launch
     cudaStream_t main_stream = nullptr;
@@ -1651,13 +1651,13 @@ int strata::program::run(int argc, char** argv) {
     }
     at_exit.undo.push_back([main_stream] { cudaStreamDestroy(main_stream); });
     void* const main_cs = (void*) main_stream;
-    if (strata::core::session_init(g, o.max_context, K, sbuf, ss) == 0) {
+    if (lamina::core::session_init(g, o.max_context, K, sbuf, ss) == 0) {
         std::fprintf(stderr, "lamina: session_init failed\n");
         return 1;
     }
     // a run starts from a zeroed state (#167): a native pack's prompt goes through the batched path and verify
     // windows, which zero nothing, and the cudaMalloc'd state holds whatever the allocator last held
-    strata::core::session_zero(ss, g, nullptr, main_cs);
+    lamina::core::session_zero(ss, g, nullptr, main_cs);
     if (cudaStreamSynchronize(main_stream) != cudaSuccess) {
         std::fprintf(stderr, "lamina: zeroing the session state failed\n");
         return 1;
@@ -1671,22 +1671,22 @@ int strata::program::run(int argc, char** argv) {
     // module was built and parity-tested, and nothing called it.  Everything below is construction - the table
     // is a mapping of the ORIGINAL second GGUF shard, the six weights are already loaded in the arena, and the
     // history is the session's.
-    strata::kernels::PleTable ple_table;
+    lamina::kernels::PleTable ple_table;
     {
-        strata::kernels::PleIoOptions pio;
-        pio.mode = o.ple_io == "mmap" ? strata::kernels::PleIo::Mmap
-                 : o.ple_io == "ram"  ? strata::kernels::PleIo::Ram
-                                      : strata::kernels::PleIo::Direct;
+        lamina::kernels::PleIoOptions pio;
+        pio.mode = o.ple_io == "mmap" ? lamina::kernels::PleIo::Mmap
+                 : o.ple_io == "ram"  ? lamina::kernels::PleIo::Ram
+                                      : lamina::kernels::PleIo::Direct;
         if (!ple_table.open(o.ple_gguf, err, pio)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
-        const strata::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
-        const strata::core::WeightRef* wv = wt.find("blk.1.ple_value.weight");
-        const strata::core::WeightRef* wnk = wt.find("blk.1.ple_norm_key.weight");
-        const strata::core::WeightRef* wnq = wt.find("blk.1.ple_norm_query.weight");
-        const strata::core::WeightRef* wnc = wt.find("blk.1.ple_norm_conv.weight");
-        const strata::core::WeightRef* wc = wt.find("blk.1.ple_conv1d.weight");
+        const lamina::core::WeightRef* wk = wt.find("blk.1.ple_key.weight");
+        const lamina::core::WeightRef* wv = wt.find("blk.1.ple_value.weight");
+        const lamina::core::WeightRef* wnk = wt.find("blk.1.ple_norm_key.weight");
+        const lamina::core::WeightRef* wnq = wt.find("blk.1.ple_norm_query.weight");
+        const lamina::core::WeightRef* wnc = wt.find("blk.1.ple_norm_conv.weight");
+        const lamina::core::WeightRef* wc = wt.find("blk.1.ple_conv1d.weight");
         if (!wk || !wv || !wnk || !wnq || !wnc || !wc) {
             std::fprintf(stderr, "lamina: the pack has no blk.1.ple_* tensors, so the PLE cannot be "
                                  "wired - and running without it is a DIFFERENT MODEL (LEDGER L123)\n");
@@ -1697,7 +1697,7 @@ int strata::program::run(int argc, char** argv) {
             ss.ple.w.key_bf16 = (const uint16_t*) wk->data;
         } else {
             // Q2_0 in the Q2_0 file, Q8_0 in UD-Q4_K_XL
-            if (!wk->native_data || !strata::kernels::native_mmvq_supported(wk->native_type) || !wk->native_q8_1) {
+            if (!wk->native_data || !lamina::kernels::native_mmvq_supported(wk->native_type) || !wk->native_q8_1) {
                 std::fprintf(stderr, "lamina: native PLE key is absent or incompatible\n");
                 return 1;
             }
@@ -1710,7 +1710,7 @@ int strata::program::run(int argc, char** argv) {
         ss.ple.w.norm_query = (const float*) wnq->data;
         ss.ple.w.norm_conv = (const float*) wnc->data;
         ss.ple.w.conv1d_f16 = (const uint16_t*) wc->data;
-        ss.ple.consts = strata::kernels::ple_artifact_consts();
+        ss.ple.consts = lamina::kernels::ple_artifact_consts();
         ss.ple.table = &ple_table;
         ss.ple.hist = ss.ple_hist;
         if (!ss.ple.ready()) {
@@ -1747,8 +1747,8 @@ int strata::program::run(int argc, char** argv) {
             return 2;
         }
     }
-    strata::core::ArenaExpertSource arena_src;
-    strata::core::ExpertSource* srcp = nullptr;
+    lamina::core::ArenaExpertSource arena_src;
+    lamina::core::ExpertSource* srcp = nullptr;
     auto load_experts = [&]() -> bool {
         arena_src.set_gguf(native_shards);
         if (!vram_only.empty()) {
@@ -1770,7 +1770,7 @@ int strata::program::run(int argc, char** argv) {
         }
         std::fprintf(stderr, "lamina: expert arena: %s\n", arena_src.note().c_str());
         std::fprintf(stderr, "lamina: loaded %.2f GiB at %.2f GiB/s\n",
-                     (double) (strata::kernels::cpu::expert_layout().total - arena_src.vram_only_bytes()) /
+                     (double) (lamina::kernels::cpu::expert_layout().total - arena_src.vram_only_bytes()) /
                          (1024.0 * 1024 * 1024),
                      arena_src.load_gib_per_second());
         srcp = &arena_src;
@@ -1782,10 +1782,10 @@ int strata::program::run(int argc, char** argv) {
     auto is_vram_only = [&](int64_t layer, int64_t expert) {
         return !vram_only.empty() && vram_only[(size_t) layer * (size_t) g.n_expert + (size_t) expert] != 0;
     };
-    auto fill_from_model = [&](strata::core::ExpertCache& cache, int device,
+    auto fill_from_model = [&](lamina::core::ExpertCache& cache, int device,
                                const std::vector<std::array<int32_t, 3>>& list, std::string& e) -> bool {
         if (list.empty()) return true;
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         std::atomic<size_t> next{0};
         std::atomic<bool> bad{false};
         std::mutex mu;
@@ -1814,14 +1814,14 @@ int strata::program::run(int argc, char** argv) {
         return !bad;
     };
     // a slot holding an expert only in VRAM read back and compared with the model's bytes
-    auto verify_from_model = [&](strata::core::ExpertCache& cache, int32_t slot, int64_t layer, int64_t expert,
+    auto verify_from_model = [&](lamina::core::ExpertCache& cache, int32_t slot, int64_t layer, int64_t expert,
                                  std::string& e) -> bool {
-        std::vector<uint8_t> want(strata::kernels::cpu::expert_layout().max_blob);
-        const int64_t bytes = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
+        std::vector<uint8_t> want(lamina::kernels::cpu::expert_layout().max_blob);
+        const int64_t bytes = (int64_t) lamina::kernels::cpu::expert_layout().blob_bytes(layer);
         return arena_src.read_file_blob(layer, expert, want.data(), e) && cache.verify_slot(slot, want.data(), e, bytes);
     };
     // Plan v0.3 P6: the MTP draft layer, loaded before the VRAM expert tier is sized from what is left.
-    strata::core::MtpDrafter mtp;
+    lamina::core::MtpDrafter mtp;
     if (!o.mtp.empty()) {
         if (o.spec < 2) {
             std::fprintf(stderr, "lamina: --mtp is ignored without --spec T (T >= 2)\n");
@@ -1840,7 +1840,7 @@ int strata::program::run(int argc, char** argv) {
     if (!o.tier_gpus.empty()) {
         second_ctx.join();
         const auto p0 = std::chrono::steady_clock::now();
-        const std::vector<strata::core::GpuProbe> probe = strata::core::probe_gpus(o.tier_gpus, o.main_gpu);
+        const std::vector<lamina::core::GpuProbe> probe = lamina::core::probe_gpus(o.tier_gpus, o.main_gpu);
         std::fprintf(stderr, "lamina: the GPU tiers' links probed in %.2f s\n",
                      std::chrono::duration<double>(std::chrono::steady_clock::now() - p0).count());
         std::vector<size_t> order;
@@ -1852,9 +1852,9 @@ int strata::program::run(int argc, char** argv) {
         std::vector<double> reserve, prefetch;
         for (const size_t i : order) {
             const int d = o.tier_gpus[i];
-            if ((int) devs.size() == strata::core::kMaxGpuTiers) {   // "auto" past the third: its context goes
+            if ((int) devs.size() == lamina::core::kMaxGpuTiers) {   // "auto" past the third: its context goes
                 std::fprintf(stderr, "lamina: GPU %d, %s, left out: the tiers are at most %d\n", d,
-                             gpus[(size_t) d].name.c_str(), strata::core::kMaxGpuTiers);
+                             gpus[(size_t) d].name.c_str(), lamina::core::kMaxGpuTiers);
                 cudaSetDevice(d);
                 cudaDeviceReset();
                 continue;
@@ -1869,8 +1869,8 @@ int strata::program::run(int argc, char** argv) {
         if (o.second_gpu_reserve_mib.empty()) o.second_gpu_reserve_mib = reserve;
         if (o.second_gpu_prefetch_mb.empty()) o.second_gpu_prefetch_mb = prefetch;
         for (size_t t = 0; t < devs.size(); ++t) {
-            const strata::core::GpuInfo& gi = gpus[(size_t) devs[t]];
-            const strata::core::GpuProbe& pr = probe[order[t]];
+            const lamina::core::GpuInfo& gi = gpus[(size_t) devs[t]];
+            const lamina::core::GpuProbe& pr = probe[order[t]];
             std::fprintf(stderr, "lamina: GPU tier %zu: GPU %d, %s (%s, %s): %.1f GB/s from the host, %d "
                                  "multiprocessors, %s; reserve %.0f MiB, prefetch %.0f MiB\n", t + 1, gi.ordinal,
                          gi.name.c_str(), gi.bus_id.c_str(), gi.uuid.c_str(), pr.h2d_gbps, gi.sms,
@@ -1887,15 +1887,15 @@ int strata::program::run(int argc, char** argv) {
     if (!pinning) start_ple_ram();
     // where the host loop and the pool's workers run, moved off the processors that take interrupts as generation
     // goes (drive_window); with a second GPU, whose work raises most of them, the first core starts free
-    strata::kernels::cpu::CorePlacement placement(/*spare_first=*/o.second_gpu >= 0);
-    strata::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/true,
+    lamina::kernels::cpu::CorePlacement placement(/*spare_first=*/o.second_gpu >= 0);
+    lamina::kernels::cpu::ExpertPool pool(o.pool_workers, /*pin=*/true, /*host_works=*/true,
                                           placement.workers());
     std::fprintf(stderr, "lamina: session is up; locating the head\n");
-    const strata::core::WeightRef* wo = wt.find("output.weight");
+    const lamina::core::WeightRef* wo = wt.find("output.weight");
     if (wo == nullptr) { std::fprintf(stderr, "lamina: output.weight is missing\n"); return 1; }
     const int64_t n_vocab = wo->ne1;
-    strata::core::NativeHead native_head;
-    std::unique_ptr<strata::core::SplitHead> split_head;
+    lamina::core::NativeHead native_head;
+    std::unique_ptr<lamina::core::SplitHead> split_head;
     {
         const std::vector<std::string>& head_shards = native_shards;
         if (!native_head.load(head_shards, g.n_embd, n_vocab, err)) {
@@ -1909,7 +1909,7 @@ int strata::program::run(int argc, char** argv) {
         if (o.second_gpu >= 0 && o.head_split > 0.0 && o.head_split < 1.0 && o.spec >= 2) {
             second_ctx.join();
             const int64_t split = (int64_t) ((1.0 - o.head_split) * (double) n_vocab) / 256 * 256;
-            auto sh = std::make_unique<strata::core::SplitHead>();
+            auto sh = std::make_unique<lamina::core::SplitHead>();
             std::string e2;
             const bool ok = (o.mtp.empty() || mtp.bind_head(&native_head, e2)) &&
                             (o.mtp.empty() || mtp.has_draft_head()) &&
@@ -1931,11 +1931,11 @@ int strata::program::run(int argc, char** argv) {
     // `open` sees the memory this process actually has left rather than the card's idle figure - and refuses with
     // both numbers if the slots do not fit, instead of handing back a cache smaller than it was asked for.
     mem_mark("the weights, the session, the drafter and the head");
-    strata::core::ExpertCache xcache;
+    lamina::core::ExpertCache xcache;
     std::vector<std::pair<int32_t, int32_t>> profile;
     if (!o.expert_profile.empty()) {
         int64_t pslots = 0;
-        if (!strata::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, profile, pslots, err)) {
+        if (!lamina::core::read_expert_profile(o.expert_profile, g.n_layers, g.n_expert, profile, pslots, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
@@ -1955,11 +1955,11 @@ int strata::program::run(int argc, char** argv) {
         // (with borrowing - the default with a profile - the prompt path lends cache slots instead)
         const bool borrow = !o.no_prefill_borrow && !o.expert_profile.empty();
         const int64_t prefill_mib = (o.prefill_chunk > 0 && !borrow)
-            ? (int64_t) (strata::prefill::Prefill::bytes_needed(g, ss, o.prefill_chunk,
+            ? (int64_t) (lamina::prefill::Prefill::bytes_needed(g, ss, o.prefill_chunk,
                                                                 o.second_gpu >= 0 && !o.no_prompt_offload) >> 20)
             : 0;
         const int64_t reserve = ((int64_t) o.vram_reserve_mib + prefill_mib) << 20;
-        int64_t slots = ((int64_t) free_b - reserve) / (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+        int64_t slots = ((int64_t) free_b - reserve) / (int64_t) lamina::kernels::cpu::expert_layout().max_blob;
         if (!profile.empty()) slots = std::min<int64_t>(slots, (int64_t) profile.size());
         o.expert_cache = (int) std::max<int64_t>(slots, 0);
         std::fprintf(stderr, "lamina: expert cache auto: %.2f GiB free, %d MiB reserved -> %d slots\n",
@@ -1974,13 +1974,13 @@ int strata::program::run(int argc, char** argv) {
     if (o.expert_cache > 0 && !profile.empty()) {
         size_t free_b = 0, total_b = 0;
         cudaMemGetInfo(&free_b, &total_b);
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         const uint64_t budget = (uint64_t) o.expert_cache * lay.max_blob;   // what the uniform sizing granted
         uint64_t used = 0;
         size_t free_room = free_b > ((size_t) o.vram_reserve_mib << 20) ? free_b - ((size_t) o.vram_reserve_mib << 20) : 0;
         const uint64_t cap = std::min<uint64_t>(budget, (uint64_t) free_room);
         for (const auto& pr : profile) {
-            const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
+            const uint64_t b = (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
             if (used + b > cap) break;
             used += b;
             sized_slots.push_back((int64_t) lay.blob_bytes(pr.first));
@@ -1996,7 +1996,7 @@ int strata::program::run(int argc, char** argv) {
         int zero_reads = 0;
         for (int attempt = 0;; ++attempt) {
             const bool ok = sized_slots.empty()
-                ? xcache.open(o.expert_cache, g.n_layers, g.n_expert, (int64_t) strata::kernels::cpu::expert_layout().max_blob, err)
+                ? xcache.open(o.expert_cache, g.n_layers, g.n_expert, (int64_t) lamina::kernels::cpu::expert_layout().max_blob, err)
                 : xcache.open_sized(sized_slots, g.n_layers, g.n_expert, err);
             if (!ok) {
                 std::fprintf(stderr, "lamina: %s\n", err.c_str());
@@ -2023,19 +2023,19 @@ int strata::program::run(int argc, char** argv) {
                 int64_t used = 0;
                 size_t keep = 0;
                 while (keep < sized_slots.size() &&
-                       used + strata::core::ExpertCache::slot_stride(sized_slots[keep]) <= keep_bytes)
-                    used += strata::core::ExpertCache::slot_stride(sized_slots[keep++]);
+                       used + lamina::core::ExpertCache::slot_stride(sized_slots[keep]) <= keep_bytes)
+                    used += lamina::core::ExpertCache::slot_stride(sized_slots[keep++]);
                 sized_slots.resize(keep);
                 o.expert_cache = (int) keep;
             } else {
-                o.expert_cache = (int) (keep_bytes / (int64_t) strata::kernels::cpu::expert_layout().max_blob);
+                o.expert_cache = (int) (keep_bytes / (int64_t) lamina::kernels::cpu::expert_layout().max_blob);
             }
             if (o.expert_cache <= 0) { o.expert_cache = 0; sized_slots.clear(); break; }
         }
     }
     // the elastic K/V's VMM arena is the main GPU's cache alone: the second GPU's tier opens its own cache on its own
     // card (vmm.cpp's chunks belong to the device current at its first call, the main one)
-    strata::core::ExpertCache::set_vmm(false);
+    lamina::core::ExpertCache::set_vmm(false);
     if (o.expert_cache > 0) {
         std::fprintf(stderr, "lamina: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
                      (long long) xcache.slots(), xcache.gib());
@@ -2058,13 +2058,13 @@ int strata::program::run(int argc, char** argv) {
     // admission finds no room and every non-profiled expert stays a CPU miss.  That is what makes the profile
     // the policy rather than a hint.
     if (pinning) {
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         const size_t n_main = (size_t) std::min<int64_t>((int64_t) profile.size(), xcache.slots());
         auto take = [&](size_t from, size_t to, double gib, std::vector<std::pair<int32_t, int32_t>>& out) {
             const uint64_t budget = (uint64_t) (gib * 1073741824.0);
             uint64_t used = 0;
             for (size_t i = from; i < to; ++i) {
-                const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(profile[i].first));
+                const uint64_t b = (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(profile[i].first));
                 if (used + b > budget) break;
                 used += b;
                 out.push_back(profile[i]);
@@ -2088,7 +2088,7 @@ int strata::program::run(int argc, char** argv) {
         std::vector<std::array<int32_t, 3>> from_model;   // (slot, layer, expert): only in VRAM, read from the model
         for (int64_t i = 0; i < want; ++i) {
             const int32_t slot = xcache.admit(profile[(size_t) i].first, profile[(size_t) i].second);
-            if (slot == strata::core::kNotResident) break;
+            if (slot == lamina::core::kNotResident) break;
             if (is_vram_only(profile[(size_t) i].first, profile[(size_t) i].second)) {
                 from_model.push_back({slot, profile[(size_t) i].first, profile[(size_t) i].second});
                 ++prefilled;
@@ -2096,7 +2096,7 @@ int strata::program::run(int argc, char** argv) {
             }
             const uint8_t* b = srcp->blob(profile[(size_t) i].first, profile[(size_t) i].second);
             if (b == nullptr || !xcache.fill_slot_blocking(slot, b, err,
-                    (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))) {
+                    (int64_t) lamina::kernels::cpu::expert_layout().blob_bytes(profile[(size_t) i].first))) {
                 std::fprintf(stderr, "lamina: the profile fill failed at pair %lld: %s\n",
                              (long long) i, err.c_str());
                 return 1;
@@ -2123,7 +2123,7 @@ int strata::program::run(int argc, char** argv) {
             !(is_vram_only(profile[0].first, profile[0].second)
                   ? verify_from_model(xcache, slot0, profile[0].first, profile[0].second, err)
                   : xcache.verify_slot(slot0, srcp->blob(profile[0].first, profile[0].second), err,
-                                       (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(profile[0].first)))) {
+                                       (int64_t) lamina::kernels::cpu::expert_layout().blob_bytes(profile[0].first)))) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
@@ -2172,21 +2172,21 @@ int strata::program::run(int argc, char** argv) {
     // this table
     std::vector<int32_t> host_res;
     int32_t* d_res = nullptr;
-    strata::core::TokenHits thits;
+    lamina::core::TokenHits thits;
     const bool graph_hits = o.expert_cache > 0 && !profile.empty();
     if (pinning && !graph_hits) {   // the residency table is their only path (checked with the options above)
         std::fprintf(stderr, "lamina: --vram-pin-gib: the experts only in VRAM need the GPU hit path\n");
         return 2;
     }
     if (graph_hits) {
-        host_res.assign((size_t) (g.n_layers * g.n_expert), strata::core::kNotResident);
+        host_res.assign((size_t) (g.n_layers * g.n_expert), lamina::core::kNotResident);
         int64_t resident = 0;
         for (int64_t l = 0; l < g.n_layers; ++l)
             for (int64_t e = 0; e < g.n_expert; ++e) {
                 // --disable-hit: the cache stays filled, the table holds none of it, so every expert goes to the CPU
-                const int32_t slot = o.disable_hit ? strata::core::kNotResident : xcache.slot_of(l, e);
+                const int32_t slot = o.disable_hit ? lamina::core::kNotResident : xcache.slot_of(l, e);
                 host_res[(size_t) (l * g.n_expert + e)] = slot;
-                if (slot != strata::core::kNotResident) ++resident;
+                if (slot != lamina::core::kNotResident) ++resident;
             }
         if (cudaMalloc((void**) &d_res, host_res.size() * sizeof(int32_t)) != cudaSuccess) {
             std::fprintf(stderr, "lamina: the device residency table could not be staged\n");
@@ -2200,14 +2200,14 @@ int strata::program::run(int argc, char** argv) {
         thits.d_res = d_res;
         thits.n_expert = g.n_expert;
         thits.cache_base = (const uint8_t*) xcache.device_slot(0);
-        thits.blob = (int64_t) strata::kernels::cpu::expert_layout().max_blob;
+        thits.blob = (int64_t) lamina::kernels::cpu::expert_layout().max_blob;
         drive.d.host_res = host_res.data();
         std::fprintf(stderr, "lamina: the residency table: %lld resident experts, decided on the device%s\n",
                      (long long) resident, o.disable_hit ? " (--disable-hit)" : "");
     }
     // plan v0.3 P6: the VRAM tier follows the conversation in both decode loops (--serve and the speculative loop):
     // moves every --adapt-every rounds on the adapt thread, admitted once their copies have landed
-    strata::core::AdaptiveTier tier;
+    lamina::core::AdaptiveTier tier;
     const bool adaptive = !host_res.empty() && o.adapt_every > 0 && o.adapt_swaps > 0;
     if (adaptive && !tier.init(xcache, *srcp, host_res, g.n_layers, g.n_expert, o.adapt_swaps, err,
                                o.main_gpu, o.main_gpu, o.deterministic_adapt)) {
@@ -2220,24 +2220,24 @@ int strata::program::run(int argc, char** argv) {
     // before it have not.  A GPU without free VRAM (another process holds it) stays out; without any the engine runs on
     // the main GPU alone.
     struct TierSlot {
-        strata::core::SecondGpu gpu;
+        lamina::core::SecondGpu gpu;
         std::vector<int32_t> res;   // its residency (n_layers x n_expert, slot or kNotResident)
-        strata::core::AdaptiveTier adapt;
+        lamina::core::AdaptiveTier adapt;
     };
-    std::array<TierSlot, strata::core::kMaxGpuTiers> tiers;
+    std::array<TierSlot, lamina::core::kMaxGpuTiers> tiers;
     int n_tiers = 0;
     // the first (the "second GPU"): the prompt path's share, the head's rows, --prompt-split's second stage
-    strata::core::SecondGpu& gpu2 = tiers[0].gpu;
+    lamina::core::SecondGpu& gpu2 = tiers[0].gpu;
     std::vector<int32_t>& host_res2 = tiers[0].res;
-    strata::core::AdaptiveTier& tier2 = tiers[0].adapt;
-    static const char* const kTierName[strata::core::kMaxGpuTiers] = {"second", "third", "fourth"};
+    lamina::core::AdaptiveTier& tier2 = tiers[0].adapt;
+    static const char* const kTierName[lamina::core::kMaxGpuTiers] = {"second", "third", "fourth"};
     second_ctx.join();
     if (!o.tier_gpus.empty() && (host_res.empty() || o.spec < 2)) {
         std::fprintf(stderr, "lamina: --second-gpu needs --expert-profile and --spec\n");
         return 2;
     }
     {
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         uint64_t min_blob = lay.max_blob;   // prefetch slots for the most of the smallest experts a budget holds
         for (int64_t l = 0; l < g.n_layers; ++l) min_blob = std::min<uint64_t>(min_blob, lay.blob_bytes(l));
         const int main_dev = o.main_gpu;
@@ -2246,7 +2246,7 @@ int strata::program::run(int argc, char** argv) {
             const int t = n_tiers;        // its place among the tiers that work
             const bool first = t == 0;    // the --second-gpu-pin-gib pins and the prompt path's own buffers are the first's
             TierSlot& ts = tiers[(size_t) t];
-            strata::core::SecondGpu& gp = ts.gpu;
+            lamina::core::SecondGpu& gp = ts.gpu;
             cudaDeviceProp prop{};
             cudaGetDeviceProperties(&prop, dev);
             const uint64_t pf_bytes = (uint64_t) (std::max(0.0, tier_value(o.second_gpu_prefetch_mb, ti)) * 1048576.0);
@@ -2270,7 +2270,7 @@ int strata::program::run(int argc, char** argv) {
                 // the prompt path's buffers there borrow cache slots, else they are reserved here
                 const bool offload_own = first && o.prefill_chunk > 0 && !o.no_prompt_offload && o.no_prefill_borrow;
                 const uint64_t reserve = ((uint64_t) reserve_mib << 20) +
-                    (offload_own ? strata::prefill::ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) : 0);
+                    (offload_own ? lamina::prefill::ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) : 0);
                 const uint64_t budget = gib > 0 ? (uint64_t) (gib * 1073741824.0)
                                                 : (free_b > reserve ? (uint64_t) free_b - reserve : 0);
                 uint64_t used = 0;
@@ -2280,7 +2280,7 @@ int strata::program::run(int argc, char** argv) {
                     bool held = host_res[at] >= 0;   // the main GPU or a tier before it holds it
                     for (int j = 0; j < t && !held; ++j) held = tiers[(size_t) j].res[at] >= 0;
                     if (held) continue;
-                    const uint64_t b = (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
+                    const uint64_t b = (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(pr.first));
                     if (used + b > budget) break;
                     used += b;
                     sizes.push_back((int64_t) lay.blob_bytes(pr.first));
@@ -2289,7 +2289,7 @@ int strata::program::run(int argc, char** argv) {
                 {   // the rest in empty slots (without the adaptive tier only the prompt path's loans use them)
                     uint64_t round = 0;
                     for (int64_t l = 0; l < g.n_layers; ++l)
-                        round += (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l));
+                        round += (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l));
                     for (uint64_t q = (budget - used) / round; q > 0; --q)
                         for (int64_t l = 0; l < g.n_layers; ++l) {
                             sizes.push_back((int64_t) lay.blob_bytes(l));
@@ -2312,7 +2312,7 @@ int strata::program::run(int argc, char** argv) {
                     bool pins_short = false;
                     for (uint64_t cut = 0; !sizes.empty() && cut < reserve - free_b + (64ull << 20);) {
                         if (empty.empty() && pre.size() <= (first ? pin2.size() : 0)) { pins_short = true; break; }
-                        cut += (uint64_t) strata::core::ExpertCache::slot_stride(sizes.back());
+                        cut += (uint64_t) lamina::core::ExpertCache::slot_stride(sizes.back());
                         sizes.pop_back();
                         if (!empty.empty()) empty.pop_back();
                         else pre.pop_back();
@@ -2329,12 +2329,12 @@ int strata::program::run(int argc, char** argv) {
                 std::vector<std::array<int32_t, 3>> from_model;   // (slot, layer, expert): only in this GPU's VRAM
                 for (size_t i = 0; ok && i < pre.size(); ++i) {
                     const int32_t slot = gp.cache().admit(pre[i].first, pre[i].second);
-                    if (slot != strata::core::kNotResident && is_vram_only(pre[i].first, pre[i].second)) {
+                    if (slot != lamina::core::kNotResident && is_vram_only(pre[i].first, pre[i].second)) {
                         from_model.push_back({slot, pre[i].first, pre[i].second});
                         continue;
                     }
                     const uint8_t* b = srcp->blob(pre[i].first, pre[i].second);
-                    ok = slot != strata::core::kNotResident && b != nullptr &&
+                    ok = slot != lamina::core::kNotResident && b != nullptr &&
                          gp.cache().fill_slot_blocking(slot, b, err, (int64_t) lay.blob_bytes(pre[i].first));
                 }
                 ok = ok && fill_from_model(gp.cache(), dev, from_model, err);
@@ -2352,7 +2352,7 @@ int strata::program::run(int argc, char** argv) {
                 cudaSetDevice(main_dev);
             }
             if (ok) {
-                ts.res.assign((size_t) (g.n_layers * g.n_expert), strata::core::kNotResident);
+                ts.res.assign((size_t) (g.n_layers * g.n_expert), lamina::core::kNotResident);
                 for (int64_t l = 0; l < g.n_layers; ++l)
                     for (int64_t e = 0; e < g.n_expert; ++e) ts.res[(size_t) (l * g.n_expert + e)] = gp.cache().slot_of(l, e);
             }
@@ -2392,10 +2392,10 @@ int strata::program::run(int argc, char** argv) {
                 }
                 // a fresh slot for the next GPU (the adaptive tier before the cache it points to)
                 ts.adapt.~AdaptiveTier();
-                new (&ts.adapt) strata::core::AdaptiveTier();
+                new (&ts.adapt) lamina::core::AdaptiveTier();
                 ts.res.clear();
                 gp.~SecondGpu();
-                new (&gp) strata::core::SecondGpu();
+                new (&gp) lamina::core::SecondGpu();
             }
         }
         drive.d.tier_min_bytes = (uint64_t) (o.second_gpu_min_mb * 1048576.0);
@@ -2407,14 +2407,14 @@ int strata::program::run(int argc, char** argv) {
     // The largest loan the main GPU's prompt path can take: its buffers for the longest chunk with a whole layer
     // streamed (the prefetch area grows with the experts the cache does not hold).  The elastic K/V stays below it.
     auto worst_loan = [&](bool off) {
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         uint64_t stride = 0;
         for (int64_t l = 0; l < lay.n_layers; ++l)
-            stride = std::max<uint64_t>(stride, (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)));
+            stride = std::max<uint64_t>(stride, (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)));
         // (with pinned experts and the second GPU's share of the prompt path, no layer streams here: the loan is its
         // buffers alone, Prefill::bytes_for)
         const uint64_t worst_pre = !pin1.empty() && off ? 0 : stride * (uint64_t) g.n_expert;
-        return strata::prefill::Prefill::bytes_needed(g, ss, o.prefill_chunk, off) + worst_pre + worst_pre / 10;
+        return lamina::prefill::Prefill::bytes_needed(g, ss, o.prefill_chunk, off) + worst_pre + worst_pre / 10;
     };
     // --arena-place: the RAM's slow places go to the experts that stay on a GPU: below the slots each GPU's prompt
     // path borrows at every batched prompt (its cache's last ones) and, with the elastic K/V, below the slots the whole
@@ -2430,21 +2430,21 @@ int strata::program::run(int argc, char** argv) {
         return on;
     };
     if (o.arena_place && srcp == &arena_src) {
-        if (ple_table.is_open() && ple_table.mode() == strata::kernels::PleIo::Ram && !ple_table.ram_ready())
+        if (ple_table.is_open() && ple_table.mode() == lamina::kernels::PleIo::Ram && !ple_table.ram_ready())
             ple_table.wait_ram_load();
         const bool off = o.second_gpu >= 0 && !o.no_prompt_offload;
-        auto below_loan = [&](strata::core::ExpertCache& c, size_t pinned, uint64_t need) -> int64_t {
+        auto below_loan = [&](lamina::core::ExpertCache& c, size_t pinned, uint64_t need) -> int64_t {
             SlotLoan l;
             l.cache = &c;
             l.keep = (int64_t) pinned;
             return l.plan(need) ? (int64_t) l.first : c.slots();
         };
         // each GPU's loan for the longest chunk (Prefill::bytes_for, ExpertRunner::bytes_for)
-        using strata::prefill::ExpertRunner;
+        using lamina::prefill::ExpertRunner;
         const int64_t chunk = o.prefill_chunk;
         const int32_t* res1 = host_res.empty() ? nullptr : host_res.data();
         const int32_t* res2 = host_res2.empty() ? nullptr : host_res2.data();
-        const uint64_t need1 = strata::prefill::Prefill::bytes_needed(g, ss, chunk, off) +
+        const uint64_t need1 = lamina::prefill::Prefill::bytes_needed(g, ss, chunk, off) +
                                (off ? 0 : std::min(ExpertRunner::prefetch_need(res1, nullptr, g.n_expert, true),
                                                    ExpertRunner::area_cap(chunk, false)));
         const uint64_t need2 = ExpertRunner::bytes_needed(chunk, g.n_expert, true, true) +
@@ -2453,10 +2453,10 @@ int strata::program::run(int argc, char** argv) {
                                         ExpertRunner::area_cap(chunk, true));
         const bool borrow = !o.no_prefill_borrow && d_res != nullptr;
         stay1 = host_res.empty() ? 0 : !borrow ? xcache.slots() : below_loan(xcache, pin1.size(), need1);
-        if (strata::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && stay1 > 0) {
+        if (lamina::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && stay1 > 0) {
             if (borrow) stay1 = std::min(stay1, below_loan(xcache, 0, worst_loan(off)));
-            const uint64_t G = strata::core::vmm_granularity();
-            const uint64_t kv = (uint64_t) strata::core::qsa_kv_elastic_need(o.max_context + 64) * G + G;
+            const uint64_t G = lamina::core::vmm_granularity();
+            const uint64_t kv = (uint64_t) lamina::core::qsa_kv_elastic_need(o.max_context + 64) * G + G;
             const uint64_t top = xcache.slot_offset(stay1);
             while (stay1 > (int64_t) pin1.size() && top - xcache.slot_offset(stay1) < kv) --stay1;
         }
@@ -2491,11 +2491,11 @@ int strata::program::run(int argc, char** argv) {
     tier.set_decay(o.adapt_decay);
     for (TierSlot& ts : tiers) ts.adapt.set_decay(o.adapt_decay);
     drive.n_layers = g.n_layers;
-    drive.ring_us.assign((size_t) ((strata::kernels::kVerifyMaxT + 1) * g.n_layers), 0.0);
+    drive.ring_us.assign((size_t) ((lamina::kernels::kVerifyMaxT + 1) * g.n_layers), 0.0);
 
     // ---- the batched prompt path, and the second GPU's share of its experts (not --no-prompt-offload)
-    auto setup_prompt_path = [&](strata::prefill::Prefill& prefill, strata::prefill::ExpertRunner& offload,
-                                 PromptBuffers& pbuf, strata::prefill::PromptSplit& split, std::string& e) -> bool {
+    auto setup_prompt_path = [&](lamina::prefill::Prefill& prefill, lamina::prefill::ExpertRunner& offload,
+                                 PromptBuffers& pbuf, lamina::prefill::PromptSplit& split, std::string& e) -> bool {
         const bool off = o.second_gpu >= 0 && !o.no_prompt_offload;
         // a cache too small to lend the buffers would make them allocate on top of a card the cache filled to its
         // reserve, which then pages: the chunk halves until they fit in the lendable slots (it only reads slower)
@@ -2504,8 +2504,8 @@ int strata::program::run(int argc, char** argv) {
             probe.cache = &xcache;
             probe.keep = (int64_t) pin1.size();   // the pinned slots are never lent
             int64_t chunk = o.prefill_chunk;
-            while (chunk > 256 && !probe.plan(strata::prefill::Prefill::bytes_needed(g, ss, chunk, off))) chunk /= 2;
-            if (chunk != o.prefill_chunk && probe.plan(strata::prefill::Prefill::bytes_needed(g, ss, chunk, off))) {
+            while (chunk > 256 && !probe.plan(lamina::prefill::Prefill::bytes_needed(g, ss, chunk, off))) chunk /= 2;
+            if (chunk != o.prefill_chunk && probe.plan(lamina::prefill::Prefill::bytes_needed(g, ss, chunk, off))) {
                 std::fprintf(stderr, "lamina: prompt chunk %lld -> %lld tokens so its buffers fit in the expert "
                                      "cache\n", (long long) o.prefill_chunk, (long long) chunk);
                 o.prefill_chunk = chunk;
@@ -2551,12 +2551,12 @@ int strata::program::run(int argc, char** argv) {
                 int32_t* t = nullptr;
                 const bool got = cudaMalloc(&t, bytes) == cudaSuccess;
                 if (got && cudaMemcpy(t, mrope_host.data(), bytes, cudaMemcpyHostToDevice) == cudaSuccess) {
-                    strata::kernels::mrope_table_set(t);
+                    lamina::kernels::mrope_table_set(t);
                     d_mrope2 = t;
                     mrope2_dev = o.second_gpu;
                     at_exit.undo.push_back([t, dev = o.second_gpu] {
                         cudaSetDevice(dev);
-                        strata::kernels::mrope_table_set(nullptr);
+                        lamina::kernels::mrope_table_set(nullptr);
                         cudaFree(t);
                     });
                 } else {
@@ -2603,10 +2603,10 @@ int strata::program::run(int argc, char** argv) {
         // With experts pinned in the lowest slots, the largest loan each GPU's prompt path can take must fit above
         // them (one that did not would allocate its buffers on a card the cache fills).  Its prefetch area holds a
         // layer's experts that neither GPU holds: at most those the pins leave.
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         uint64_t stride = 0;
         for (int64_t l = 0; l < g.n_layers; ++l)
-            stride = std::max<uint64_t>(stride, (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)));
+            stride = std::max<uint64_t>(stride, (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)));
         std::vector<int64_t> held1((size_t) g.n_layers, 0), held12((size_t) g.n_layers, 0);
         for (const auto& pr : pin1) { ++held1[(size_t) pr.first]; ++held12[(size_t) pr.first]; }
         for (const auto& pr : pin2) ++held12[(size_t) pr.first];
@@ -2617,9 +2617,9 @@ int strata::program::run(int argc, char** argv) {
         }
         auto pre_area = [&](int64_t miss, bool remote) {
             const uint64_t b = (uint64_t) miss * stride;
-            return std::min(b + b / 10, strata::prefill::ExpertRunner::area_cap(o.prefill_chunk, remote));
+            return std::min(b + b / 10, lamina::prefill::ExpertRunner::area_cap(o.prefill_chunk, remote));
         };
-        auto check = [&](bool lent, strata::core::ExpertCache& cache, int64_t keep, uint64_t worst, const char* gpu,
+        auto check = [&](bool lent, lamina::core::ExpertCache& cache, int64_t keep, uint64_t worst, const char* gpu,
                          const char* flag) {
             SlotLoan probe;
             probe.cache = &cache;
@@ -2635,13 +2635,13 @@ int strata::program::run(int argc, char** argv) {
         };
         if (!o.no_prefill_borrow && !pin1.empty() &&
             !check(pbuf.lend, xcache, (int64_t) pin1.size(),
-                   strata::prefill::Prefill::bytes_needed(g, ss, o.prefill_chunk, off) +
+                   lamina::prefill::Prefill::bytes_needed(g, ss, o.prefill_chunk, off) +
                        (off ? 0 : pre_area(miss1, false)),
                    "main GPU's", "--vram-pin-gib"))
             return false;
         if (!o.no_prefill_borrow && !pin2.empty() &&
             !check(pbuf.lend2, gpu2.cache(), (int64_t) pin2.size(),
-                   strata::prefill::ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) +
+                   lamina::prefill::ExpertRunner::bytes_needed(o.prefill_chunk, g.n_expert, true, true) +
                        pre_area(miss12, true), "second GPU's", "--second-gpu-pin-gib"))
             return false;
         return true;
@@ -2650,7 +2650,7 @@ int strata::program::run(int argc, char** argv) {
 
     // the verifier's options and the tiers' hooks into it (prefetch, the watch, the updates at the tail), set after
     // init by the serve loop and the one-shot run alike
-    auto hook_verifier = [&](strata::core::Verifier& ver) {
+    auto hook_verifier = [&](lamina::core::Verifier& ver) {
         ver.set_split(o.spec_split);
         ver.set_profile(o.window_profile);
         ver.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : o.pcie_mode == "kernel" ? 2
@@ -2688,9 +2688,9 @@ int strata::program::run(int argc, char** argv) {
                                  "--expert-cache\n");
             return 2;
         }
-        strata::prefill::Prefill prefill;
-        strata::prefill::ExpertRunner offload;
-        strata::prefill::PromptSplit psplit;   // (its second stage refers to the first: destroyed before it)
+        lamina::prefill::Prefill prefill;
+        lamina::prefill::ExpertRunner offload;
+        lamina::prefill::PromptSplit psplit;   // (its second stage refers to the first: destroyed before it)
         PromptBuffers pbuf;
         DraftDump ddump;   // --dump-draft-data: every prompt position from the batched path, its final rows there
         ddump.dir = o.dump_draft_data;
@@ -2722,7 +2722,7 @@ int strata::program::run(int argc, char** argv) {
             int64_t floor = 128;         // the cache keeps at least these slots
             int64_t step = 8192;         // the K/V grows in whole steps of cells
             int64_t cells = 0;           // what every K/V pool holds now
-            std::vector<strata::core::VmmChunk> spare;   // out of the cache, not (yet) in the K/V
+            std::vector<lamina::core::VmmChunk> spare;   // out of the cache, not (yet) in the K/V
             int64_t grows = 0, trims = 0, fresh = 0, evicted = 0, refilled = 0;
         } kvg;
         int kv_short = 0;   // requests in a row far shorter than the K/V holds (kvg_trim after two)
@@ -2739,12 +2739,12 @@ int strata::program::run(int argc, char** argv) {
                           ? std::min<int64_t>(probe.first, pbuf.loan.first >= 0 ? pbuf.loan.first : top)
                           : 0;   // no room for the worst loan: nothing can be given up
             }
-            if (const char* v = std::getenv("STRATA_KV_GROW_STEP"); v != nullptr && std::atoll(v) > 0) kvg.step = std::atoll(v);
+            if (const char* v = std::getenv("LAMINA_KV_GROW_STEP"); v != nullptr && std::atoll(v) > 0) kvg.step = std::atoll(v);
             // tests: the cache keeps this many slots (at or above the bound: the K/V grows into new VRAM only)
-            if (const char* v = std::getenv("STRATA_KV_GROW_FLOOR"); v != nullptr && std::atoll(v) > 0)
+            if (const char* v = std::getenv("LAMINA_KV_GROW_FLOOR"); v != nullptr && std::atoll(v) > 0)
                 kvg.floor = std::min<int64_t>(std::atoll(v), top);
             kvg.floor = std::max<int64_t>(kvg.floor, (int64_t) pin1.size());   // the pinned slots stay with their experts
-            kvg.on = strata::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && d_res != nullptr &&
+            kvg.on = lamina::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && d_res != nullptr &&
                      !host_res.empty() && srcp != nullptr && top >= kvg.floor;
             if (kvg.on) {
                 // The whole context's K/V must fit: in the cache's slots between its floor (the pinned ones, if any)
@@ -2752,14 +2752,14 @@ int strata::program::run(int argc, char** argv) {
                 // --vram-reserve-mib goes (`--expert-cache auto` leaves the reserve alone; a smaller cache leaves
                 // more).  A context past that would stop the engine at its first request that long: "ERR the K/V
                 // cannot grow to this prompt" (917,504 cells on a 3090: 13.40 GiB needed, ~12.2 GiB of slots).
-                const uint64_t G = strata::core::vmm_granularity();
+                const uint64_t G = lamina::core::vmm_granularity();
                 const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.floor) + G - 1) / G);
                 const int64_t c1 = (int64_t) (xcache.slot_offset(top) / G);
                 size_t free_b = 0, total_b = 0;
                 cudaMemGetInfo(&free_b, &total_b);
                 const int64_t spare = std::max<int64_t>((int64_t) free_b - ((int64_t) o.vram_reserve_mib << 20), 0);
                 const int64_t room = std::max<int64_t>(c1 - c0, 0) + spare / (int64_t) G;
-                auto need = [](int64_t cells) { return strata::core::qsa_kv_elastic_need(cells + 64); };
+                auto need = [](int64_t cells) { return lamina::core::qsa_kv_elastic_need(cells + 64); };
                 if (need(o.max_context) > room) {
                     int64_t fit = 0;   // the longest context, in whole K/V steps, whose K/V fits
                     for (int64_t lo = 1, hi = o.max_context / kvg.step; lo <= hi;) {
@@ -2781,22 +2781,22 @@ int strata::program::run(int argc, char** argv) {
             }
             if (kvg.on) {
                 kvg.top = kvg.lo = top;
-                kvg.cells = strata::core::qsa_kv_elastic_cells();
+                kvg.cells = lamina::core::qsa_kv_elastic_cells();
                 std::fprintf(stderr, "lamina serve: elastic K/V: %lld of %lld cells in VRAM (%.2f of %.2f GiB); the expert "
                                      "cache (%lld slots) gives the K/V room below slot %lld as the context grows\n",
                              (long long) kvg.cells, (long long) o.max_context,
-                             (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
-                             (double) strata::core::qsa_kv_elastic_full_bytes() / 1073741824.0,
+                             (double) lamina::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
+                             (double) lamina::core::qsa_kv_elastic_full_bytes() / 1073741824.0,
                              (long long) xcache.slots(), (long long) top);
-            } else if (strata::core::qsa_kv_elastic()) {
+            } else if (lamina::core::qsa_kv_elastic()) {
                 // nothing can grow it later: the whole context now, in new VRAM
-                if (!strata::core::qsa_kv_elastic_grow(o.max_context + 64, [] { return (strata::core::VmmChunk) 0; })) {
+                if (!lamina::core::qsa_kv_elastic_grow(o.max_context + 64, [] { return (lamina::core::VmmChunk) 0; })) {
                     std::fprintf(stderr, "lamina serve: elastic K/V: the cache cannot give slots up here and the whole "
                                          "K/V does not fit; start without --kv-grow\n");
                     return 1;
                 }
                 std::fprintf(stderr, "lamina serve: elastic K/V: the cache cannot give slots up here; the whole K/V is "
-                                     "mapped (%lld cells)\n", (long long) strata::core::qsa_kv_elastic_cells());
+                                     "mapped (%lld cells)\n", (long long) lamina::core::qsa_kv_elastic_cells());
             }
         }
         // nothing running on the device, the adaptive tiers' copies landed (a swap in flight could still be writing a
@@ -2812,11 +2812,11 @@ int strata::program::run(int argc, char** argv) {
         auto kvg_ensure = [&](int64_t cells) -> bool {
             if (!kvg.on || cells <= kvg.cells) return true;
             const int64_t target = std::min<int64_t>(o.max_context + 64, (cells + kvg.step - 1) / kvg.step * kvg.step);
-            const int64_t need = strata::core::qsa_kv_elastic_need(target);
-            if (need == 0) { kvg.cells = strata::core::qsa_kv_elastic_cells(); return true; }
+            const int64_t need = lamina::core::qsa_kv_elastic_need(target);
+            if (need == 0) { kvg.cells = lamina::core::qsa_kv_elastic_cells(); return true; }
             kv_quiesce();
-            strata::core::VmmRange& r = *xcache.vmm_range();
-            const uint64_t G = strata::core::vmm_granularity();
+            lamina::core::VmmRange& r = *xcache.vmm_range();
+            const uint64_t G = lamina::core::vmm_granularity();
             std::vector<int32_t> owner;   // slot -> residency index
             // The slots given up are the ones just below the prompt path's loan, and the loan is most of the cache:
             // they hold experts of middling heat.  So an expert there that is hotter than the coldest one in the loan
@@ -2828,7 +2828,7 @@ int strata::program::run(int argc, char** argv) {
                 const float u = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) i];
                 return u * 1048576.0f - (float) rank[(size_t) i];
             };
-            const auto& lay = strata::kernels::cpu::expert_layout();
+            const auto& lay = lamina::kernels::cpu::expert_layout();
             int64_t gave = 0, moved = 0;
             auto freeable = [&]() -> int64_t {   // mapped chunks wholly inside [lo, top): a chunk a live slot shares stays
                 const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.lo) + G - 1) / G);
@@ -2858,18 +2858,18 @@ int strata::program::run(int argc, char** argv) {
                         vi = cold.back().second;
                         const int32_t vs = host_res[(size_t) vi];
                         if (xcache.slot_offset(vs + 1) - xcache.slot_offset(vs) <
-                                (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(layer)) ||
+                                (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(layer)) ||
                             cudaMemcpy(xcache.device_slot(vs), xcache.device_slot((int32_t) kvg.lo),
                                        (size_t) lay.blob_bytes(layer), cudaMemcpyDeviceToDevice) != cudaSuccess)
                             vi = -1;
                         else {
                             cold.pop_back();
                             host_res[(size_t) oi] = vs;
-                            host_res[(size_t) vi] = strata::core::kNotResident;
+                            host_res[(size_t) vi] = lamina::core::kNotResident;
                             ++moved;
                         }
                     }
-                    if (vi < 0) host_res[(size_t) oi] = strata::core::kNotResident;
+                    if (vi < 0) host_res[(size_t) oi] = lamina::core::kNotResident;
                     ++kvg.evicted;
                 }
             }
@@ -2886,22 +2886,22 @@ int strata::program::run(int argc, char** argv) {
                 const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
                 for (int64_t c = c0; c < c1; ++c)
                     if (r.mapped(c))
-                        if (const strata::core::VmmChunk h = r.unmap(c)) kvg.spare.push_back(h);
+                        if (const lamina::core::VmmChunk h = r.unmap(c)) kvg.spare.push_back(h);
             }
             if (gave > 0 && res_put(d_res, host_res) != cudaSuccess) return false;
             int64_t fresh = 0;
-            const bool ok = strata::core::qsa_kv_elastic_grow(target, [&]() -> strata::core::VmmChunk {
+            const bool ok = lamina::core::qsa_kv_elastic_grow(target, [&]() -> lamina::core::VmmChunk {
                 if (kvg.spare.empty()) { ++fresh; return 0; }   // the cache is at its floor: new memory
-                const strata::core::VmmChunk h = kvg.spare.back();
+                const lamina::core::VmmChunk h = kvg.spare.back();
                 kvg.spare.pop_back();
                 return h;
             });
             kvg.fresh += fresh;
-            kvg.cells = strata::core::qsa_kv_elastic_cells();
+            kvg.cells = lamina::core::qsa_kv_elastic_cells();
             ++kvg.grows;
             std::fprintf(stderr, "lamina serve: K/V grown to %lld cells (%.2f GiB); the expert cache gave %lld slots for "
                                  "it, %lld hotter experts moved to colder ones' slots (%lld of %lld slots hold experts)%s\n",
-                         (long long) kvg.cells, (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
+                         (long long) kvg.cells, (double) lamina::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
                          (long long) gave, (long long) moved, (long long) (kvg.lo + (xcache.slots() - kvg.top)),
                          (long long) xcache.slots(), fresh > 0 ? " - and new VRAM, the cache being at its floor" : "");
             if (!ok)
@@ -2916,18 +2916,18 @@ int strata::program::run(int argc, char** argv) {
             const int64_t target = std::max<int64_t>(kvg.step, (cells + kvg.step - 1) / kvg.step * kvg.step);
             if (kvg.cells < target + 2 * kvg.step || kvg.lo >= kvg.top) return true;
             kv_quiesce();
-            strata::core::qsa_kv_elastic_shrink(target, [&](strata::core::VmmChunk h) { kvg.spare.push_back(h); });
-            kvg.cells = strata::core::qsa_kv_elastic_cells();
-            strata::core::VmmRange& r = *xcache.vmm_range();
-            const uint64_t G = strata::core::vmm_granularity();
+            lamina::core::qsa_kv_elastic_shrink(target, [&](lamina::core::VmmChunk h) { kvg.spare.push_back(h); });
+            kvg.cells = lamina::core::qsa_kv_elastic_cells();
+            lamina::core::VmmRange& r = *xcache.vmm_range();
+            const uint64_t G = lamina::core::vmm_granularity();
             const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
             {   // one run from the lowest unmapped chunk, as long as the chunks handed back last (one access call)
                 const int64_t c0 = (int64_t) (xcache.slot_offset(kvg.lo) / G);
                 int64_t cend = c0, need = (int64_t) kvg.spare.size();
                 while (cend < c1 && need > 0) need -= r.mapped(cend++) ? 0 : 1;
-                if (!r.map_range(c0, cend, [&]() -> strata::core::VmmChunk {
+                if (!r.map_range(c0, cend, [&]() -> lamina::core::VmmChunk {
                         if (kvg.spare.empty()) return 0;
-                        const strata::core::VmmChunk h = kvg.spare.back();
+                        const lamina::core::VmmChunk h = kvg.spare.back();
                         kvg.spare.pop_back();
                         return h;
                     }))
@@ -2943,7 +2943,7 @@ int strata::program::run(int argc, char** argv) {
                 ++kvg.lo;
             }
             // the refills on one stream and one sync (a blocking copy each is a driver round trip per expert)
-            const auto& lay = strata::kernels::cpu::expert_layout();
+            const auto& lay = lamina::kernels::cpu::expert_layout();
             std::vector<std::pair<size_t, int32_t>> filled;   // (residency index, slot), resident once landed
             size_t pi = 0;
             for (int64_t s = lo0; s < kvg.lo; ++s) {
@@ -2952,7 +2952,7 @@ int strata::program::run(int argc, char** argv) {
                     const int32_t l = profile[pi].first, e = profile[pi].second;
                     const size_t i = (size_t) l * (size_t) g.n_expert + (size_t) e;
                     if (host_res[i] >= 0 ||
-                        (uint64_t) strata::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)) > room)
+                        (uint64_t) lamina::core::ExpertCache::slot_stride((int64_t) lay.blob_bytes(l)) > room)
                         continue;
                     const uint8_t* b = srcp->blob(l, e);
                     if (b == nullptr) continue;
@@ -2971,15 +2971,15 @@ int strata::program::run(int argc, char** argv) {
             for (const auto& [i, s] : filled) host_res[i] = s;
             kvg.refilled += (int64_t) filled.size();
             if (res_put(d_res, host_res) != cudaSuccess) return false;
-            for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
+            for (const lamina::core::VmmChunk h : kvg.spare) lamina::core::vmm_chunk_free(h);   // new ones, if any
             kvg.spare.clear();
             ++kvg.trims;
             std::fprintf(stderr, "lamina serve: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled "
                                  "from the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
             return true;
         };
-        strata::core::Verifier ver;
-        strata::core::VerifyHits vh;
+        lamina::core::Verifier ver;
+        lamina::core::VerifyHits vh;
         vh.res = host_res.data();
         vh.cache_base = thits.cache_base;
         vh.slot_off = xcache.slot_offsets();
@@ -3019,9 +3019,9 @@ int strata::program::run(int argc, char** argv) {
             const auto t0 = Clock::now();
             std::vector<double> heat(prompt_heat.size());
             for (size_t i = 0; i < heat.size(); ++i) heat[i] = (double) drive.d.routed[i] + prompt_heat[i];
-            const auto ranked = strata::core::blend_learned_profile(g.n_layers, g.n_expert, heat, profile);
+            const auto ranked = lamina::core::blend_learned_profile(g.n_layers, g.n_expert, heat, profile);
             std::string e;
-            if (strata::core::write_expert_profile(o.expert_profile_save, g.n_layers, g.n_expert, ranked, e))
+            if (lamina::core::write_expert_profile(o.expert_profile_save, g.n_layers, g.n_expert, ranked, e))
                 std::fprintf(stderr, "lamina serve: expert profile saved to %s (%s, %.0f ms)\n",
                              o.expert_profile_save.c_str(), why,
                              std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
@@ -3030,11 +3030,11 @@ int strata::program::run(int argc, char** argv) {
             profile_saved_at = Clock::now();
             profile_dirty = false;
         };
-        // ---- the prompt cache (strata/core/prompt_cache.hpp)
-        std::vector<strata::core::QsaState*> kv_states;
+        // ---- the prompt cache (lamina/core/prompt_cache.hpp)
+        std::vector<lamina::core::QsaState*> kv_states;
         for (int64_t i = 0; i < g.n_qsa_layers(); ++i) kv_states.push_back(&ss.qsa_states[i]);
         kv_states.push_back(&mtp.kv_state());
-        strata::core::PromptCache pcache(g, ss, kv_states, main_cs, o.prompt_cache, (uint64_t) o.cache_ram_mib << 20);
+        lamina::core::PromptCache pcache(g, ss, kv_states, main_cs, o.prompt_cache, (uint64_t) o.cache_ram_mib << 20);
         // the elastic K/V: a stashed sequence's restore (or the live one's stash) copies all its cells
         if (kvg.on) pcache.ensure_kv = [&](int64_t cells) { return kvg_ensure(cells + 256); };
         if (pcache.enabled())
@@ -3048,7 +3048,7 @@ int strata::program::run(int argc, char** argv) {
         std::condition_variable in_cv;
         std::deque<std::string> in_lines;
         bool in_eof = false;
-        const strata::program::ServeIo& io = strata::program::serve_io();
+        const lamina::program::ServeIo& io = lamina::program::serve_io();
         std::thread in_reader([&] {
             std::string l;
             while (io.read_line(l)) {
@@ -3062,10 +3062,10 @@ int strata::program::run(int argc, char** argv) {
             in_eof = true;
             in_cv.notify_one();
         });
-        strata::program::ReaderEnd reader_end{in_reader, io};
+        lamina::program::ReaderEnd reader_end{in_reader, io};
         // Ctrl+C in the console ends the engine as QUIT does, before any request queued: the running one stops at its
         // next chunk or window, then the exit work runs (the learned profile).  In-process the host handles it.
-        std::optional<strata::platform::ConsoleQuit> console_quit;
+        std::optional<lamina::platform::ConsoleQuit> console_quit;
         if (!io.in_process)
             console_quit.emplace([&] {
                 stop_req.store(true);
@@ -3075,7 +3075,7 @@ int strata::program::run(int argc, char** argv) {
             });
         // --arena-place: after a request, the arena's swaps for the residency the tiers left, a slice at a time while
         // no request waits (the GPUs' copies from the arena are done first: nothing reads it meanwhile)
-        const char* replace_env = std::getenv("STRATA_ARENA_REPLACE");   // =0: the A/B arm without it
+        const char* replace_env = std::getenv("LAMINA_ARENA_REPLACE");   // =0: the A/B arm without it
         const bool replace = o.arena_place && srcp == &arena_src && !profile_rank.empty() &&
                              !(replace_env != nullptr && std::atoi(replace_env) == 0);
         size_t replace_left = 0, replace_planned = 0;
@@ -3150,8 +3150,8 @@ int strata::program::run(int argc, char** argv) {
             pp_line(pp_at + prefill.processed());
             return stop_req.load();
         };
-        // STRATA_TRACE=1: one stderr line per step of a request (the log shows where a request stops)
-        const bool trace = std::getenv("STRATA_TRACE") != nullptr;
+        // LAMINA_TRACE=1: one stderr line per step of a request (the log shows where a request stops)
+        const bool trace = std::getenv("LAMINA_TRACE") != nullptr;
         const Clock::time_point trace_t0 = Clock::now();
         auto tr = [&](const char* what, long long a = -1, long long b = -1) {
             if (!trace) return;
@@ -3179,7 +3179,7 @@ int strata::program::run(int argc, char** argv) {
         }
         // the penalty-history buffer: one row per window row (`penalty_rows`), allocated once for the widest window
         constexpr int kPenaltyWindowCap = 4096;
-        constexpr size_t kHistSlots = (size_t) kPenaltyWindowCap * (size_t) strata::kernels::kVerifyMaxT;
+        constexpr size_t kHistSlots = (size_t) kPenaltyWindowCap * (size_t) lamina::kernels::kVerifyMaxT;
         int32_t* d_hist = nullptr;
         std::vector<int32_t> hist_stage(kHistSlots, -1);
         if (cudaMalloc(&d_hist, kHistSlots * sizeof(int32_t)) != cudaSuccess) {
@@ -3193,17 +3193,17 @@ int strata::program::run(int argc, char** argv) {
             cudaMemGetInfo(&free_b, &total_b);
             serve_print("INFO context=%lld kv=%s kv_resident=0 expert_slots=%lld expert_cache_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
-                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" STRATA_VERSION " fork=lamina\n",
+                        "spec_min_p=%.2f second_gpu=%d tail_role_token=%lld engine=" LAMINA_VERSION " fork=lamina\n",
                         (long long) o.max_context, o.kv.c_str(), (long long) xcache.slots(),
                         (long long) (xcache.bytes() >> 20), o.spec, o.spec, o.spec_lookup, (long long) (free_b >> 20),
-                        (long long) (strata::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
+                        (long long) (lamina::kernels::cpu::expert_layout().total >> 20), pool.workers(), o.pcie_frac,
                         o.spec_min_p, o.second_gpu, (long long) o.tail_role_token);
         }
         // --ple-io ram: READY only once the table is in RAM.  While it loads, its 28.8 GB of reads compete with the
         // requests and the rows still come from the SSD: a first chat right after READY decoded at ~21 tok/s instead
-        // of ~95 and a 32K prompt read 13% slower.  STRATA_PLE_RAM_NOWAIT=1: before.
-        if (ple_table.is_open() && ple_table.mode() == strata::kernels::PleIo::Ram && !ple_table.ram_ready() &&
-            !std::getenv("STRATA_PLE_RAM_NOWAIT")) {
+        // of ~95 and a 32K prompt read 13% slower.  LAMINA_PLE_RAM_NOWAIT=1: before.
+        if (ple_table.is_open() && ple_table.mode() == lamina::kernels::PleIo::Ram && !ple_table.ram_ready() &&
+            !std::getenv("LAMINA_PLE_RAM_NOWAIT")) {
             const auto w0 = std::chrono::steady_clock::now();
             ple_table.wait_ram_load();
             std::fprintf(stderr, "lamina serve: waited %.1f s for the PLE table before READY (%s)\n",
@@ -3215,20 +3215,20 @@ int strata::program::run(int argc, char** argv) {
         int64_t rounds = 0;
         const int S = o.spec, W = o.max_window();   // the draft layer's windows; with prompt lookup's
         // prompt lookup: the text so far, kept across requests (a conversation's next request shares its prefix)
-        strata::spec::SuffixDrafter lookup(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
+        lamina::spec::SuffixDrafter lookup(o.spec_lookup, 32, o.spec_lookup > 0 ? (size_t) o.max_context + 16 : 16);
         std::vector<int32_t> ids32, ldrafts((size_t) W, 0);
         constexpr int64_t kImStart = 248045;   // <|im_start|>: a new turn begins here
         // The previous request's prompt: where a new one leaves it, it gets a checkpoint (see `fork` below).
         std::vector<int64_t> prev_prompt;
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
-        // or more strata-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt order;
+        // or more lamina-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt order;
         // each image's rows go to its run of <|image_pad|> tokens, whose M-RoPE positions are mtmd's: t = p,
         // h = p + y, w = p + x, and the text after the image continues at p + max(nx, ny).
         constexpr int64_t kImagePad = 248056;   // qwen4exp.ple.image_token_id: the PLE hash reads it for image cells
         bool mrope_identity = true;
         std::vector<float> img_rows;
         std::vector<const float*> row_ptr;
-        std::vector<strata::core::ImgKey> req_imgs;
+        std::vector<lamina::core::ImgKey> req_imgs;
         bool poisoned = false;   // the last request ended on non-finite logits: the next one reads its prompt anew
         // The expert tiers' counters over a request, as a TIERS line before its DONE (whose positional fields are
         // upstream's protocol): the moves of every GPU's adaptive tier, the GPU tiers' work and prefetch (the first
@@ -3238,13 +3238,13 @@ int strata::program::run(int argc, char** argv) {
             int64_t main_swaps, main_fills, main_dropped, cpu_layers;
             struct Gpu {
                 int64_t entries, experts, layers, swaps, fills, dropped, prefetched, prefetch_used;
-            } gpu[strata::core::kMaxGpuTiers];
+            } gpu[lamina::core::kMaxGpuTiers];
         };
         const auto tier_counters = [&]() {
             TierCounters c{tier.swaps, tier.fills, tier.dropped, drive.d.tier_skipped, {}};
             for (int t = 0; t < n_tiers; ++t) {
-                const strata::core::SecondGpu& gp = tiers[(size_t) t].gpu;
-                const strata::core::AdaptiveTier& ad = tiers[(size_t) t].adapt;
+                const lamina::core::SecondGpu& gp = tiers[(size_t) t].gpu;
+                const lamina::core::AdaptiveTier& ad = tiers[(size_t) t].adapt;
                 c.gpu[t] = {gp.entries_done, gp.experts, gp.layers, ad.swaps, ad.fills, ad.dropped,
                             gp.prefetch_copied, gp.prefetch_used};
             }
@@ -3347,16 +3347,16 @@ int strata::program::run(int argc, char** argv) {
                 if (!geni) {
                     for (int64_t c = 0; c < cells; ++c) put(c, c, c, c);
                 } else {
-                    std::vector<strata::program::VisionImage> imgs;
+                    std::vector<lamina::program::VisionImage> imgs;
                     img_rows.clear();
-                    ve = strata::program::read_vision_records(emb_path, g.n_embd, img_rows, imgs);
+                    ve = lamina::program::read_vision_records(emb_path, g.n_embd, img_rows, imgs);
                     int64_t p = 0, i = 0;
                     size_t k = 0;
                     while (ve.empty() && i < n) {
                         if (ids[(size_t) i] != kImagePad) { put(i, p, p, p); ++p; ++i; continue; }
                         if (k >= imgs.size()) { ve = "the prompt has more images than the embeddings file"; break; }
-                        const strata::program::VisionImage& im = imgs[k++];
-                        req_imgs.push_back({i, strata::program::vision_image_key(
+                        const lamina::program::VisionImage& im = imgs[k++];
+                        req_imgs.push_back({i, lamina::program::vision_image_key(
                                                    im, req_img_keys.size() == imgs.size() ? &req_img_keys[k - 1] : nullptr,
                                                    img_rows.data(), g.n_embd)});
                         for (int64_t j = 0; j < im.n && ve.empty(); ++j)
@@ -3420,7 +3420,7 @@ int strata::program::run(int argc, char** argv) {
                     kv_short = 0;
                 }
             }
-            strata::kernels::SamplerParams req_sp;
+            lamina::kernels::SamplerParams req_sp;
             req_sp.greedy = req_temperature <= 0.0f;
             req_sp.temperature = req_temperature;
             req_sp.top_p = req_top_p;
@@ -3615,8 +3615,8 @@ int strata::program::run(int argc, char** argv) {
             int64_t merge_from = n - 1;   // the first decode window's first position: [merge_from, n) are prompt tokens
             if (!stop_req.load()) {
                 struct NoHeadSampling {   // every token is committed and the picks are discarded
-                    strata::core::Verifier& v;
-                    explicit NoHeadSampling(strata::core::Verifier& x) : v(x) { v.set_head_sampling(false); }
+                    lamina::core::Verifier& v;
+                    explicit NoHeadSampling(lamina::core::Verifier& x) : v(x) { v.set_head_sampling(false); }
                     ~NoHeadSampling() { v.set_head_sampling(true); }
                 } no_head_sampling(ver);
                 if (pp_total == 0) {
@@ -3714,7 +3714,7 @@ int strata::program::run(int argc, char** argv) {
                     window[(size_t) i] = first_window ? (int32_t) ids[(size_t) (merge_from + i)] : dr[(size_t) i - 1];
                 if (hist_n > 0) {
                     // row t counts what plain decode would have: the state's tokens, then window[0..t]
-                    strata::kernels::penalty_rows(consumed.data(), (int64_t) consumed.size(), window.data(), T, hist_n,
+                    lamina::kernels::penalty_rows(consumed.data(), (int64_t) consumed.size(), window.data(), T, hist_n,
                                                   hist_stage.data());
                     cudaMemcpy(d_hist, hist_stage.data(), (size_t) T * (size_t) hist_n * sizeof(int32_t),
                                cudaMemcpyHostToDevice);
@@ -3874,9 +3874,9 @@ int strata::program::run(int argc, char** argv) {
     // then starts at the last prompt position, whose prediction is the first generated token.
     int64_t pos_start = 0;
     int64_t spec_pos = 0;   // plan v0.3 P6: where the speculative loop starts (0 = not used)
-    strata::prefill::Prefill prefill;
-    strata::prefill::ExpertRunner offload;
-    strata::prefill::PromptSplit psplit;   // (its second stage refers to the first: destroyed before it)
+    lamina::prefill::Prefill prefill;
+    lamina::prefill::ExpertRunner offload;
+    lamina::prefill::PromptSplit psplit;   // (its second stage refers to the first: destroyed before it)
     PromptBuffers pbuf;
     double prefill_batched_ms = 0;
     if (o.prefill_chunk > 0 && n_prompt > 1) {
@@ -3905,9 +3905,9 @@ int strata::program::run(int argc, char** argv) {
         const bool split_on = pbuf.split_region != nullptr;
         psplit.set_profile(o.prefill_profile);
         const Clock::time_point tp0 = Clock::now();
-        // STRATA_PREFILL_CUT=n (tests): the prompt in two runs split at position n, as a follow-up turn continues a
+        // LAMINA_PREFILL_CUT=n (tests): the prompt in two runs split at position n, as a follow-up turn continues a
         // cached prefix (the split's second stage copies that prefix's state in)
-        const char* cut_env = std::getenv("STRATA_PREFILL_CUT");
+        const char* cut_env = std::getenv("LAMINA_PREFILL_CUT");
         const int64_t cut = cut_env != nullptr ? std::min<int64_t>(std::max<int64_t>(std::atoll(cut_env), 0), n_batched) : 0;
         for (int64_t a = 0; a < n_batched;) {
             const int64_t b = a < cut ? cut : n_batched;
@@ -3938,7 +3938,7 @@ int strata::program::run(int argc, char** argv) {
         // the PLE window of the token path: the two tokens before `pos_start`
         ss.ple_prev[0] = pos_start >= 2 ? (int32_t) o.tokens[(size_t) (pos_start - 2)] : -1;
         ss.ple_prev[1] = pos_start >= 1 ? (int32_t) o.tokens[(size_t) (pos_start - 1)] : -1;
-        const strata::prefill::PrefillStats& ps = prefill.stats();
+        const lamina::prefill::PrefillStats& ps = prefill.stats();
         std::fprintf(stderr, "lamina: prefill %lld tokens in %lld chunks, %.1f ms (%.1f tok/s); experts "
                              "streamed %lld (%lld ahead), host %.1f ms, resident %lld; PLE %.1f ms\n",
                      (long long) ps.tokens, (long long) ps.chunks, ps.ms_total,
@@ -3950,7 +3950,7 @@ int strata::program::run(int argc, char** argv) {
                          (long long) offload.experts_prefetched, (long long) offload.experts_resident, offload.ms_host,
                          offload.ms_gpu);
         if (split_on) {
-            const strata::prefill::PrefillStats& s2 = psplit.stats();
+            const lamina::prefill::PrefillStats& s2 = psplit.stats();
             std::fprintf(stderr, "lamina: prefill split at layer %lld: the second stage %.1f ms (its experts "
                                  "streamed %lld (%lld ahead), resident %lld, host %.1f ms), the first waited %.1f ms to "
                                  "hand a chunk on, the end %.1f ms, the state's copy in %.1f ms\n",
@@ -3960,10 +3960,10 @@ int strata::program::run(int argc, char** argv) {
         }
         if (o.prefill_profile) {
             for (int st = 0; st < (split_on ? 2 : 1); ++st) {
-                const strata::prefill::PrefillStats& px = st == 0 ? ps : psplit.stats();
+                const lamina::prefill::PrefillStats& px = st == 0 ? ps : psplit.stats();
                 std::fprintf(stderr, "lamina: prefill GPU ms by section%s:", st == 0 ? "" : " (the second stage)");
-                for (int i = 0; i < strata::prefill::kPsCount; ++i)
-                    std::fprintf(stderr, "%s %s %.0f", i ? ";" : "", strata::prefill::prefill_section_name(i),
+                for (int i = 0; i < lamina::prefill::kPsCount; ++i)
+                    std::fprintf(stderr, "%s %s %.0f", i ? ";" : "", lamina::prefill::prefill_section_name(i),
                                  px.ms_section[i]);
                 std::fprintf(stderr, "\n");
             }
@@ -4000,8 +4000,8 @@ int strata::program::run(int argc, char** argv) {
             return 2;
         }
         mem_mark("the head and the prompt path");
-        strata::core::Verifier ver;
-        strata::core::VerifyHits vh;
+        lamina::core::Verifier ver;
+        lamina::core::VerifyHits vh;
         vh.res = host_res.data();
         vh.cache_base = thits.cache_base;
         vh.slot_off = xcache.slot_offsets();
@@ -4075,7 +4075,7 @@ int strata::program::run(int argc, char** argv) {
         std::vector<int64_t> accepted_hist((size_t) W, 0);
         int64_t rounds = 0, drafts_total = 0, drafts_ok = 0;
         // prompt lookup: the text so far, the prompt and then each emitted token
-        strata::spec::SuffixDrafter lookup(o.spec_lookup, 32,
+        lamina::spec::SuffixDrafter lookup(o.spec_lookup, 32,
                                            o.spec_lookup > 0 ? (size_t) (n_prompt + max_new) + 16 : 16);
         if (o.spec_lookup > 0) {
             for (int64_t t : o.tokens) lookup.append((int32_t) t);
@@ -4256,8 +4256,8 @@ int strata::program::run(int argc, char** argv) {
                         (long long) tier.fills, o.adapt_every, tier.ms / rounds, (long long) tier.dropped,
                         (double) tier.sent_bytes / 1e6 / (double) rounds);
         for (int t = 0; rounds > 0 && t < n_tiers; ++t) {   // the layers left to the CPU and the predictions: all tiers'
-            const strata::core::SecondGpu& gp = tiers[(size_t) t].gpu;
-            const strata::core::AdaptiveTier& ad = tiers[(size_t) t].adapt;
+            const lamina::core::SecondGpu& gp = tiers[(size_t) t].gpu;
+            const lamina::core::AdaptiveTier& ad = tiers[(size_t) t].adapt;
             serve_print("%-24s %.2f routed entries and %.2f experts per round in %.2f layers (%.2f left to the CPU), "
                         "its rows after the CPU's in %.2f layers, %.3f ms/round; %lld experts swapped in and %lld into "
                         "empty slots (%lld still empty, %lld moves dropped; its copies between windows, %.2f ms, at "

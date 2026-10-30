@@ -327,7 +327,7 @@ std::vector<std::string> engine_args(const json& cfg) {
             say("[lamina] \"parallel\" must be a whole number of requests (2.." + std::to_string(kParallelMax) + "), not " +
                 py_repr_value(n) + ": ignored");
         } else if (n.get<int64_t>() > 1) {
-            const char* mtp = std::getenv("STRATA_BATCH_MTP");
+            const char* mtp = std::getenv("LAMINA_BATCH_MTP");
             if (n.get<int64_t>() > kParallelMax && !has(args, "--batch-mtp") && (mtp == nullptr || !*mtp || std::string(mtp) == "0"))
                 say("[lamina] \"parallel\": " + std::to_string(n.get<int64_t>()) + " - the engine runs at most " +
                     std::to_string(kParallelMax) + " requests together; it will use " + std::to_string(kParallelMax));
@@ -365,7 +365,7 @@ const std::vector<std::pair<std::string, std::string>>& offline_env() {
     static const std::vector<std::pair<std::string, std::string>> env = {
         {"HF_HUB_OFFLINE", "1"}, {"TRANSFORMERS_OFFLINE", "1"}, {"HF_HUB_DISABLE_TELEMETRY", "1"}, {"DO_NOT_TRACK", "1"},
         {"PIP_NO_INDEX", "1"}, {"PIP_DISABLE_PIP_VERSION_CHECK", "1"}, {"NO_PROXY", "*"}, {"no_proxy", "*"},
-        {"HTTP_PROXY", ""}, {"HTTPS_PROXY", ""}, {"http_proxy", ""}, {"https_proxy", ""}, {"STRATA_OFFLINE", "1"}};
+        {"HTTP_PROXY", ""}, {"HTTPS_PROXY", ""}, {"http_proxy", ""}, {"https_proxy", ""}, {"LAMINA_OFFLINE", "1"}};
     return env;
 }
 

@@ -1,11 +1,11 @@
-#include "strata/core/adaptive_policy.hpp"
+#include "lamina/core/adaptive_policy.hpp"
 
 #include <algorithm>
 #include <cstdio>
 #include <vector>
 
-using strata::core::AdaptiveMoveOrder;
-using strata::core::adaptive_move_less;
+using lamina::core::AdaptiveMoveOrder;
+using lamina::core::adaptive_move_less;
 
 namespace {
 int failures = 0;

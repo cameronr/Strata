@@ -8,7 +8,7 @@
 
 #include <cuda_runtime.h>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 // c ? a : b as a select of values: the compiler turns `c ? v[i] : v[j]` into a load from a selected address, which
@@ -61,4 +61,4 @@ __device__ __forceinline__ int xor_scatter_index(int lane) {
 __host__ __device__ constexpr int pow2_at_least(int n) { return n <= 1 ? 1 : 2 * pow2_at_least((n + 1) / 2); }
 
 }  // namespace
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

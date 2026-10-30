@@ -1,16 +1,16 @@
-// src/core/adaptive_tier.cpp - see include/strata/core/adaptive_tier.hpp.
-#include "strata/core/adaptive_tier.hpp"
+// src/core/adaptive_tier.cpp - see include/lamina/core/adaptive_tier.hpp.
+#include "lamina/core/adaptive_tier.hpp"
 
-#include "strata/core/adaptive_policy.hpp"
-#include "strata/core/cuda_host.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
+#include "lamina/core/adaptive_policy.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 
-namespace strata::core {
+namespace lamina::core {
 AdaptiveTier::~AdaptiveTier() {
     DeviceScope on(dev_, main_, dev_ >= 0);
     if (stream_) cudaStreamSynchronize(stream_);
@@ -64,7 +64,7 @@ int64_t AdaptiveTier::free_slots() const {
 }
 
 uint64_t AdaptiveTier::bytes_of(const Move& m) const {
-    return strata::kernels::cpu::expert_layout().blob_bytes(m.layer);
+    return lamina::kernels::cpu::expert_layout().blob_bytes(m.layer);
 }
 
 void AdaptiveTier::evict(const Move& m) {
@@ -405,4 +405,4 @@ void AdaptiveTier::apply_pending(bool wait) {
     for (; admitted_ < landed_; ++admitted_) res[(size_t) pending_[admitted_].first] = pending_[admitted_].second;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

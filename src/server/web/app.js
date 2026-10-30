@@ -1,4 +1,4 @@
-// serve/web/app.js - the Strata web app: Chat, Monitor, About. No framework, no network beyond this server.
+// src/server/web/app.js - the Lamina web app: Chat, Monitor, About. No framework, no network beyond this server.
 // The Monitor tab rebuilds PR #22's dashboard idea (code-martin) on the server's own /metrics.
 "use strict";
 
@@ -13,8 +13,8 @@ const ctxfmt = (n) => (n && n % 1024 === 0 ? `${fmt(n / 1024)}K` : kfmt(n));
 const gb = (b, d = 1) => (b == null ? "–" : fmt(b / 1073741824, d));   // memory: binary GB, as Windows shows it
 
 const store = {
-  get(k, d) { try { const v = localStorage.getItem("strata." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
-  set(k, v) { try { localStorage.setItem("strata." + k, JSON.stringify(v)); } catch (e) { /* private mode: in memory only */ } },
+  get(k, d) { try { const v = localStorage.getItem("lamina." + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem("lamina." + k, JSON.stringify(v)); } catch (e) { /* private mode: in memory only */ } },
 };
 
 // ------------------------------------------------------------------ toasts
@@ -57,7 +57,7 @@ async function copyText(text, btn) {
 // the system's theme until the user picks one (only a click is saved)
 function setTheme(t, save) {
   document.documentElement.dataset.theme = t;
-  if (save) try { localStorage.setItem("strata.theme", t); } catch (e) { /* ignore */ }
+  if (save) try { localStorage.setItem("lamina.theme", t); } catch (e) { /* ignore */ }
   $("theme-icon").setAttribute("href", `${SPRITE}#i-${t === "dark" ? "sun" : "moon"}`);
   $("dark-toggle").setAttribute("aria-checked", String(t === "dark"));
 }
@@ -67,7 +67,7 @@ $("dark-toggle").onclick = flipTheme;
 setTheme(document.documentElement.dataset.theme || "light", false);
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
   let saved = null;
-  try { saved = localStorage.getItem("strata.theme"); } catch (err) { /* ignore */ }
+  try { saved = localStorage.getItem("lamina.theme"); } catch (err) { /* ignore */ }
   if (!saved) setTheme(e.matches ? "dark" : "light", false);
 });
 
@@ -359,7 +359,7 @@ $("req-all").addEventListener("click", () => { reqShowAll = !reqShowAll; if (las
 
 // ------------------------------------------------------------------ MCP servers (GET /mcp)
 // Tools from the MCP servers in the run config: the chat offers them to the model (opt-in per request,
-// "strata_mcp": true, which only this page sends); the Monitor lists the servers and what they offer.
+// "lamina_mcp": true, which only this page sends); the Monitor lists the servers and what they offer.
 let mcpInfo = {servers: [], tools: 0}, mcpRetry = null;
 async function loadMcp() {
   try {
@@ -615,7 +615,7 @@ function answerHtml(m) {
   });
   return html + markdown(m.text.slice(pos));
 }
-// a tool event from the stream (the `strata_mcp` field of a chunk)
+// a tool event from the stream (the `lamina_mcp` field of a chunk)
 function onTool(m, x) {
   if (x.event === "limit") { m.limit = x.max_rounds; return; }
   m.tools = m.tools || [];
@@ -762,7 +762,7 @@ async function send() {
   }
   if (settings.seed) body.seed = +settings.seed;
   if (settings.max) body.max_tokens = +settings.max;
-  if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;   // this server may run MCP tools for it
+  if (settings.mcp !== false && mcpInfo.tools > 0) body.lamina_mcp = true;   // this server may run MCP tools for it
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
   const paint = () => { frame = 0; updateAssistant(el, m, true); scrollDown(); };
@@ -792,7 +792,7 @@ async function send() {
         try { j = JSON.parse(data); } catch (e) { continue; }
         if (j.error) throw new Error(j.error.message || "the engine reported an error");
         if (j.usage) usage = j.usage;
-        if (j.strata_mcp) onTool(m, j.strata_mcp);
+        if (j.lamina_mcp) onTool(m, j.lamina_mcp);
         const d = (j.choices && j.choices[0] && j.choices[0].delta) || {};
         const lastTool = m.tools && m.tools.length ? m.tools[m.tools.length - 1] : null;   // a new round after a tool
         if (d.reasoning_content) {

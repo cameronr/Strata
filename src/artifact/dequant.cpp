@@ -1,15 +1,15 @@
-// src/artifact/dequant.cpp - the `strata-dequant` CLI (dequantize a GGUF tensor and dump F32).
-// The dequantizers themselves are header-only in include/strata/artifact/dequant.hpp.
-#include "strata/artifact/dequant.hpp"
+// src/artifact/dequant.cpp - the `lamina-dequant` CLI (dequantize a GGUF tensor and dump F32).
+// The dequantizers themselves are header-only in include/lamina/artifact/dequant.hpp.
+#include "lamina/artifact/dequant.hpp"
 
-#ifdef STRATA_DEQUANT_SELFTEST
+#ifdef LAMINA_DEQUANT_SELFTEST
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::printf("usage: dequant <file.gguf>\n");
         return 2;
     }
     try {
-        strata::GgufFile g(argv[1]);
+        lamina::GgufFile g(argv[1]);
         int checked = 0, bad = 0;
         for (const auto& t : g.tensors()) {
             if (t.type != 42) continue; // Q2_0 only for now
@@ -19,8 +19,8 @@ int main(int argc, char** argv) {
             for (uint64_t b = 0; b < nblocks && b < 64; ++b) {
                 const uint8_t* blk = base + b * 18;
                 float out[64];
-                strata::dequantize_q2_0(blk, out);
-                const float d = strata::fp16_to_fp32(strata::read_u16(blk));
+                lamina::dequantize_q2_0(blk, out);
+                const float d = lamina::fp16_to_fp32(lamina::read_u16(blk));
                 // STRUCTURAL INVARIANT: every value must be exactly one of {-d, 0, d, 2d}.
                 for (int j = 0; j < 64; ++j) {
                     const float v = out[j];
@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
                 double sum = 0, sumabs = 0;
                 for (uint64_t b = 0; b < nblocks && b < 64; ++b) {
                     float out[64];
-                    strata::dequantize_q2_0(base + b * 18, out);
+                    lamina::dequantize_q2_0(base + b * 18, out);
                     for (int j = 0; j < 64; ++j) {
                         sum += out[j];
                         sumabs += std::fabs(out[j]);
@@ -71,19 +71,19 @@ int main(int argc, char** argv) {
             for (uint64_t b = 0; b < nb && b < 64; ++b) {
                 float out[256];
                 if (t.type == 20)
-                    strata::dequantize_iq4_nl(base + b * bsz, out);
+                    lamina::dequantize_iq4_nl(base + b * bsz, out);
                 else if (t.type == 14)
-                    strata::dequantize_q6_K(base + b * bsz, out);
+                    lamina::dequantize_q6_K(base + b * bsz, out);
                 else if (t.type == 12)
-                    strata::dequantize_q4_K(base + b * bsz, out);
+                    lamina::dequantize_q4_K(base + b * bsz, out);
                 else if (t.type == 13)
-                    strata::dequantize_q5_K(base + b * bsz, out);
+                    lamina::dequantize_q5_K(base + b * bsz, out);
                 else if (t.type == 11)
-                    strata::dequantize_q3_K(base + b * bsz, out);
+                    lamina::dequantize_q3_K(base + b * bsz, out);
                 else if (t.type == 23)
-                    strata::dequantize_iq4_xs(base + b * bsz, out);
+                    lamina::dequantize_iq4_xs(base + b * bsz, out);
                 else
-                    strata::dequantize_q5_0(base + b * bsz, out);
+                    lamina::dequantize_q5_0(base + b * bsz, out);
                 for (int j = 0; j < nel; ++j) {
                     sum += out[j];
                     sumabs += std::fabs(out[j]);
@@ -93,19 +93,19 @@ int main(int argc, char** argv) {
                         sumabs);
             float f8[256];
             if (t.type == 20)
-                strata::dequantize_iq4_nl(base, f8);
+                lamina::dequantize_iq4_nl(base, f8);
             else if (t.type == 14)
-                strata::dequantize_q6_K(base, f8);
+                lamina::dequantize_q6_K(base, f8);
             else if (t.type == 12)
-                strata::dequantize_q4_K(base, f8);
+                lamina::dequantize_q4_K(base, f8);
             else if (t.type == 13)
-                strata::dequantize_q5_K(base, f8);
+                lamina::dequantize_q5_K(base, f8);
             else if (t.type == 11)
-                strata::dequantize_q3_K(base, f8);
+                lamina::dequantize_q3_K(base, f8);
             else if (t.type == 23)
-                strata::dequantize_iq4_xs(base, f8);
+                lamina::dequantize_iq4_xs(base, f8);
             else
-                strata::dequantize_q5_0(base, f8);
+                lamina::dequantize_q5_0(base, f8);
             std::printf("  REF first8:");
             for (int j = 0; j < 8; ++j) std::printf(" %.6g", f8[j]);
             std::printf("\n");

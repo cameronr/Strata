@@ -4,7 +4,7 @@
 # Options: --clients 4 (several requests at once), --long (a 32K prompt), --compare <older results folder>.
 cd "$(dirname "$0")" || exit 1
 if [ -x .venv/bin/python ]; then
-  exec .venv/bin/python tools/strata_bench.py "$@"
+  exec .venv/bin/python tools/lamina_bench.py "$@"
 fi
 echo "Lamina is not set up here yet: run ./setup.sh --model ... first."
 exit 1

@@ -1,9 +1,9 @@
-// tools/vision/gguf_meta_test.cpp - strata-vision opens a GGUF whose weight tensors have types llama.cpp does not know.
+// tools/vision/gguf_meta_test.cpp - lamina-vision opens a GGUF whose weight tensors have types llama.cpp does not know.
 //
-// Writes a small GGUF by hand (a tokenizer, two tensors of the Strata-private types TQK6 = 145 and TQK7 = 146, and split
+// Writes a small GGUF by hand (a tokenizer, two tensors of the engine-private types TQK6 = 145 and TQK7 = 146, and split
 // keys that point at shards which are not there), then checks that
 //   - llama.cpp itself cannot load it (the reason the picture reader used to say "cannot open the text model"),
-//   - strata_open_text_model() can, and sees the same vocabulary.
+//   - lamina_open_text_model() can, and sees the same vocabulary.
 // Exit code 0 = all checks passed.
 #include "gguf_meta.h"
 
@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
     llama_backend_init();
     for (int split = 0; split < 2; ++split) {
         const std::string label = split ? " (a first shard whose other shards are missing)" : "";
-        const std::string path = dir + "/strata-vision-gguf-test-" + std::to_string(split) + ".gguf";
+        const std::string path = dir + "/lamina-vision-gguf-test-" + std::to_string(split) + ".gguf";
         size_t n_vocab = 0;
         check(write_fixture(path, n_vocab, split == 1), ("wrote a GGUF with tensor types 145 and 146" + label).c_str());
         llama_model_params mp = llama_model_default_params();
@@ -94,8 +94,8 @@ int main(int argc, char** argv) {
         std::printf("note  llama.cpp itself %s this file\n", plain ? "accepts" : "refuses");
         if (plain) llama_model_free(plain);
         std::string how;
-        llama_model* m = strata_open_text_model(path, &how);
-        check(m != nullptr, ("strata_open_text_model opens it (" + how + ")" + label).c_str());
+        llama_model* m = lamina_open_text_model(path, &how);
+        check(m != nullptr, ("lamina_open_text_model opens it (" + how + ")" + label).c_str());
         if (m) {
             check((size_t) llama_vocab_n_tokens(llama_model_get_vocab(m)) == n_vocab, "and sees the whole vocabulary");
             llama_model_free(m);
@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
         check(how.find("header only") == 0, "by reading the header, not the weights");
         std::remove(path.c_str());
     }
-    check(strata_open_text_model(dir + "/does-not-exist.gguf") == nullptr, "a file that is not there gives no model");
+    check(lamina_open_text_model(dir + "/does-not-exist.gguf") == nullptr, "a file that is not there gives no model");
     llama_backend_free();
     std::printf("%s\n", failures ? "GGUF-META FAIL" : "GGUF-META PASS");
     return failures ? 1 : 0;

@@ -58,13 +58,13 @@ static_assert(hi_spread.iq3s[0x81] == 0x0100000000000001ull && hi_spread.iq2s[0x
 
 // E-2 (iq_avx512.cpp) on these paths: the pool streams the expert rows from DRAM at ~25 GB/s (4 KB pages when
 // large pages are refused), so ask for the bytes a few blocks before the decode needs them - 2048 B is two gate/up
-// rows ahead, a row is ~1 KB.  Same switch as the AVX-512 kernels: STRATA_IQ_PREFETCH is the distance in bytes,
+// rows ahead, a row is ~1 KB.  Same switch as the AVX-512 kernels: LAMINA_IQ_PREFETCH is the distance in bytes,
 // 0 = off, default 2048.  Measured on a Zen 3 5700X3D (no AVX-512) on IQ3_S decode: -4% on the gate/up phase,
 // +1.0 GB/s over the rows, -1.3% ms/round end to end.  The non-temporal hint measured worse than T0 at the same
 // distance, so this keeps T0.
 int prefetch_distance() {
     static const int d = [] {
-        const char* v = std::getenv("STRATA_IQ_PREFETCH");
+        const char* v = std::getenv("LAMINA_IQ_PREFETCH");
         return v ? std::atoi(v) : 2048;
     }();
     return d;

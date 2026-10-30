@@ -1,4 +1,4 @@
-// src/kernels/cuda/native_mma.cu - see include/strata/kernels/native_mma.hpp.
+// src/kernels/cuda/native_mma.cu - see include/lamina/kernels/native_mma.hpp.
 //
 // A CTA takes TM tiles of 16 weight rows (mma's M) and walks their K in stages of SB weight blocks, ST in flight: all
 // its threads copy a stage of its rows into shared memory with 16-byte cp.async, a row's bytes from the 16-byte
@@ -9,10 +9,10 @@
 //
 // mma.m16n8k16 / m16n8k32 .s8 fragments (lane = 4 g + t): A row g (and g + 8), k 4t..4t+3 (and 16 + 4t..); B column g,
 // k 4t..4t+3 (and 16 + 4t..); C rows g / g + 8, columns 2t, 2t + 1.
-#include "strata/kernels/native_mma.hpp"
-#include "strata/kernels/warp.cuh"
+#include "lamina/kernels/native_mma.hpp"
+#include "lamina/kernels/warp.cuh"
 
-#include "strata/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 #include "q8_1_il.cuh"
 
 #include <cuda_fp16.h>
@@ -20,7 +20,7 @@
 
 #include <cstdint>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 __device__ __forceinline__ void mma16(int (&c)[4], int a0, int a1, int b0) {
@@ -432,4 +432,4 @@ bool native_mma(int ggml_type, const void* weights, const void* x_il, float* y, 
     }
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

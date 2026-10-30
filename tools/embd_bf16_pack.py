@@ -42,9 +42,9 @@ def kv_string(key, val):
 
 
 def write_header(dim, vocab, source, what):
-    kvs = [kv_string("general.architecture", "strata-embd"),
+    kvs = [kv_string("general.architecture", "lamina-embd"),
            kv_string("general.name", what),
-           kv_string("strata.embd.source", source)]
+           kv_string("lamina.embd.source", source)]
     head = b"GGUF" + struct.pack("<IQQ", 3, 1, len(kvs)) + b"".join(kvs)
     head += gguf_string("token_embd.weight") + struct.pack("<I", 2) + struct.pack("<QQ", dim, vocab)
     head += struct.pack("<I", GGML_TYPE_BF16) + struct.pack("<Q", 0)

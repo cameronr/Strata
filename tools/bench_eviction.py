@@ -1,7 +1,7 @@
 """tools/bench_eviction.py - replay a `--dump-routing` trace against candidate ExpertCache eviction policies.
 
 `ExpertCache::admit` never evicts: eviction policy is the measured question (R4.1's LFU-decay vs LRU sweep,
-`include/strata/core/expert_cache.hpp`), and a placeholder policy would set the hit rate that everything
+`include/lamina/core/expert_cache.hpp`), and a placeholder policy would set the hit rate that everything
 downstream is sized against.  This tool is the harness for that measurement, without a GPU: a policy's hit
 rate depends only on the ORDER the run routed (layer, expert) pairs, and `--dump-routing` records exactly
 that order.  Replay the trace through a simulated slot pool per policy and the rates are comparable with

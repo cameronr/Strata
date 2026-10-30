@@ -1,10 +1,10 @@
-// src/kernels/cuda/draft_proxy.cu - see include/strata/kernels/draft_proxy.hpp.
+// src/kernels/cuda/draft_proxy.cu - see include/lamina/kernels/draft_proxy.hpp.
 //
 // Built with --use_fast_math like native_mmvq.cu, whose Q6_K and Q8_0 x q8_1 dots the exact rescoring repeats (the
 // same thread-to-block mapping, sums in the same order: bitwise its logits).
-#include "strata/kernels/draft_proxy.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/dp4a.hpp"
+#include "lamina/kernels/draft_proxy.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/dp4a.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -14,7 +14,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int WARP = 32;
@@ -241,7 +241,7 @@ __device__ __forceinline__ float q6_dot(const Q6KBlock* __restrict__ b, const in
         const int sc = scales[4 * i];
         const int vil = (vl >> (4 * i)) & 0x0f0f0f0f;
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
-        const int vi = strata_q6_quants(vil, vih);
+        const int vi = lamina_q6_quants(vil, vih);
         sumf += __int_as_float(e.y) * (__dp4a(vi, e.x, 0) * sc);
     }
     return __half2float(b->d) * sumf;
@@ -427,4 +427,4 @@ void draft_proxy_top1(int ggml_type, const void* proxy, const void* rows, const 
     check("draft_proxy_top1");
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

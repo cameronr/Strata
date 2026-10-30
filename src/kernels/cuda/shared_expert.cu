@@ -18,14 +18,14 @@
 // The legacy canonical projections use their explicit Q8_0/Q8_K activation images. The optional native
 // BF16 path affects only the scalar gate: it reads the original F32 input and uses pinned CUDA MMVF plus
 // an FP32 sigmoid. Native projection overrides independently select CUDA Q8_1 MMVQ and FP32 SwiGLU.
-#include "strata/kernels/shared_expert.hpp"
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/bf16_bits.hpp"
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/s2_gemv_q8.hpp"
-#include "strata/kernels/s_gemv.hpp"
-#include "strata/kernels/native_mmvq.hpp"
+#include "lamina/kernels/shared_expert.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/s2_gemv_q8.hpp"
+#include "lamina/kernels/s_gemv.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
 
 #include <cuda_runtime.h>
 
@@ -37,7 +37,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int THREADS = 128;
@@ -338,4 +338,4 @@ void moe_combine(const float* parts, const float* weights, const float* shared, 
     }
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

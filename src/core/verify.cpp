@@ -1,36 +1,36 @@
-// src/core/verify.cpp - see include/strata/core/verify.hpp.
-#include "strata/core/verify.hpp"
+// src/core/verify.cpp - see include/lamina/core/verify.hpp.
+#include "lamina/core/verify.hpp"
 #if defined(_WIN32)
 #include <intrin.h>
 #endif
 
-#include "strata/core/cuda_host.hpp"
-#include "strata/core/native_head.hpp"
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/gr.hpp"
-#include "strata/kernels/kv_q8.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_moe.hpp"
-#include "strata/kernels/native_ple_postops.hpp"
-#include "strata/kernels/native_qsa.hpp"
-#include "strata/kernels/native_qsa_indexer.hpp"
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/native_rope.hpp"
-#include "strata/kernels/ngram.hpp"
-#include "strata/kernels/ple.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/qsa_select.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
-#include "strata/kernels/sampler.hpp"
-#include "strata/kernels/shared_expert.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/core/native_head.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/gr.hpp"
+#include "lamina/kernels/kv_q8.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_moe.hpp"
+#include "lamina/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/native_qsa.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/kernels/ple.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/qsa_select.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/sampler.hpp"
+#include "lamina/kernels/shared_expert.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -43,12 +43,12 @@
 #include <exception>
 #include <immintrin.h>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 constexpr float EPS = 1e-6f;
 using Clock = std::chrono::steady_clock;
-const bool g_dbg = std::getenv("STRATA_VERIFY_DEBUG") != nullptr;
+const bool g_dbg = std::getenv("LAMINA_VERIFY_DEBUG") != nullptr;
 #define VDBG(...) do { if (g_dbg) { std::fprintf(stderr, "verify dbg: " __VA_ARGS__); std::fflush(stderr); } } while (0)
 
 const WeightRef* need(const LayerView& v, const char* suffix, std::string& err) {
@@ -117,8 +117,8 @@ int Verifier::nonfinite(int T) {
 
 bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState& ss, const VerifyHits& hits,
                     const NativeHead* head, int max_t, std::string& err) {
-    if (const char* v = std::getenv("STRATA_NAN_GUARD")) nan_guard_ = !(v[0] == '0' && v[1] == '\0');
-    if (const char* v = std::getenv("STRATA_NAN_INJECT"))
+    if (const char* v = std::getenv("LAMINA_NAN_GUARD")) nan_guard_ = !(v[0] == '0' && v[1] == '\0');
+    if (const char* v = std::getenv("LAMINA_NAN_INJECT"))
         for (const char* c = v; *c != '\0';) {
             char* e = nullptr;
             const unsigned long long n = std::strtoull(c, &e, 10);
@@ -132,15 +132,15 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     hits_ = hits;
     head_ = head;
     max_t_ = max_t;
-    if (max_t < 2 || max_t > strata::kernels::kVerifyMaxT || max_t > strata::kernels::cpu::MAXT) {
-        err = "verify: the window must hold 2.." + std::to_string(strata::kernels::kVerifyMaxT) + " tokens";
+    if (max_t < 2 || max_t > lamina::kernels::kVerifyMaxT || max_t > lamina::kernels::cpu::MAXT) {
+        err = "verify: the window must hold 2.." + std::to_string(lamina::kernels::kVerifyMaxT) + " tokens";
         return false;
     }
     if (hits.res == nullptr || hits.cache_base == nullptr || hits.blob <= 0 || hits.slots <= 0) {
         err = "verify: needs the profile-filled VRAM expert tier (--expert-profile and --expert-cache)";
         return false;
     }
-    if (!strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr) || ss.k != 10 || g.ssm_state_size != 128 ||
+    if (!lamina::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr) || ss.k != 10 || g.ssm_state_size != 128 ||
         g.ssm_d_conv != 4) {
         err = "verify: geometry differs from the artifact's";
         return false;
@@ -153,10 +153,10 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     if (wo == nullptr) { err = "verify: output.weight is missing"; return false; }
     n_vocab_ = wo->ne1;
 
-    const strata::kernels::QsaShapes s = strata::kernels::qsa_shapes(g);
-    cap_ = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
+    const lamina::kernels::QsaShapes s = lamina::kernels::qsa_shapes(g);
+    cap_ = lamina::kernels::qsa_selection_width(lamina::kernels::kTopkMaxCells, s);
     max_blocks_ = ss.qsa_states[0].max_cells / s.idx_block + 2;
-    attn_scratch_floats_ = (int64_t) strata::kernels::qsa_decode_attn_scratch_floats(cap_, s);
+    attn_scratch_floats_ = (int64_t) lamina::kernels::qsa_decode_attn_scratch_floats(cap_, s);
 
     const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
     head_rows_ = (head != nullptr && head->loaded()) ? head->rows() : n_vocab_;
@@ -168,20 +168,20 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     const uint64_t NH = (uint64_t) g.n_head, HD = (uint64_t) g.head_dim, NKV = (uint64_t) g.n_head_kv;
     const uint64_t IQ = (uint64_t) g.idx_q_heads, ID = (uint64_t) g.idx_key_dim;
     const uint64_t nG = (uint64_t) g.n_gdn_layers(), nQ = (uint64_t) g.n_qsa_layers();
-    const uint64_t HS = (uint64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM;
+    const uint64_t HS = (uint64_t) lamina::kernels::NG_HIST * lamina::kernels::NG_HC_DIM;
     const uint64_t TS = (uint64_t) (s.idx_block - 1) * ID;
     const int max_in = (int) std::max<uint64_t>(std::max<uint64_t>(N, ZV), NH * HD);
 
     // ---- mapped staging (portable where the GPU tiers write: their rows and flags)
     const unsigned portable = cudaHostAllocMapped | cudaHostAllocPortable;
     list2_stride_ = (4 + (int64_t) (T * K) + 3) & ~3ll;
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     xk_layer_.assign((size_t) g.n_layers, 0);
     for (int64_t l = 0; l < g.n_layers; ++l)
         xk_layer_[(size_t) l] = pool_takes_q8k(lay.fmt[(size_t) l]);
     xk_stride_ = ((int64_t) (N / 256) * 292 + 15) & ~15ll;
     bool ok = mapped(T * 4, (void**) &h_tok_, (void**) &m_tok_) &&
-              mapped(T * strata::kernels::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) &&
+              mapped(T * lamina::kernels::kStepCount * 4, (void**) &h_step_, (void**) &m_step_) &&
               mapped(T * NH * 4, (void**) &h_pos_, (void**) &m_pos_) &&
               mapped((2 + T) * 4 + 16, (void**) &h_commit_, (void**) &m_commit_) &&
               mapped(T * N * 4, (void**) &h_ple_, (void**) &m_ple_) &&
@@ -240,15 +240,15 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
 
     // ---- the device arena: the same sequence counted, then carved
     auto carve = [&](Bump& b) {
-        tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(T * strata::kernels::kStepCount);
+        tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(T * lamina::kernels::kStepCount);
         pos_ = b.take<int32_t>(T * NH); commit_ = b.take<int32_t>(2 + T);
         ple_ = b.take<float>(T * N); emb_ = b.take<float>(T * N); R_ = b.take<float>(T * HC * N);
         mixed_ = b.take<float>(T * N); bo_ = b.take<float>(T * N);
         inj_ = b.take<float>(T * HC); inj2_ = b.take<float>(T * HC);
         lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC);
-        grs_ = (float*) b.take<uint8_t>(strata::kernels::fused_gr_scratch_bytes());
-        xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes(max_in, (int) T));
-        xil_ = b.take<uint8_t>(strata::kernels::native_q8_1_il_bytes(max_in, (int) T));
+        grs_ = (float*) b.take<uint8_t>(lamina::kernels::fused_gr_scratch_bytes());
+        xq_ = b.take<uint8_t>(lamina::kernels::native_q8_1_bytes(max_in, (int) T));
+        xil_ = b.take<uint8_t>(lamina::kernels::native_q8_1_il_bytes(max_in, (int) T));
         qkv_L_ = b.take<float>(nG * T * C); h_L_ = b.take<float>(nG * T * C);
         gate_L_ = b.take<float>(nG * T * HV); beta_L_ = b.take<float>(nG * T * HV);
         z_ = b.take<float>(T * ZV); y_ = b.take<float>(T * ZV);
@@ -270,18 +270,18 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         ring_count_ = b.take<unsigned>(2);
         plan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_); dplan_ = b.take<int32_t>(2 * (uint64_t) plan_stride_);
         res_ = b.take<int32_t>((uint64_t) res_words_); slot_ptr_ = b.take<unsigned long long>((uint64_t) hits.slots);
-        staging_ = b.take<uint8_t>((uint64_t) kStagingBlobs * strata::kernels::cpu::expert_layout().max_blob);
+        staging_ = b.take<uint8_t>((uint64_t) kStagingBlobs * lamina::kernels::cpu::expert_layout().max_blob);
         nat_xq_ = b.take<uint8_t>(T * (N / 32) * 36);
-        hit_scratch_ = b.take<uint8_t>(strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff));
+        hit_scratch_ = b.take<uint8_t>(lamina::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff));
         head_mixed_ = b.take<float>(T * N); head_inj_ = b.take<float>(HC);
         sh_gate_ = b.take<float>(T * (uint64_t) g.n_ff);
         sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
-        arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
+        arg_scratch_ = b.take<uint8_t>(lamina::kernels::argmax_rows_scratch_bytes((int) T));
         if (shead_ != nullptr) head_full_ = b.take<float>(T * (uint64_t) n_vocab_);
         one_ = b.take<int32_t>(4);
         hist_snap_ = b.take<float>(T * HS);
-        const uint64_t PD = (uint64_t) strata::kernels::NG_HC_DIM;
+        const uint64_t PD = (uint64_t) lamina::kernels::NG_HC_DIM;
         ple_key_ = b.take<float>(T * PD); ple_val_ = b.take<float>(T * N); ple_nkey_ = b.take<float>(T * PD);
         ple_norm_ = b.take<float>(T * PD); ple_gated_ = b.take<float>(T * PD); ple_gate_ = b.take<float>(T * HC);
     };
@@ -295,7 +295,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
     Bump real;
     real.base = (uint8_t*) arena_;
     carve(real);
-    if (strata::kernels::expert_math() == strata::kernels::ExpertMath::Exact &&
+    if (lamina::kernels::expert_math() == lamina::kernels::ExpertMath::Exact &&
         cudaMalloc((void**) &xk_dev_, (size_t) T * (size_t) (N / 256) * 292) != cudaSuccess) {
         err = "verify: the exact hits' Q8_K rows";
         return false;
@@ -386,14 +386,14 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
 // while the GPU combines A and runs A's layer l+1.  B's mixer only needs A's mixer of the same layer (K/V, GDN
 // state), never A's experts, so nothing waits that did not wait before.  Every token's arithmetic is unchanged.
 bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const ModelGeometry& g = *g_;
     const WeightTable& wt = *wt_;
     SessionState& ss = *ss_;
     const int64_t N = g.n_embd, HC = g.hc, K = ss.k, C = g.ssm_conv_channels, ZV = g.ssm_value_dim;
     const int64_t HV = g.ssm_v_heads, HK = g.ssm_k_heads, NH = g.n_head, HD = g.head_dim, NKV = g.n_head_kv;
     const int64_t IQ = g.idx_q_heads, ID = g.idx_key_dim, NE = g.n_expert, MT = max_t_;
-    const QsaShapes s = strata::kernels::qsa_shapes(g);
+    const QsaShapes s = lamina::kernels::qsa_shapes(g);
     const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
@@ -872,7 +872,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             return p;
         };
         float* hit_out = hit_out_ + (size_t) tb * K * N;
-        const auto& lay = strata::kernels::cpu::expert_layout();
+        const auto& lay = lamina::kernels::cpu::expert_layout();
         bool xk_ready = false;   // --expert-math exact: this group's Q8_K rows quantized for the hits
         auto grouped = [&](const Plan& p, const unsigned long long* gp, const int32_t* gs, const int32_t* gn) {
             // the layer's GGUF formats (i-quant gate/up, Q2_0 / IQ4_NL down)
@@ -1012,7 +1012,7 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
 bool Verifier::capture(int T, std::string& err) {
     if (exec_[T] != nullptr) return true;
     if (profile_ && stamps_ == nullptr &&
-        cudaMalloc(&stamps_, (size_t) (strata::kernels::kVerifyMaxT + 1) * (size_t) (g_->n_layers + 1) * kStamps *
+        cudaMalloc(&stamps_, (size_t) (lamina::kernels::kVerifyMaxT + 1) * (size_t) (g_->n_layers + 1) * kStamps *
                                  sizeof(unsigned long long)) != cudaSuccess) {
         err = "verify: the profile's stamp buffer does not fit";
         return false;
@@ -1049,10 +1049,10 @@ bool Verifier::capture(int T, std::string& err) {
 
 bool Verifier::capture_commit(std::string& err) {
     if (commit_exec_ != nullptr) return true;
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
-    const QsaShapes s = strata::kernels::qsa_shapes(g);
+    const QsaShapes s = lamina::kernels::qsa_shapes(g);
     const int64_t C = g.ssm_conv_channels, HV = g.ssm_v_heads, ID = g.idx_key_dim, MT = max_t_;
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
                                 (uint64_t) g.ssm_conv_channels * (g.ssm_d_conv - 1);
@@ -1111,7 +1111,7 @@ bool Verifier::capture_commit(std::string& err) {
 
 bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool, void* user, int32_t* out,
                    std::string& err) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     if (T < 1 || T > max_t_) { err = "verify: window size out of range"; return false; }
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
@@ -1119,7 +1119,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     if (!capture(T, err) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
     const Clock::time_point t0 = Clock::now();
-    const QsaShapes s = strata::kernels::qsa_shapes(g);
+    const QsaShapes s = lamina::kernels::qsa_shapes(g);
     for (int t = 0; t < T; ++t) {
         h_tok_[t] = tokens[t];
         qsa_step_fill(h_step_ + t * kStepCount, pos0 + t, s);
@@ -1451,7 +1451,7 @@ void Verifier::print_profile() const {
 }
 
 void Verifier::ple_ahead(int t, int32_t token) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     SessionState& ss = *ss_;
     if (!ss.ple.ready() || t < 0 || t >= max_t_) return;
     ahead_tok_[t] = token;
@@ -1471,7 +1471,7 @@ void Verifier::set_plan_slot(int grp) {
     sink_.start2 = base + plan_ptr_off_ + 4 * cap;
     const int G = groups_[last_t_] > 0 ? groups_[last_t_] : 1;
     const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
-    sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob);
+    sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * lamina::kernels::cpu::expert_layout().max_blob);
     sink_.staging_cap = per;
     if (n_tiers_ > 0) {
         sink_.gpu2_list = h_list2_ + (size_t) grp * (size_t) list2_stride_;
@@ -1548,4 +1548,4 @@ bool Verifier::wait_commit(std::string& err) {
     return true;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

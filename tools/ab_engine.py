@@ -1,6 +1,6 @@
 """A/B two engine builds or environments on one config: restart the server per arm, alternate arms over rounds.
 
-    python tools/ab_engine.py lamina-iq3_s.json A:exe=/path/a B:exe=/path/b,STRATA_HC_Q8=2 [--rounds 3]
+    python tools/ab_engine.py lamina-iq3_s.json A:exe=/path/a B:exe=/path/b,LAMINA_HC_Q8=2 [--rounds 3]
 
 An arm is NAME:key=value,...; `exe` is the server to run (lamina-server, the engine in it; default build/'s), `xargs`
 appends ';'-separated engine arguments, every other key is set in the server's environment (the engine reads it).

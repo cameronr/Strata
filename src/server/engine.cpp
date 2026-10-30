@@ -1,8 +1,8 @@
 #include "engine.hpp"
 
 #include "log.hpp"
-#include "strata/program/engine.hpp"
-#include "strata/program/serve_io.hpp"
+#include "lamina/program/engine.hpp"
+#include "lamina/program/serve_io.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -69,7 +69,7 @@ void LaminaEngine::start() {
     out_ = std::make_shared<LineChannel>();
     auto partial = std::make_shared<std::string>();
     std::shared_ptr<LineChannel> in = in_, out = out_;
-    strata::program::ServeIo io;
+    lamina::program::ServeIo io;
     io.read_line = [in](std::string& line) { return in->pop(line, -1) == 1; };
     io.write = [out, partial](std::string_view text) {
         partial->append(text);
@@ -83,7 +83,7 @@ void LaminaEngine::start() {
     };
     io.in_process = true;
     io.end_input = [in] { in->close(); };
-    strata::program::set_serve_io(std::move(io));
+    lamina::program::set_serve_io(std::move(io));
     if (!log_.empty()) {
         // a crash report has the time: when an engine started
         std::ofstream f(log_, std::ios::app);
@@ -108,7 +108,7 @@ void LaminaEngine::start() {
         for (auto& a : own) ptrs.push_back(a.data());
         ptrs.push_back(nullptr);
         try {   // an error the engine throws ends it, not the server
-            rc_ = strata::program::run((int) own.size(), ptrs.data());
+            rc_ = lamina::program::run((int) own.size(), ptrs.data());
         } catch (const std::exception& e) {
             std::fprintf(stderr, "lamina: the engine failed: %s\n", e.what());
             rc_ = 1;
@@ -408,10 +408,10 @@ std::string LaminaEngine::sampling_keys(const json& s) {
         keys += " score=";
         for (size_t k = 0; k < score.size(); ++k) keys += (k ? ":" : "") + std::to_string(score[k].get<int64_t>());
     }
-    // "strata_checkpoint": false - a one-shot call no later request extends: no conversation checkpoint for it (#830)
-    if (const json& c = jget(s, "strata_checkpoint"); c.is_boolean() && !c.get<bool>()) keys += " ckpt=0";
+    // "lamina_checkpoint": false - a one-shot call no later request extends: no conversation checkpoint for it (#830)
+    if (const json& c = jget(s, "lamina_checkpoint"); c.is_boolean() && !c.get<bool>()) keys += " ckpt=0";
     // #2228: the pictures' keys (hex, in prompt order): the engine matches a picture by them
-    if (const json& ik = jget(s, "strata_img_keys"); ik.is_array() && !ik.empty()) {
+    if (const json& ik = jget(s, "lamina_img_keys"); ik.is_array() && !ik.empty()) {
         bool ok = true;
         for (const auto& k : ik)
             ok = ok && k.is_string() && !k.get_ref<const std::string&>().empty() &&
@@ -421,8 +421,8 @@ std::string LaminaEngine::sampling_keys(const json& s) {
             for (size_t k = 0; k < ik.size(); ++k) keys += (k ? "," : "") + ik[k].get<std::string>();
         }
     }
-    // "strata_prefix" (resolved to {"tokens": N}): the engine pins the checkpoint after the first N prompt tokens
-    if (const json& prefix = jget(s, "strata_prefix"); prefix.is_object())
+    // "lamina_prefix" (resolved to {"tokens": N}): the engine pins the checkpoint after the first N prompt tokens
+    if (const json& prefix = jget(s, "lamina_prefix"); prefix.is_object())
         if (const json& pn = jget(prefix, "tokens"); is_int(pn) && pn.get<int64_t>() > 0)
             keys += " pin=" + std::to_string(pn.get<int64_t>());
     return keys;

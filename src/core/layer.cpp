@@ -1,31 +1,31 @@
 
 // src/core/layer.cpp - the GDN layer, composed.  See the header for the operation order and its traps.
-#include "strata/core/layer.hpp"
-#include "strata/core/native_head.hpp"
-#include "strata/kernels/bf16_bits.hpp"
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/gdn.hpp"
-#include "strata/kernels/mrope.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/kv_q8.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/rope.hpp"
-#include "strata/kernels/s2_gemv_q8.hpp"
-#include "strata/kernels/s_gemv.hpp"
-#include "strata/kernels/shared_expert.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_moe.hpp"
-#include "strata/kernels/native_router.hpp"
-#include "strata/kernels/native_qsa.hpp"
-#include "strata/kernels/native_qsa_indexer.hpp"
-#include "strata/kernels/native_rope.hpp"
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/fused_gdn.hpp"
-#include "strata/kernels/qsa_select.hpp"
-#include "strata/kernels/verify_kernels.hpp"
+#include "lamina/core/layer.hpp"
+#include "lamina/core/native_head.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/gdn.hpp"
+#include "lamina/kernels/mrope.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/kv_q4.hpp"
+#include "lamina/kernels/kv_q8.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/rope.hpp"
+#include "lamina/kernels/s2_gemv_q8.hpp"
+#include "lamina/kernels/s_gemv.hpp"
+#include "lamina/kernels/shared_expert.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_moe.hpp"
+#include "lamina/kernels/native_router.hpp"
+#include "lamina/kernels/native_qsa.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
+#include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/qsa_select.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
 #include <exception>
 #include <cuda_runtime.h>
 #include <cmath>
@@ -36,7 +36,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
-namespace strata::core {
+namespace lamina::core {
 namespace {
 constexpr int Q8K_BYTES_PER_BLOCK = 292;
 constexpr int Q8K_ELEMS_PER_BLOCK = 256;
@@ -52,8 +52,8 @@ KvFormat qsa_kv_format() { return g_kv_format; }
 KvFormat qsa_draft_kv_format() { return g_kv_format == KvFormat::F16 ? KvFormat::F16 : KvFormat::Int8; }
 // ================================ the QSA layers' state ================================
 namespace {
-using strata::kernels::QsaIndexerBuffers;
-using strata::kernels::QsaShapes;
+using lamina::kernels::QsaIndexerBuffers;
+using lamina::kernels::QsaShapes;
 uint64_t align_up16(uint64_t n) { return (n + 15) & ~15ull; }
 /// One cursor over an arena, so every region is 16-byte aligned without a list of hand-added offsets.
 struct Cursor {
@@ -76,7 +76,7 @@ struct Cursor {
 namespace {
 // a format's K/V arrays in the arena's order, as bytes per cell and KV head
 std::vector<uint64_t> kv_row_bytes(KvFormat kv, uint64_t hd) {
-    const uint64_t s8 = hd / strata::kernels::KV_Q8_GROUP * 2, s4 = hd / strata::kernels::KV_Q4_GROUP * 2;
+    const uint64_t s8 = hd / lamina::kernels::KV_Q8_GROUP * 2, s4 = hd / lamina::kernels::KV_Q4_GROUP * 2;
     switch (kv) {
     case KvFormat::Int8: return {hd, hd, s8, s8};
     case KvFormat::Q4: return {hd / 2, hd / 2, s4, s4};
@@ -242,7 +242,7 @@ n += 16;
 // block_pos
 if (with_rope && !g_kv_elastic) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;
 // cos + sin tables (the elastic ones are in their own range)
-n += strata::kernels::qsa_step_bytes() + 16; // counts and aligned attention status
+n += lamina::kernels::qsa_step_bytes() + 16; // counts and aligned attention status
 // the per-token counts
 n += (uint64_t) s.n_head * 4;
 // pos_dev
@@ -313,12 +313,12 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         pool->add((uint64_t) s.page_size * row);
         pool->add((uint64_t) s.page_size * row);
         // a range's positions built once: pool_grow fills cos's chunk, then sin's of the same range
-        pool->fill = [n_rot = (int) s.n_rot, sc = strata::kernels::rope_scaling(), row, hc = std::vector<float>(),
+        pool->fill = [n_rot = (int) s.n_rot, sc = lamina::kernels::rope_scaling(), row, hc = std::vector<float>(),
                       hs = std::vector<float>(), at = ~0ull](size_t a, uint64_t lo, uint64_t hi, uint8_t* dst) mutable {
             if (lo != at) {
                 hc.resize((size_t) ((hi - lo) / 4));
                 hs.resize(hc.size());
-                strata::kernels::build_rope_table(n_rot, sc, (int) (hi / row), hc.data(), hs.data(), (int) (lo / row));
+                lamina::kernels::build_rope_table(n_rot, sc, (int) (hi / row), hc.data(), hs.data(), (int) (lo / row));
                 at = lo;
             }
             return cudaMemcpy(dst, (a == 0 ? hc : hs).data(), (size_t) (hi - lo), cudaMemcpyHostToDevice) == cudaSuccess;
@@ -334,32 +334,32 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         st.cos_tab = c.take<float>((uint64_t) max_cells * (s.n_rot / 2));
         st.sin_tab = c.take<float>((uint64_t) max_cells * (s.n_rot / 2));
     }
-    st.step = c.take<int32_t>((uint64_t) strata::kernels::kStepCount);
+    st.step = c.take<int32_t>((uint64_t) lamina::kernels::kStepCount);
     st.attention_status = c.take<int32_t>(1);
     st.pos_dev = c.take<int32_t>((uint64_t) s.n_head);
     // the pinned staging the uploads copy FROM - see the note on `host_step` in the header
-    if (cudaHostAlloc((void**) &st.host_step, strata::kernels::qsa_step_bytes() + sizeof(int32_t),
+    if (cudaHostAlloc((void**) &st.host_step, lamina::kernels::qsa_step_bytes() + sizeof(int32_t),
                       cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess ||
         cudaHostAlloc((void**) &st.host_pos, (size_t) s.n_head * 4, cudaHostAllocMapped | cudaHostAllocPortable) !=
             cudaSuccess) {
         return 0;
         // the caller sees a zero byte count; a half-built state is worse than none
     }
-st.host_step[strata::kernels::kStepCount] = 0;
+st.host_step[lamina::kernels::kStepCount] = 0;
 // THE ROPE TABLE IS BUILT ON THE HOST IN FLOAT64 and uploaded once, because the reference computes its
 // frequencies in float64 and reproducing that on device means double-precision `pow`/`cos` that need not
 // agree with the host's libm.  A table shorter than the sequence would have the rotation read past it.
 if (share_rope == nullptr) {
     if (!g_kv_elastic) {   // (the elastic tables are built as they are mapped)
         std::vector<float> hc((size_t) max_cells * (s.n_rot / 2)), hs((size_t) max_cells * (s.n_rot / 2));
-        strata::kernels::build_rope_table((int) s.n_rot, strata::kernels::rope_scaling(), (int) max_cells, hc.data(),
+        lamina::kernels::build_rope_table((int) s.n_rot, lamina::kernels::rope_scaling(), (int) max_cells, hc.data(),
                                           hs.data());
         cudaMemcpy(st.cos_tab, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice);
         cudaMemcpy(st.sin_tab, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice);
     }
-    // the native and prompt-path rope kernels read it with STRATA_ROPE_TABLE=1 (mrope.hpp)
+    // the native and prompt-path rope kernels read it with LAMINA_ROPE_TABLE=1 (mrope.hpp)
     if (s.n_rot == 64)
-        strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
+        lamina::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, lamina::kernels::rope_scaling());
 }
 // the page table starts as the IDENTITY, which is the simplest legal mapping and what a caller that does
 // not page at all wants.  A real allocator re-points it; nothing outside `kv_append`/`kv_gather` may care.
@@ -375,7 +375,7 @@ void qsa_state_free(QsaState& st) {
 }
 std::vector<KvArray> qsa_kv_arrays(const QsaState& st, const ModelGeometry& g) {
     const uint64_t hd = (uint64_t) g.head_dim;
-    const uint64_t s8 = hd / strata::kernels::KV_Q8_GROUP * 2, s4 = hd / strata::kernels::KV_Q4_GROUP * 2;
+    const uint64_t s8 = hd / lamina::kernels::KV_Q8_GROUP * 2, s4 = hd / lamina::kernels::KV_Q4_GROUP * 2;
     std::vector<KvArray> a;
     auto add = [&](void* p, uint64_t row) {
         if (p != nullptr) a.push_back({p, row});
@@ -385,8 +385,8 @@ std::vector<KvArray> qsa_kv_arrays(const QsaState& st, const ModelGeometry& g) {
     add(st.k_q4, hd / 2); add(st.v_q4, hd / 2); add(st.k_q4s, s4); add(st.v_q4s, s4);
     return a;
 }
-strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {
-    strata::kernels::QsaAttnPools p;
+lamina::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {
+    lamina::kernels::QsaAttnPools p;
     p.page_table = st.page_table;
     switch (st.kv) {
     case KvFormat::Int8: p.k_q = st.k_q; p.v_q = st.v_q; p.k_scale = st.k_scale; p.v_scale = st.v_scale; break;
@@ -398,7 +398,7 @@ strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {
 }
 void qsa_kv_append_steps(const QsaState& st, const ModelGeometry& g, const int32_t* step, int step_stride,
                          const float* kcur, const float* vcur, int n_tok, void* stream) {
-    using namespace strata::kernels;
+    using namespace lamina::kernels;
     const QsaShapes s = qsa_shapes(g);
     switch (st.kv) {
     case KvFormat::Int8:
@@ -571,11 +571,11 @@ bool embed_rows(const WeightTable& tables, const ModelGeometry& g, const int32_t
     const auto* scales = reinterpret_cast<const float*>(codes + w->codes_bytes);
     const auto* offsets = w->has_offset ? reinterpret_cast<const float*>(codes + w->codes_bytes + w->scales_bytes)
                                        : nullptr;
-    strata::kernels::embedding_gather_dev(codes, scales, offsets, tokens_dev, (int) n, w->ne0, w->code_bits, w->code_bias,
+    lamina::kernels::embedding_gather_dev(codes, scales, offsets, tokens_dev, (int) n, w->ne0, w->code_bits, w->code_bias,
                                           w->group_elems, (uint64_t) (w->ne0 / (8 / w->code_bits)),
                                           (uint64_t) (w->ne0 / w->group_elems), out_dev, stream);
     return true;
 }
 
 
-}  // namespace strata::core
+}  // namespace lamina::core

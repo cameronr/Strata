@@ -5,7 +5,7 @@ checks that each start either reaches READY or exits 1 with one of the engine's 
 "not enough VRAM left for the hybrid experts' buffers and slots ...") - never a bare cudaMalloc failure.  On a card that holds
 every configuration the check only reports that they started.  The engine is stopped right after READY.
 
-  python q36_vram_refusal.py --exe build/strata-q36 --model Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
+  python q36_vram_refusal.py --exe build/lamina-q36 --model Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf
 """
 import argparse, subprocess, sys, threading, time
 

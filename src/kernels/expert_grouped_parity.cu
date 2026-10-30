@@ -8,7 +8,7 @@
 // --bench times both inside CUDA graphs (a kernel launched outside one pays WDDM's ~30-40 us), each call after an L2
 // flush, on the model files' format pairs, with routings shaped like the verify windows' (tokens share about a quarter
 // of their experts).
-#include "strata/kernels/iq_kernels.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
 #include "iq_dot.cuh"
 
 #include "ggml.h"
@@ -31,7 +31,7 @@ constexpr int64_t H = 2560, FF = 640, K = 10, MAXT = 8, SLOTS = 48, DISTINCT = 4
 
 // ---- the kernels native_expert_grouped launched before, verbatim, and the i-quant dot products as they were
 // (sign masks through __vcmpne4 / __vsub4)
-namespace strata::kernels::ref {
+namespace lamina::kernels::ref {
 
 __device__ __forceinline__ float ref_vec_dot_iq2_xxs_q8_1(const void* __restrict__ vbq, const block_q8_1* __restrict__ bq8_1,
                                                       const int& kbx, const int& iqs) {
@@ -288,9 +288,9 @@ void grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, con
     const auto* X = (const block_q8_1*) x_q8_1;
     const dim3 ggu((unsigned) ((2 * L.n_ff + GU_ROWS - 1) / GU_ROWS), (unsigned) cap_groups);
     switch (L.gu_type) {
-#define STRATA_GU(T) case T: native_gu_kernel<T><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
-        STRATA_FMTS(STRATA_GU)
-#undef STRATA_GU
+#define LAMINA_GU(T) case T: native_gu_kernel<T><<<ggu, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, X, L, gate, up); break;
+        LAMINA_FMTS(LAMINA_GU)
+#undef LAMINA_GU
         default: std::fprintf(stderr, "ref: gate/up type %d\n", L.gu_type); std::exit(1);
     }
     const long long nh = (long long) cap_entries * L.n_ff;
@@ -298,20 +298,20 @@ void grouped(const NativeExpertLayout& L, const unsigned long long* grp_ptr, con
     quantize_q8_1_kernel<<<(unsigned) ((nh + 255) / 256), 256, 0, s>>>(h, hq, nh);
     const dim3 gd((unsigned) ((L.n_embd + 7) / 8), (unsigned) cap_groups);
     switch (L.d_type) {
-#define STRATA_DOWN(T) case T: native_down_kernel<T><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
-        STRATA_FMTS(STRATA_DOWN)
-#undef STRATA_DOWN
+#define LAMINA_DOWN(T) case T: native_down_kernel<T><<<gd, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out); break;
+        LAMINA_FMTS(LAMINA_DOWN)
+#undef LAMINA_DOWN
         default: std::fprintf(stderr, "ref: down type %d\n", L.d_type); std::exit(1);
     }
 }
 
-}  // namespace strata::kernels::ref
+}  // namespace lamina::kernels::ref
 
 namespace {
 
 // DISTINCT experts of random weights (rows of different magnitude) quantized by ggml, repeated over SLOTS slots of one
 // device arena so the kernels stream them from memory as they do the VRAM tier
-uint8_t* make_arena(const strata::kernels::NativeExpertLayout& L, size_t stride, int seed) {
+uint8_t* make_arena(const lamina::kernels::NativeExpertLayout& L, size_t stride, int seed) {
     std::vector<uint8_t> blobs((size_t) DISTINCT * L.bytes);
     std::mt19937 rng(seed);
     std::normal_distribution<float> nd(0.f, 1.f);
@@ -395,11 +395,11 @@ void upload(const Plan& p, const Dev& d) {
     check(cudaMemcpy(d.n, &groups, 4, cudaMemcpyHostToDevice), "plan");
 }
 
-void run(bool reference, const strata::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap, cudaStream_t s) {
+void run(bool reference, const lamina::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap, cudaStream_t s) {
     if (reference)
-        strata::kernels::ref::grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, d.scratch_ref, d.out_ref, s);
+        lamina::kernels::ref::grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, d.scratch_ref, d.out_ref, s);
     else
-        strata::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, (L.n_embd / 32) * 36,
+        lamina::kernels::native_expert_grouped(L, d.ptr, d.start, d.n, d.dst, d.tok, cap, cap, d.xq, (L.n_embd / 32) * 36,
                                                d.scratch_new, d.out_new, s);
 }
 
@@ -416,7 +416,7 @@ __global__ void flush_kernel(const float4* __restrict__ p, long long n, float* s
 }
 
 // microseconds per call (or per flush: `call` false), inside a graph of `reps` calls each after a flush
-double time_graph1(bool call, bool reference, const strata::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap,
+double time_graph1(bool call, bool reference, const lamina::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap,
                    cudaStream_t s) {
     const int reps = 50;
     cudaGraph_t graph = nullptr;
@@ -444,7 +444,7 @@ double time_graph1(bool call, bool reference, const strata::kernels::NativeExper
     cudaGraphDestroy(graph);
     return best;
 }
-double time_graph(bool reference, const strata::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap,
+double time_graph(bool reference, const lamina::kernels::NativeExpertLayout& L, const Dev& d, int64_t cap,
                   cudaStream_t s) {
     return time_graph1(true, reference, L, d, cap, s) - time_graph1(false, reference, L, d, cap, s);
 }
@@ -467,8 +467,8 @@ int main(int argc, char** argv) {
     check(cudaMalloc(&d.dst, (size_t) cap * 4), "dev");
     check(cudaMalloc(&d.tok, (size_t) cap * 4), "dev");
     check(cudaMalloc(&d.xq, (size_t) MAXT * (H / 32) * sizeof(block_q8_1)), "dev");
-    check(cudaMalloc(&d.scratch_ref, strata::kernels::ref::scratch_bytes(cap, FF)), "dev");
-    check(cudaMalloc(&d.scratch_new, strata::kernels::native_expert_scratch_bytes(cap, FF)), "dev");
+    check(cudaMalloc(&d.scratch_ref, lamina::kernels::ref::scratch_bytes(cap, FF)), "dev");
+    check(cudaMalloc(&d.scratch_new, lamina::kernels::native_expert_scratch_bytes(cap, FF)), "dev");
     check(cudaMalloc(&d.out_ref, (size_t) cap * H * 4), "dev");
     check(cudaMalloc(&d.out_new, (size_t) cap * H * 4), "dev");
     if (bench) {
@@ -483,7 +483,7 @@ int main(int argc, char** argv) {
         float* dx = nullptr;
         check(cudaMalloc(&dx, x.size() * 4), "dev");
         check(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice), "x");
-        strata::kernels::quantize_q8_1_rows(dx, MAXT, H, d.xq, s);
+        lamina::kernels::quantize_q8_1_rows(dx, MAXT, H, d.xq, s);
         check(cudaStreamSynchronize(s), "x");
         cudaFree(dx);
     }
@@ -498,7 +498,7 @@ int main(int argc, char** argv) {
     int bad = 0;
     std::mt19937 rng(11);
     for (const auto& [gu, dn] : pairs) {
-        const strata::kernels::NativeExpertLayout L = strata::kernels::native_expert_layout(gu, dn, H, FF);
+        const lamina::kernels::NativeExpertLayout L = lamina::kernels::native_expert_layout(gu, dn, H, FF);
         const size_t stride = (L.bytes + 255) & ~(size_t) 255;
         uint8_t* arena = make_arena(L, stride, gu * 100 + dn);
         const char* names = ggml_type_name((ggml_type) gu);

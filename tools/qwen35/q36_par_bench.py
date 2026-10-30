@@ -1,11 +1,11 @@
-"""par_bench.py - aggregate decode throughput of N requests at once: strata-q36 (--batch) and llama.cpp (llama-server -np N),
+"""par_bench.py - aggregate decode throughput of N requests at once: lamina-q36 (--batch) and llama.cpp (llama-server -np N),
 same GGUF, same prompt ids, greedy, 128 new tokens each.  One JSON line per (engine, N, round).
 
-  python q36_par_bench.py strata --exe E --args "--model M --max-context 8192 --batch 8 --mtp 0" --ns 1,2,4,8 --rounds 3 --out F
+  python q36_par_bench.py lamina --exe E --args "--model M --max-context 8192 --batch 8 --mtp 0" --ns 1,2,4,8 --rounds 3 --out F
   python q36_par_bench.py llama --server BIN --model M --ns 1,2,4,8 --rounds 3 --out F [--port 8197]
 
-The strata wall time runs from the first BGEN to the last BDONE (admissions included); the llama one from the first request
-sent to the last answer (prompt reading included); tok/s = tokens produced / wall.  `tail_tok_s` (strata): the window phase
+The lamina wall time runs from the first BGEN to the last BDONE (admissions included); the llama one from the first request
+sent to the last answer (prompt reading included); tok/s = tokens produced / wall.  `tail_tok_s` (lamina): the window phase
 only, after the last admission."""
 from pathlib import Path
 import argparse, json, os, shlex, subprocess, sys, threading, time, urllib.request
@@ -15,7 +15,7 @@ from q36_harness import Eng, load_prompts
 ORDER = [0, 1, 2, 3, 5, 8, 0, 1]   # the prompts that run the full 128 tokens, repeated to fill 8 slots
 
 
-def strata(a):
+def lamina(a):
     prompts = load_prompts(a.prompts)
     eng = Eng(a.exe, shlex.split(a.args), log=a.log)
     out = open(a.out, "a")
@@ -23,13 +23,13 @@ def strata(a):
         for rnd in range(a.rounds):
             if n == 1 and not eng.info.get("batch_slots"):   # an engine without slots: the request alone (GEN)
                 toks, done, ttft, wall = eng.solo(prompts[ORDER[0]], a.n)
-                row = {"engine": "strata", "n": 1, "round": rnd, "tokens": len(toks), "wall": wall,
+                row = {"engine": "lamina", "n": 1, "round": rnd, "tokens": len(toks), "wall": wall,
                        "tok_s": len(toks) / wall, "tail_tok_s": len(toks) / max(1e-9, wall - (ttft or 0))}
             else:
                 reqs = [{"ids": prompts[ORDER[i]], "n": a.n, "slot": i} for i in range(n)]
                 r = eng.batch(reqs)
                 tot = sum(len(t) for t in r["tokens"])
-                row = {"engine": "strata", "n": n, "round": rnd, "tokens": tot, "wall": r["wall"], "tok_s": tot / r["wall"],
+                row = {"engine": "lamina", "n": n, "round": rnd, "tokens": tot, "wall": r["wall"], "tok_s": tot / r["wall"],
                        "tail_tok_s": r["tail_tok_s"]}
             print(json.dumps(row), flush=True)
             out.write(json.dumps(row) + "\n")
@@ -86,7 +86,7 @@ def llama(a):
 
 
 ap = argparse.ArgumentParser()
-ap.add_argument("mode", choices=["strata", "llama"])
+ap.add_argument("mode", choices=["lamina", "llama"])
 ap.add_argument("--exe")
 ap.add_argument("--args", default="")
 ap.add_argument("--server")
@@ -100,4 +100,4 @@ ap.add_argument("--port", type=int, default=8197)
 ap.add_argument("--out", required=True)
 ap.add_argument("--log", default=None)
 a = ap.parse_args()
-(strata if a.mode == "strata" else llama)(a)
+(lamina if a.mode == "lamina" else llama)(a)

@@ -1,6 +1,6 @@
 // src/server/tokenizer.hpp - the model's tokenizer, from its GGUF: byte-level BPE with the qwen35 pre-tokenizer.
 //
-// A port of tools/strata_tokenizer.py (checked against llama.cpp's tokenizer as its oracle): the pre-tokenizer split
+// A port of tools/lamina_tokenizer.py (checked against llama.cpp's tokenizer as its oracle): the pre-tokenizer split
 // is llama.cpp's own (unicode_regex_split), the merges are applied lowest rank first, and the literals (GGUF token
 // types 3 CONTROL and 4 USER_DEFINED) are matched on the raw text first: type 4 always, type 3 with parse_special.
 // Text positions are byte offsets into UTF-8 text.
@@ -106,7 +106,7 @@ private:
 };
 
 /// `tok.encode(text, true, plain)` for chat prompts, reusing the ids of an earlier prompt up to a literal boundary
-/// both share, and a reply's own ids (remember_reply). See tools/strata_tokenizer.py's PromptEncoder for why it is
+/// both share, and a reply's own ids (remember_reply). See tools/lamina_tokenizer.py's PromptEncoder for why it is
 /// exact.
 class PromptEncoder {
 public:

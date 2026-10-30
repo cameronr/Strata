@@ -22,7 +22,7 @@ std::string host_name(std::string_view value);
 bool is_ip(const std::string& name);
 /// `name` is one of `names`, or below an entry that starts with a dot (".example.com")
 bool name_in(const std::string& name, const std::set<std::string>& names);
-/// the config's allowed_hosts (a name or a list) plus $STRATA_ALLOWED_HOSTS; std::invalid_argument for a wrong entry
+/// the config's allowed_hosts (a name or a list) plus $LAMINA_ALLOWED_HOSTS; std::invalid_argument for a wrong entry
 std::vector<std::string> allowed_hosts_of(const json& value, const std::string& env);
 /// every name this server answers to besides an IP address
 std::set<std::string> host_names_for(const std::string& bind_host, const std::vector<std::string>& allowed_hosts,

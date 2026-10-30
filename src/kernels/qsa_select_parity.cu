@@ -3,8 +3,8 @@
 // the captured graph's fixed grid) and the prompt path's batches (up to 256 queries), from the identity case to the
 // trained 262,144 cells, then past it under the GPU's whole selection capacity (qsa_select_max_cells), with exact score
 // ties, zero scores and every tail length.  --bench times both.
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_select.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/qsa_select.hpp"
 #include "parity.hpp"
 
 #include <cuda_runtime.h>
@@ -20,7 +20,7 @@
 
 namespace ref {
 
-using namespace strata::kernels;
+using namespace lamina::kernels;
 constexpr int IDX_DIM = 128, IDX_HEADS = 4, R = 4;
 constexpr int SCORE_WARPS = 8;
 constexpr int TOPK_T = 256;
@@ -177,7 +177,7 @@ void topk(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blo
 
 namespace {
 
-using namespace strata::kernels;
+using namespace lamina::kernels;
 
 constexpr int64_t kTrainedCells = 262144;
 constexpr int QD = 512;                 // a query's floats: 4 heads x 128

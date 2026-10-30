@@ -18,8 +18,8 @@
 // Each order also with its batches of experts of at most 8 rows on the verify windows' grouped kernel
 // (native_expert_grouped from the rows' q8_1 blocks), the others on MMQ.
 // Types by ggml number (default 12 Q4_K and 7 Q5_1: UD-Q4_K_XL's).
-#include "strata/kernels/iq_kernels.hpp"
-#include "strata/prefill/moe_mmq.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 
 #include "ggml.h"
 
@@ -35,7 +35,7 @@
 #include <string>
 #include <vector>
 
-namespace mmq = strata::prefill::mmq;
+namespace mmq = lamina::prefill::mmq;
 
 namespace {
 
@@ -158,7 +158,7 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
     mmq::quantize(dx, nullptr, dqh, dt, FF, N, RMAX, nullptr);
     mmq::Context ctx;
     // the grouped kernel: 16 blobs [gate | up | down] from the same weights, the rows as q8_1 blocks, a plan per batch
-    const strata::kernels::NativeExpertLayout L = strata::kernels::native_expert_layout((int) gt, (int) dt, N, FF);
+    const lamina::kernels::NativeExpertLayout L = lamina::kernels::native_expert_layout((int) gt, (int) dt, N, FF);
     const size_t stride = (L.bytes + 255) & ~(size_t) 255;
     uint8_t* dblob; void *dx81, *dscr; int32_t* dgn;
     ck(cudaMalloc(&dblob, 16 * stride), "blobs");
@@ -167,8 +167,8 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
         ck(cudaMemcpy(dblob + e * stride + L.down_off, wd.data() + e * db, db, cudaMemcpyHostToDevice), "blob");
     }
     ck(cudaMalloc(&dx81, (size_t) RMAX * (N / 32) * 36), "x81");
-    strata::kernels::quantize_q8_1_rows(dx, RMAX, N, dx81, nullptr);
-    ck(cudaMalloc(&dscr, strata::kernels::native_expert_scratch_bytes(128, FF)), "scratch");
+    lamina::kernels::quantize_q8_1_rows(dx, RMAX, N, dx81, nullptr);
+    ck(cudaMalloc(&dscr, lamina::kernels::native_expert_scratch_bytes(128, FF)), "scratch");
     std::vector<unsigned long long> h_ptr(16);
     for (int e = 0; e < 16; ++e) h_ptr[e] = (unsigned long long) (dblob + e * stride);
     unsigned long long* dptr;
@@ -220,7 +220,7 @@ int run_dump(const char* path, int remote, ggml_type gt, ggml_type dt) {
             for (const B& b : plan[(size_t) order]) {
                 if (grouped && b.max_rows <= 8) {
                     ++n_small;
-                    strata::kernels::native_expert_grouped(L, dptr, db_dev + b.at, dgn + b.n, dids, dids, b.n, b.rows,
+                    lamina::kernels::native_expert_grouped(L, dptr, db_dev + b.at, dgn + b.n, dids, dids, b.n, b.rows,
                                                            dx81, (N / 32) * 36, dscr, dd, nullptr);
                     continue;
                 }

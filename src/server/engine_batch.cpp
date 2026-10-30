@@ -1,5 +1,5 @@
-// src/server/engine_batch.cpp - --batch: several requests at once in the engine's batch slots (serve/server.py's
-// StrataEngine.generate_batched and its helpers).
+// src/server/engine_batch.cpp - --batch: several requests at once in the engine's batch slots
+// (LaminaEngine::generate_batched and its helpers).
 //
 // Alone (no slot busy, nobody waiting) a request takes the solo path (GEN, with MTP drafts: the fastest stream); when
 // another arrives meanwhile it is STOPped and continues in a slot (BGEN with its prompt and what it generated: the
@@ -37,11 +37,11 @@ constexpr int kBgenRefusalsMax = 6;                   // #1994: tries of other s
 constexpr double kSlotParkS = 2.0;
 constexpr double kOrphanSlotS = 3.0;                  // #1603: a busy flag nobody owns this long is a leak
 
-const std::optional<double> kEngineStallS = timeout_env("STRATA_ENGINE_STALL_S", 90.0);
-const std::optional<double> kAdmitMaxWaitS = timeout_env("STRATA_ADMIT_MAX_WAIT_S", 30.0);
+const std::optional<double> kEngineStallS = timeout_env("LAMINA_ENGINE_STALL_S", 90.0);
+const std::optional<double> kAdmitMaxWaitS = timeout_env("LAMINA_ADMIT_MAX_WAIT_S", 30.0);
 
 int64_t admit_short_first() {
-    const char* v = std::getenv("STRATA_ADMIT_SHORT_FIRST");
+    const char* v = std::getenv("LAMINA_ADMIT_SHORT_FIRST");
     try {
         return v != nullptr && *v ? std::max<int64_t>(0, std::stoll(v)) : 0;
     } catch (const std::exception&) {
@@ -162,7 +162,7 @@ std::pair<int, int> LaminaEngine::admission() {
 bool LaminaEngine::take_control(Cancel& cancel, size_t plen, std::optional<int64_t> after_epoch, bool is_new,
                                 const std::function<void()>& beat) {
     // the control lines (one prompt read at a time), with heartbeats; false when cancelled. `after_epoch`: a read that
-    // gave way lets the requests waiting then go first; `is_new`: STRATA_ADMIT_SHORT_FIRST orders only these
+    // gave way lets the requests waiting then go first; `is_new`: LAMINA_ADMIT_SHORT_FIRST orders only these
     const int64_t short_first = admit_short_first();
     WaitEntry entry{plen, mono(), is_new};
     {
@@ -484,8 +484,8 @@ std::optional<int> LaminaEngine::pick_slot(const std::vector<int32_t>& prompt) {
 
 bool LaminaEngine::may_go_solo(int64_t left, int times, const std::string& embeddings) {
     // a request decoding in a slot that is alone now goes back to the solo path with its MTP drafts (the engine continues
-    // it from the slot's sessions: INFO slot_cache=1); STRATA_PARALLEL_SOLO=0 keeps it in the slot
-    const char* off = std::getenv("STRATA_PARALLEL_SOLO");
+    // it from the slot's sessions: INFO slot_cache=1); LAMINA_PARALLEL_SOLO=0 keeps it in the slot
+    const char* off = std::getenv("LAMINA_PARALLEL_SOLO");
     if (!embeddings.empty() || times >= kSoloAgainMax || left < kSoloAgainMinLeft || !truthy(jget(info, "slot_cache")) ||
         (off != nullptr && std::string(off) == "0"))
         return false;

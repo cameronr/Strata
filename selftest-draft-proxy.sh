@@ -3,7 +3,7 @@
 # head, one tile past the old 49,152-row cap (49,184, the shape that used to throw "too many rows"), and
 # the 106,299 CJK subset - for Q6_K and Q8_0 - plus the copy-vs-exact draft-head timing at each size.
 #
-# It can't run inside `docker build` (no GPU) or in the runtime image (built STRATA_BUILD_TESTS=OFF), so
+# It can't run inside `docker build` (no GPU) or in the runtime image (built LAMINA_BUILD_TESTS=OFF), so
 # this runs it in a CUDA devel image with --gpus all. A cached dev image (docker/Dockerfile.selftest) and
 # a gitignored build-selftest/ cache make repeat runs incremental: only what changed recompiles.
 #
@@ -12,7 +12,7 @@
 set -eu
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEV_IMAGE="${DEV_IMAGE:-strata-selftest-dev:latest}"
+DEV_IMAGE="${DEV_IMAGE:-lamina-selftest-dev:latest}"
 CUDA_IMAGE="${CUDA_IMAGE:-nvidia/cuda:13.0.0-devel-ubuntu24.04}"
 ARCH="${CUDA_ARCH:-86-real;89-real}"
 
@@ -30,8 +30,8 @@ exec docker run --rm --gpus all \
     /venv/bin/python -c "import setup; setup.fetch_llama()"
     # always (re)configure: cheap, and it recovers from a previous failed configure instead of skipping on a partial cache
     cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release \
-      -DSTRATA_ENABLE_CUDA=ON -DSTRATA_BUILD_TESTS=ON -DSTRATA_NATIVE_EXPERTS=ON -DSTRATA_PORTABLE=ON \
-      -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DSTRATA_GGML_DIR=/src/third_party/llama.cpp
+      -DLAMINA_ENABLE_CUDA=ON -DLAMINA_BUILD_TESTS=ON -DLAMINA_NATIVE_EXPERTS=ON -DLAMINA_PORTABLE=ON \
+      -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" -DLAMINA_GGML_DIR=/src/third_party/llama.cpp
     cmake --build build --target draft_proxy_parity -j"$(nproc)"
     ./build/draft_proxy_parity --selftest
   '

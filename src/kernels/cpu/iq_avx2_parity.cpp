@@ -12,15 +12,15 @@
 //         ms per expert on one thread: each variant, ggml-cpu's per-token dot, and the engine's dispatch
 //         (native_gu_rows, native_down_rows / q2_rows_any) over --mb MB of expert blobs - far more than an L3 holds, so
 //         the weights stream from DRAM as they do in decode.  --dispatch: only the kernels' own dispatch, ggml and the
-//         engine's (the env decides: STRATA_IQ256_GATHER, STRATA_NO_AVXVNNI, STRATA_IQ_MT_MIN), for A/B runs against
+//         engine's (the env decides: LAMINA_IQ256_GATHER, LAMINA_NO_AVXVNNI, LAMINA_IQ_MT_MIN), for A/B runs against
 //         another build.  --cpu pins the thread to that logical CPU.
 //
-// Built with -DSTRATA_IQ_PARITY_DISPATCH_ONLY=1 it calls only the kernels' public entry points, so the same program
+// Built with -DLAMINA_IQ_PARITY_DISPATCH_ONLY=1 it calls only the kernels' public entry points, so the same program
 // builds on an engine from before the variants (--bench --dispatch against it).
-#include "strata/kernels/cpu/expert.hpp"
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/iq_avx2.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/cpu/expert.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/iq_avx2.hpp"
+#include "lamina/kernels/cpu/native_expert.hpp"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -52,7 +52,7 @@
 #include <string>
 #include <vector>
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = lamina::kernels::cpu;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -61,7 +61,7 @@ constexpr int64_t kH = 2560, kFF = 640;   // the experts' geometry: n_embd, expe
 constexpr int kMaxT = 8;
 
 // ---- the variants: the public dispatch only in a DISPATCH_ONLY build
-#if defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
+#if defined(LAMINA_IQ_PARITY_DISPATCH_ONLY)
 constexpr bool kVariants = false;
 int gu_variants() { return 0; }
 int down_variants() { return 0; }
@@ -351,9 +351,9 @@ int check_down(int d_type) {
     return failures;
 }
 
-#if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
+#if !defined(LAMINA_IQ_PARITY_DISPATCH_ONLY)
 // #152 through the engine's dispatch: where native_gu_rows gives a format the multi-token kernel from one token on
-// (native_gu_mt_min 1: IQ3_S where its grid is gathered, or every format under STRATA_IQ_MT_MIN=1), each token's
+// (native_gu_mt_min 1: IQ3_S where its grid is gathered, or every format under LAMINA_IQ_MT_MIN=1), each token's
 // gate/up rows must be the same alone and in any group.
 int check_engine_width(int type) {
     const int mt = cpu::native_gu_mt_min(type);
@@ -555,13 +555,13 @@ int main(int argc, char** argv) {
     auto env = [](const char* k) { const char* v = std::getenv(k); return v ? v : "-"; };
     std::printf("iq_avx2_parity: %s (avx2 %d, avx512 %d), CPU %d, core type %02Xh\n", cpu::cpu_name().c_str(),
                 (int) cpu::cpu_avx2_ok(), (int) cpu::cpu_avx512_ok(), pin, core_type());
-    std::printf("  STRATA_IQ256_GATHER %s, STRATA_NO_AVXVNNI %s, STRATA_IQ_MT_MIN %s, STRATA_IQ_PREFETCH %s\n",
-                env("STRATA_IQ256_GATHER"), env("STRATA_NO_AVXVNNI"), env("STRATA_IQ_MT_MIN"), env("STRATA_IQ_PREFETCH"));
+    std::printf("  LAMINA_IQ256_GATHER %s, LAMINA_NO_AVXVNNI %s, LAMINA_IQ_MT_MIN %s, LAMINA_IQ_PREFETCH %s\n",
+                env("LAMINA_IQ256_GATHER"), env("LAMINA_NO_AVXVNNI"), env("LAMINA_IQ_MT_MIN"), env("LAMINA_IQ_PREFETCH"));
     if (!cpu::cpu_avx2_ok()) {
         std::printf("iq_avx2_parity: no AVX2 here, nothing to check (the engine takes ggml-cpu's dot)\n");
         return 0;
     }
-#if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
+#if !defined(LAMINA_IQ_PARITY_DISPATCH_ONLY)
     std::printf("  variants this CPU runs: %s; this thread's: %s\n",
                 variant_name(cpu::iq256_variants()).c_str(), variant_name(cpu::iq256_variant()).c_str());
 #endif
@@ -569,7 +569,7 @@ int main(int argc, char** argv) {
     int failures = 0;
     for (int type : {16, 17, 22, 18, 21, 23}) failures += check_gate_up(type);
     for (int type : {20, 42}) failures += check_down(type);
-#if !defined(STRATA_IQ_PARITY_DISPATCH_ONLY)
+#if !defined(LAMINA_IQ_PARITY_DISPATCH_ONLY)
     for (int type : {16, 17, 22, 18, 21, 23}) failures += check_engine_width(type);
 #endif
     std::printf("iq_avx2_parity: %d failures\n", failures);

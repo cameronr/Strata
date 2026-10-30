@@ -13,7 +13,7 @@ The server (`lamina-server`) serves the model over HTTP. Its settings: [USING.md
 
 - **Where it listens.** `127.0.0.1` by default: this PC only. `"host": "0.0.0.0"` in the config (or `--host`) opens it
   to the network, and the server warns when no API key is set.
-- **API key.** `"api_key"` in the config (or `STRATA_API_KEY`) is required on `/v1/*`, on every endpoint that shows the
+- **API key.** `"api_key"` in the config (or `LAMINA_API_KEY`) is required on `/v1/*`, on every endpoint that shows the
   model's state, requests or answers, and on every `POST`; it is compared in constant time. Set one before the server
   is reachable from other machines.
 - **Host check.** Without an API key the server answers only requests whose `Host` is a name it knows (`localhost`, an

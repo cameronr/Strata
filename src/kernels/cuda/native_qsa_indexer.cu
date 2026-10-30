@@ -18,9 +18,9 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "strata/kernels/native_qsa_indexer.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/mrope.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <atomic>
@@ -30,7 +30,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 constexpr int D = 128, R = 4, ROT = 64, THREADS = 256;
 // One token's append; every thread of the block calls it (it synchronizes the block), a later call sees this one's
@@ -188,4 +188,4 @@ void native_qsa_indexer_append_multi(const float* raw, const int32_t* relative_p
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-} // namespace strata::kernels
+} // namespace lamina::kernels

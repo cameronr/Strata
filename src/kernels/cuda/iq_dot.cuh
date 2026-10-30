@@ -12,11 +12,11 @@
 #define GGML_COMMON_DECL_CUDA
 #define GGML_COMMON_IMPL_CUDA
 #include "ggml-common.h"
-#include "strata/kernels/dp4a.hpp"
-#include "strata/kernels/warp.cuh"
+#include "lamina/kernels/dp4a.hpp"
+#include "lamina/kernels/warp.cuh"
 #include <type_traits>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 // ---------------------------------------------------------------- llama.cpp helpers (vecdotq.cuh)
@@ -483,7 +483,7 @@ __device__ __forceinline__ float vec_dot_q6_K_q8_1(const void* __restrict__ vbq,
         const int sc = scales[4 * i];
         const int vil = (vl >> (4 * i)) & 0x0F0F0F0F;
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
-        const int vi = strata_q6_quants(vil, vih);   // (vil | vih) - 32
+        const int vi = lamina_q6_quants(vil, vih);   // (vil | vih) - 32
         sumf += d8 * (ggml_cuda_dp4a(vi, u, 0) * sc);
     }
     return __half2float(bq6_K->d) * sumf;
@@ -843,13 +843,13 @@ template<> struct Fmt<23> { static constexpr int qk = 256, ipb = QI4_XS / 4, ste
     __device__ static float dot(const void* v, const block_q8_1* y, int kbx, int iqs) { return vec_dot_iq4_xs_q8_1(v, y, kbx, iqs); } };
 
 // Every format above, for the dispatch switches: X(type) once per Fmt<type>.
-#define STRATA_FMTS(X) X(7) X(8) X(12) X(13) X(14) X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(29) X(42)
+#define LAMINA_FMTS(X) X(7) X(8) X(12) X(13) X(14) X(16) X(17) X(18) X(19) X(20) X(21) X(22) X(23) X(29) X(42)
 
 inline int fmt_qk(int t) {
     switch (t) {
-#define STRATA_QK(T) case T: return Fmt<T>::qk;
-        STRATA_FMTS(STRATA_QK)
-#undef STRATA_QK
+#define LAMINA_QK(T) case T: return Fmt<T>::qk;
+        LAMINA_FMTS(LAMINA_QK)
+#undef LAMINA_QK
         default: return 0;
     }
 }
@@ -1105,4 +1105,4 @@ __device__ __forceinline__ float row_dot_q8_0_q8_0(const uint8_t* row, size_t ro
 }
 
 }  // namespace
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

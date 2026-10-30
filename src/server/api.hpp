@@ -28,7 +28,7 @@ using EventSink = std::function<bool(const std::string* name, const json* event)
 /// the last PP line as llama.cpp's prompt_progress (null when there is nothing to say)
 json prompt_progress(Service& svc);
 /// `run`: the events to send instead of Service::run's (the MCP loop), whose "mcp" items become chunks with an empty
-/// delta and a strata_mcp field
+/// delta and a lamina_mcp field
 void openai_chunks(Service& svc, const json& req, const std::vector<int32_t>& ids, bool thinking, const json& tools,
                    int64_t max_new, Cancel& cancel, const Runner* run, const std::optional<std::string>& force,
                    const ChunkSink& out);
@@ -64,7 +64,7 @@ void run_with_mcp(Service& svc, const std::shared_ptr<McpHub>& hub, json message
                   std::vector<int32_t> ids, bool thinking, int64_t max_new, int64_t max_req, const json& sampling,
                   Cancel& cancel, const std::set<std::string>& mcp_names, const Sink& sink);
 
-/// one line per request while diagnosing blank turns (STRATA_DEBUG=1)
+/// one line per request while diagnosing blank turns (LAMINA_DEBUG=1)
 void debug_request(const std::string& api, const json& req, const json& messages, const json& tools, int64_t max_new,
                    bool thinking, size_t prompt_tokens);
 

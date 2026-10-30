@@ -23,12 +23,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/kernels/native_mma.hpp"
-#include "strata/kernels/q8_1_finite.hpp"
-#include "strata/kernels/dp4a.hpp"
-#include "strata/kernels/iq_kernels.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/kernels/native_mma.hpp"
+#include "lamina/kernels/q8_1_finite.hpp"
+#include "lamina/kernels/dp4a.hpp"
+#include "lamina/kernels/iq_kernels.hpp"
 #include "q8_1_il.cuh"
 
 #include <cuda_fp16.h>
@@ -40,7 +40,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int QK = 256;
@@ -172,8 +172,8 @@ __device__ __forceinline__ float q5_q8_dot_impl(
         const int vh1i = ((vh[1] >> i) << 4) & 0x10101010;
         const int v0i = vl0i | vh0i;
         const int v1i = vl1i | vh1i;
-        const int dot1 = STRATA_DP4A(v0i, u[2 * i], STRATA_DP4A(v1i, u[2 * i + 1], 0));
-        const int dot2 = STRATA_DP4A(0x01010101, u[2 * i], STRATA_DP4A(0x01010101, u[2 * i + 1], 0));
+        const int dot1 = LAMINA_DP4A(v0i, u[2 * i], LAMINA_DP4A(v1i, u[2 * i + 1], 0));
+        const int dot2 = LAMINA_DP4A(0x01010101, u[2 * i], LAMINA_DP4A(0x01010101, u[2 * i + 1], 0));
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
     }
@@ -281,8 +281,8 @@ __device__ __forceinline__ float q2_q8_dot(const Q20Block* __restrict__ w,
         const int qo = __byte_perm(0x020100ff, 0x020100ff, q >> 2);
         const int qx = __byte_perm(qe, qo, 0x5140);
         const int qy = __byte_perm(qe, qo, 0x7362);
-        sumi = STRATA_DP4A(u, qx, sumi);
-        sumi = STRATA_DP4A(v, qy, sumi);
+        sumi = LAMINA_DP4A(u, qx, sumi);
+        sumi = LAMINA_DP4A(v, qy, sumi);
     }
     const float d8 = __low2float(chunk->ds);
     return d2 * d8 * sumi;
@@ -355,7 +355,7 @@ __device__ __forceinline__ float q3_q8_dot_impl(int vl, int vh, const int* __res
         const int vil = (vl >> (2 * i)) & 0x03030303;
         const int vih = ((vh >> i) << 2) & 0x04040404;
         const int vi = __vsubss4(vil, vih);
-        sumf += d8[i] * (STRATA_DP4A(vi, u[i], 0) * sc);
+        sumf += d8[i] * (LAMINA_DP4A(vi, u[i], 0) * sc);
     }
     return d3 * sumf;
 }
@@ -448,8 +448,8 @@ __device__ __forceinline__ float iq4_xs_q8_dot(const IQ4XSBlock* __restrict__ w,
         const int2 v = iq4_table_lookup(aux_q4);
         const int u0 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j];
         const int u1 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j + 4];
-        sumi = STRATA_DP4A(v.x, u0, sumi);
-        sumi = STRATA_DP4A(v.y, u1, sumi);
+        sumi = LAMINA_DP4A(v.x, u0, sumi);
+        sumi = LAMINA_DP4A(v.y, u1, sumi);
     }
     const int ls = ((w->scales_l[iqs / 8] >> (iqs & 0x04)) & 0x0f) |
                    (((w->scales_h >> (iqs / 2)) & 0x03) << 4);
@@ -508,8 +508,8 @@ __device__ __forceinline__ float q4_q8_dot_impl(
     for (int i = 0; i < 2; ++i) {
         const int v0i = (v[0] >> (4 * i)) & 0x0f0f0f0f;
         const int v1i = (v[1] >> (4 * i)) & 0x0f0f0f0f;
-        const int dot1 = STRATA_DP4A(v1i, u[2 * i + 1], STRATA_DP4A(v0i, u[2 * i], 0));
-        const int dot2 = STRATA_DP4A(0x01010101, u[2 * i + 1], STRATA_DP4A(0x01010101, u[2 * i], 0));
+        const int dot1 = LAMINA_DP4A(v1i, u[2 * i + 1], LAMINA_DP4A(v0i, u[2 * i], 0));
+        const int dot2 = LAMINA_DP4A(0x01010101, u[2 * i + 1], LAMINA_DP4A(0x01010101, u[2 * i], 0));
         sumf_d += d8[i] * (dot1 * sc[i]);
         sumf_m += d8[i] * (dot2 * m[i]);
     }
@@ -605,8 +605,8 @@ __device__ __forceinline__ float q6_q8_dot_impl(int vl, int vh, const int* __res
         const int sc = scales[4 * i];
         const int vil = (vl >> (4 * i)) & 0x0f0f0f0f;
         const int vih = ((vh >> (4 * i)) << 4) & 0x30303030;
-        const int vi = strata_q6_quants(vil, vih);
-        sumf += d8[i] * (STRATA_DP4A(vi, u[i], 0) * sc);
+        const int vi = lamina_q6_quants(vil, vih);
+        sumf += d8[i] * (LAMINA_DP4A(vi, u[i], 0) * sc);
     }
     return d * sumf;
 }
@@ -678,8 +678,8 @@ __device__ __forceinline__ float small_q8_dot(const Q40Block* __restrict__ w,
         const int v = load_int_b2(w->qs, iqs + i);
         const int vi0 = (v >> 0) & 0x0f0f0f0f;
         const int vi1 = (v >> 4) & 0x0f0f0f0f;
-        sumi = STRATA_DP4A(vi0, reinterpret_cast<const int*>(x->qs)[iqs + i], sumi);
-        sumi = STRATA_DP4A(vi1, reinterpret_cast<const int*>(x->qs)[iqs + i + 4], sumi);
+        sumi = LAMINA_DP4A(vi0, reinterpret_cast<const int*>(x->qs)[iqs + i], sumi);
+        sumi = LAMINA_DP4A(vi1, reinterpret_cast<const int*>(x->qs)[iqs + i + 4], sumi);
     }
     const float2 ds = __half22float2(x->ds);
     const float d = w->d;
@@ -698,13 +698,13 @@ __device__ __forceinline__ float small_q8_dot(const Q50Block* __restrict__ w,
         vi0 |= (vh << 11) & 0x00001000;
         vi0 |= (vh << 18) & 0x00100000;
         vi0 |= (vh << 25) & 0x10000000;
-        sumi = STRATA_DP4A(vi0, reinterpret_cast<const int*>(x->qs)[iqs + i], sumi);
+        sumi = LAMINA_DP4A(vi0, reinterpret_cast<const int*>(x->qs)[iqs + i], sumi);
         int vi1 = (vl >> 4) & 0x0f0f0f0f;
         vi1 |= (vh >> 12) & 0x00000010;
         vi1 |= (vh >> 5) & 0x00001000;
         vi1 |= (vh << 2) & 0x00100000;
         vi1 |= (vh << 9) & 0x10000000;
-        sumi = STRATA_DP4A(vi1, reinterpret_cast<const int*>(x->qs)[iqs + i + 4], sumi);
+        sumi = LAMINA_DP4A(vi1, reinterpret_cast<const int*>(x->qs)[iqs + i + 4], sumi);
     }
     const float2 ds = __half22float2(x->ds);
     const float d = w->d;
@@ -718,7 +718,7 @@ __device__ __forceinline__ float small_q8_dot(const Q80Block* __restrict__ w,
     for (int i = 0; i < 2; ++i) {
         const int v = load_int_b2(w->qs, iqs + i);
         const int u = reinterpret_cast<const int*>(x->qs)[iqs + i];
-        sumi = STRATA_DP4A(v, u, sumi);
+        sumi = LAMINA_DP4A(v, u, sumi);
     }
     const float d0 = w->d;
     const float d1 = __low2float(x->ds);
@@ -732,8 +732,8 @@ __device__ __forceinline__ float small_q8_dot(const IQ4NLBlock* __restrict__ w,
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
         const int2 v = iq4_table_lookup(load_int_b2(w->qs, iqs + i));
-        sumi = STRATA_DP4A(v.x, q8[i], sumi);
-        sumi = STRATA_DP4A(v.y, q8[i + 4], sumi);
+        sumi = LAMINA_DP4A(v.x, q8[i], sumi);
+        sumi = LAMINA_DP4A(v.y, q8[i + 4], sumi);
     }
     const float d = __half2float(w->d) * __low2float(x->ds);
     return d * sumi;
@@ -897,8 +897,8 @@ struct Q20Traits {
         int sumi = 0;
 #pragma unroll
         for (int j = 0; j < 4; ++j) {
-            sumi = STRATA_DP4A(q8[j * 2], r.qx[j], sumi);
-            sumi = STRATA_DP4A(q8[j * 2 + 1], r.qy[j], sumi);
+            sumi = LAMINA_DP4A(q8[j * 2], r.qx[j], sumi);
+            sumi = LAMINA_DP4A(q8[j * 2 + 1], r.qy[j], sumi);
         }
         const float d8 = __low2float(chunk->ds);
         return r.d2 * d8 * sumi;
@@ -976,8 +976,8 @@ struct IQ4XSTraits {
         for (int j = 0; j < 4; ++j) {
             const int u0 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j];
             const int u1 = reinterpret_cast<const int*>(x[iqs / 4].qs)[j + 4];
-            sumi = STRATA_DP4A(r.v[j].x, u0, sumi);
-            sumi = STRATA_DP4A(r.v[j].y, u1, sumi);
+            sumi = LAMINA_DP4A(r.v[j].x, u0, sumi);
+            sumi = LAMINA_DP4A(r.v[j].y, u1, sumi);
         }
         sumi *= r.ls - 32;
         const float d = r.dw * __low2float(x[iqs / 4].ds);
@@ -1217,7 +1217,7 @@ struct IlQ6K {
             sc[i] = r.scales[4 * i];
             const int vil = (r.vl >> (4 * i)) & 0x0f0f0f0f;
             const int vih = ((r.vh >> (4 * i)) << 4) & 0x30303030;
-            vi[i] = strata_q6_quants(vil, vih);
+            vi[i] = lamina_q6_quants(vil, vih);
         }
 #pragma unroll
         for (int c = 0; c < NC; ++c) {
@@ -1333,10 +1333,10 @@ void launch_il(const void* weights, const void* x_q8_1, const void* x_il, float*
     const int* xq = I::PM ? parts.pm : parts.bm;
     const float* xd = parts.d;
     switch (ncols) {
-#define STRATA_IL_CASE(N) case N: native_mmvq_il_kernel<I, N, R><<<blocks, 4 * WARP, 0, s>>>(w, xq, xd, y, n_in, n_out); break;
-        STRATA_IL_CASE(2) STRATA_IL_CASE(3) STRATA_IL_CASE(4) STRATA_IL_CASE(5) STRATA_IL_CASE(6) STRATA_IL_CASE(7)
-        STRATA_IL_CASE(8)
-#undef STRATA_IL_CASE
+#define LAMINA_IL_CASE(N) case N: native_mmvq_il_kernel<I, N, R><<<blocks, 4 * WARP, 0, s>>>(w, xq, xd, y, n_in, n_out); break;
+        LAMINA_IL_CASE(2) LAMINA_IL_CASE(3) LAMINA_IL_CASE(4) LAMINA_IL_CASE(5) LAMINA_IL_CASE(6) LAMINA_IL_CASE(7)
+        LAMINA_IL_CASE(8)
+#undef LAMINA_IL_CASE
         default: throw std::invalid_argument("native_mmvq_il requires 1 <= ncols <= 8");
     }
 }
@@ -1827,4 +1827,4 @@ void native_mmvq_il(int ggml_type, const void* weights, const void* x_q8_1, cons
     launch_check();
 }
 
-} // namespace strata::kernels
+} // namespace lamina::kernels

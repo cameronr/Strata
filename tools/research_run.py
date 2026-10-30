@@ -1,4 +1,4 @@
-"""A scripted research run against a running Strata server: one long document, then many different questions.
+"""A scripted research run against a running Lamina server: one long document, then many different questions.
 
 Reads the document once, then asks each question and reports, per question, the time to the first streamed token and
 the whole request, and the run's total.  Greedy (temperature 0), so two runs of the same file give the same answers and
@@ -11,7 +11,7 @@ a change in how the server keeps the document (the shared prefix below) can be c
 
 --layout split  (the default): the document is the first message, the question the second.
 --layout joined: one message, "document + question" (a client that cannot split them).
---prefix on: the request carries "strata_prefix" naming the document as the shared prefix: the server reads it
+--prefix on: the request carries "lamina_prefix" naming the document as the shared prefix: the server reads it
 once and every question starts from it.  off: the field is left out.
 --parallel N: N questions at a time (the server needs "parallel": N for them to run together).
 """
@@ -31,11 +31,11 @@ def request_body(doc: str, question: str, layout: str, prefix: bool, max_tokens:
     if layout == "joined":
         body = {"messages": [{"role": "user", "content": doc + "\n\nQuestion: " + question + "\nAnswer:"}]}
         if prefix:
-            body["strata_prefix"] = {"message": 0, "chars": len(doc) + 2}
+            body["lamina_prefix"] = {"message": 0, "chars": len(doc) + 2}
     else:
         body = {"messages": [{"role": "user", "content": doc}, {"role": "user", "content": question}]}
         if prefix:
-            body["strata_prefix"] = {"messages": 1}
+            body["lamina_prefix"] = {"messages": 1}
     body.update(temperature=0, max_tokens=max_tokens, stream=True)
     if model:
         body["model"] = model

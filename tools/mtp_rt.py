@@ -1,10 +1,10 @@
 """tools/mtp_rt.py - plan v0.3 P6: the MTP draft layer's runtime files, from the packed MTP GGUF.
 
-    python tools/mtp_rt.py --gguf <Strata>/mtp-bf16/mtp-q2_0.gguf --out <Strata>/mtp-bf16/rt
+    python tools/mtp_rt.py --gguf <Lamina>/mtp-bf16/mtp-q2_0.gguf --out <Lamina>/mtp-bf16/rt
 
 Writes
   experts.bin   512 routed experts.  Q2_0 (tools/mtp_pack.py's default) in the engine's blob layout
-                (`include/strata/kernels/cpu/expert.hpp`): gate/up rows interleaved (2r = gate r, 2r+1 = up r), then
+                (`include/lamina/kernels/cpu/expert.hpp`): gate/up rows interleaved (2r = gate r, 2r+1 = up r), then
                 down rows; the Q2_0 codes in one plane and the fp16 scales in another, a lossless relayout of the
                 GGUF's blocks (same bytes, `cpu_expert_fixture.py`).  Other formats (iq4_nl, q8_0) as the GGUF's
                 blocks, [gate rows | up rows | down rows] per expert, for the native expert kernels.

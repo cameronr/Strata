@@ -1,11 +1,11 @@
 // src/kernels/ngram.cpp - P2.S4: the PLE n-gram hash and the table read (IQ4_NL or Q8_0).
 //
-// See include/strata/kernels/ngram.hpp for the semantics, the rival readings, and the note on MADV_RANDOM.
-#include "strata/kernels/ngram.hpp"
-#include "strata/artifact/gguf_reader.hpp"
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/ngram/ple_reader.hpp"
-#include "strata/platform/direct_file.hpp"
+// See include/lamina/kernels/ngram.hpp for the semantics, the rival readings, and the note on MADV_RANDOM.
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/artifact/gguf_reader.hpp"
+#include "lamina/kernels/f16_bits.hpp"
+#include "lamina/ngram/ple_reader.hpp"
+#include "lamina/platform/direct_file.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -26,7 +26,7 @@
 #include <sys/mman.h>
 #endif
 
-namespace strata::kernels {
+namespace lamina::kernels {
 
 PleConsts ple_artifact_consts() {
     // docs/gguf-dump-shard1.txt, verbatim.  Written once here rather than derived, because `head_offsets` is
@@ -141,8 +141,8 @@ struct PleTable::Impl {
     // Direct mode (plan v0.3 P2): the mapping above is released after the header parse and every row comes
     // from an unbuffered SSD read into `raw`.
     PleIo mode = PleIo::Mmap;
-    strata::ngram::PleReader reader;
-    strata::ngram::PleReader::Ticket ticket;
+    lamina::ngram::PleReader reader;
+    lamina::ngram::PleReader::Ticket ticket;
     bool pending = false;
     uint32_t rows[PLE_N_HEADS] = {};
     uint8_t raw[PLE_N_HEADS * PLE_ROW_BYTES_Q8_0] = {};
@@ -161,7 +161,7 @@ struct PleTable::Impl {
         bool pending = false, via_reader = false;
         uint32_t rows[PLE_N_HEADS] = {};
         uint8_t raw[PLE_N_HEADS * PLE_ROW_BYTES_Q8_0] = {};
-        strata::ngram::PleReader::Ticket ticket;
+        lamina::ngram::PleReader::Ticket ticket;
     };
     Ahead aheads[PleTable::kAheadSlots];
 
@@ -173,7 +173,7 @@ struct PleTable::Impl {
 // The whole table in 8 MiB unbuffered reads, four in flight.  Pageable: locking it resident first (VirtualLock of
 // 28.8 GB) faults in its pages under the process's working-set lock and stalled the startup's other threads ~8 s.
 void PleTable::Impl::load() {
-    using strata::platform::DirectFile;
+    using lamina::platform::DirectFile;
     const auto t0 = std::chrono::steady_clock::now();
     const uint64_t a0 = table_offset & ~(uint64_t) (DirectFile::alignment() - 1);
     const uint64_t need = table_offset + n_rows * (uint64_t) row_bytes - a0;
@@ -192,7 +192,7 @@ void PleTable::Impl::load() {
             next += len;
             ++inflight;
         }
-        strata::platform::Completion c[kDepth];
+        lamina::platform::Completion c[kDepth];
         const int k = ok ? f.wait(c, kDepth, -1) : 0;
         for (int i = 0; i < k; ++i) {
             if (c[i].tag == DirectFile::WAKE_TAG) continue;
@@ -202,7 +202,7 @@ void PleTable::Impl::load() {
         }
     }
     while (inflight > 0) {   // a failed or cancelled load still collects what it queued
-        strata::platform::Completion c[kDepth];
+        lamina::platform::Completion c[kDepth];
         const int k = f.wait(c, kDepth, -1);
         for (int i = 0; i < k; ++i) if (c[i].tag != DirectFile::WAKE_TAG) --inflight;
     }
@@ -312,7 +312,7 @@ void PleTable::close() {
     impl_->cancel = false;
     impl_->ram = nullptr;
     if (impl_->ram_base != nullptr) {
-        strata::platform::DirectFile::free_aligned(impl_->ram_base);
+        lamina::platform::DirectFile::free_aligned(impl_->ram_base);
         impl_->ram_base = nullptr;
     }
     impl_->reader.close();
@@ -328,7 +328,7 @@ void PleTable::close() {
 bool PleTable::is_open() const { return impl_->data != nullptr || impl_->reader.is_open(); }
 
 bool PleTable::start_ram_load(std::string& err) {
-    using strata::platform::DirectFile;
+    using lamina::platform::DirectFile;
     if (impl_->mode != PleIo::Ram || impl_->ram_base != nullptr) return true;
     const uint64_t a0 = impl_->table_offset & ~(uint64_t) (DirectFile::alignment() - 1);
     const uint64_t end = impl_->table_offset + impl_->n_rows * (uint64_t) impl_->row_bytes;
@@ -510,7 +510,7 @@ void PleTable::set_injected_delay_us(double us) { impl_->reader.set_injected_del
 std::string PleTable::io_report() const {
     if (impl_->from_ram()) return "ple io: " + impl_->ram_note;
     if (impl_->mode == PleIo::Mmap || !impl_->reader.is_open()) return {};
-    const strata::ngram::ReaderStats& s = impl_->reader.stats();
+    const lamina::ngram::ReaderStats& s = impl_->reader.stats();
     char buf[320];
     std::snprintf(buf, sizeof buf,
                   "ple io: %llu rows, %.1f%% row-cache hits, %llu SSD reads (%.1f MB), read p50 %.0f us p99 %.0f us, "
@@ -570,4 +570,4 @@ void PleTable::gather(const uint32_t* rows16, float* out2560) const {
     for (int h = 0; h < PLE_N_HEADS; ++h) read_row(rows16[h], out2560 + (size_t) h * PLE_HEAD_DIM);
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

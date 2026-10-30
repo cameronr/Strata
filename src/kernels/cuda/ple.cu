@@ -1,6 +1,6 @@
 // src/kernels/cuda/ple.cu - P2.S4: the PLE block's GPU half.
 //
-// See include/strata/kernels/ple.hpp for the structure and for the `normalized`-is-the-conv-input finding.
+// See include/lamina/kernels/ple.hpp for the structure and for the `normalized`-is-the-conv-input finding.
 //
 // The legacy arithmetic below follows the captured CPU ggml graph
 // (`bench/micro/ple_in.bin` / `ple_out.bin`, produced by `ple_layer_xcheck.cpp`):
@@ -13,15 +13,15 @@
 //
 // The opt-in native BF16 path replaces only ple_value with the pinned CUDA single-token BF16/F32 MMVF.
 // A separate opt-in native postops path follows the pinned CUDA arithmetic after both projections.
-#include "strata/kernels/ple.hpp"
-#include "strata/kernels/bf16_bits.hpp"
-#include "strata/kernels/bf16_gemv.hpp"
-#include "strata/kernels/f16_bits.hpp"
-#include "strata/kernels/ngram.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/s2_gemv_q8.hpp"
-#include "strata/kernels/native_mmvq.hpp"
-#include "strata/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/ple.hpp"
+#include "lamina/kernels/bf16_bits.hpp"
+#include "lamina/kernels/bf16_gemv.hpp"
+#include "lamina/kernels/f16_bits.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/s2_gemv_q8.hpp"
+#include "lamina/kernels/native_mmvq.hpp"
+#include "lamina/kernels/native_ple_postops.hpp"
 
 #include <cuda_runtime.h>
 
@@ -31,7 +31,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int THREADS = 256;
@@ -83,4 +83,4 @@ void ple_history_advance(float* hist, const float* normalized, void* stream) {
 
 
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

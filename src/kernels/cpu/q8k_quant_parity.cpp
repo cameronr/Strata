@@ -3,12 +3,12 @@
 // rows of random, scaled, sparse and degenerate values; then the same through native_quant_act / native_quant_h with
 // an IQ3_S expert's format, which is what the engine calls.  No GPU, no model.
 //
-//     q8k_quant_parity            (STRATA_FORCE_ISA=avx: the AVX-2 copy is skipped, native_quant_* must equal ggml's)
+//     q8k_quant_parity            (LAMINA_FORCE_ISA=avx: the AVX-2 copy is skipped, native_quant_* must equal ggml's)
 //     q8k_quant_parity --bench    ns per 2560-value row, ggml-cpu's and the AVX-2 copy
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/iq_avx2.hpp"
-#include "strata/kernels/cpu/iq_avx1.hpp"
-#include "strata/kernels/cpu/native_expert.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/iq_avx2.hpp"
+#include "lamina/kernels/cpu/iq_avx1.hpp"
+#include "lamina/kernels/cpu/native_expert.hpp"
 
 #include "ggml.h"
 #include "ggml-cpu.h"
@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-namespace cpu = strata::kernels::cpu;
+namespace cpu = lamina::kernels::cpu;
 
 // ggml-quants.h (ggml-base): the scalar reference, which ggml-cpu's x86 quantize_row_q8_K calls.  Q8_K has no
 // from_float_ref in ggml's type traits, so it is declared here (block_q8_K* in ggml; the bytes are all this reads).
@@ -119,8 +119,8 @@ int main(int argc, char** argv) {
     for (const auto& x : cases(512))
         failures += !same("native_quant_h", 512, 0, ref, via_h, x, ggml_row_size(GGML_TYPE_Q8_K, 512));
     std::printf("q8k_quant_parity: %d rows x 4 sizes, AVX-2 copy %s, AVX1 copy %s: %s\n", checked / 4,
-                avx2 ? "checked" : "skipped (no AVX2, or STRATA_FORCE_ISA)",
-                avx1 ? "checked" : "skipped (AVX2 present, no AVX, or STRATA_FORCE_ISA)", failures ? "FAILED" : "identical");
+                avx2 ? "checked" : "skipped (no AVX2, or LAMINA_FORCE_ISA)",
+                avx1 ? "checked" : "skipped (AVX2 present, no AVX, or LAMINA_FORCE_ISA)", failures ? "FAILED" : "identical");
     if (bench && (avx2 || avx1)) {
         std::mt19937 rng(3);
         std::normal_distribution<float> nd(0.f, 1.f);

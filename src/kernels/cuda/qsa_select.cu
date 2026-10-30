@@ -1,6 +1,6 @@
-// src/kernels/cuda/qsa_select.cu - see include/strata/kernels/qsa_select.hpp.
-#include "strata/kernels/qsa_select.hpp"
-#include "strata/kernels/warp.cuh"
+// src/kernels/cuda/qsa_select.cu - see include/lamina/kernels/qsa_select.hpp.
+#include "lamina/kernels/qsa_select.hpp"
+#include "lamina/kernels/warp.cuh"
 
 #include <cuda_runtime.h>
 
@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <unordered_map>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int IDX_DIM = 128, IDX_HEADS = 4, R = 4;
@@ -974,4 +974,4 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

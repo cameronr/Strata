@@ -1,13 +1,13 @@
 // src/core/session.cpp - the sequence state: its layout, its zeroing and the prompt cache's checkpoints of it.
-#include "strata/core/session.hpp"
+#include "lamina/core/session.hpp"
 
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/elementwise.hpp"
-#include "strata/kernels/fused_gr.hpp"
-#include "strata/kernels/quantize_act.hpp"
-#include "strata/kernels/s2_expert_grouped.hpp"
-#include "strata/kernels/cpu/pool.hpp"
-#include "strata/kernels/ngram.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/elementwise.hpp"
+#include "lamina/kernels/fused_gr.hpp"
+#include "lamina/kernels/quantize_act.hpp"
+#include "lamina/kernels/s2_expert_grouped.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
+#include "lamina/kernels/ngram.hpp"
 
 #include <cuda_runtime.h>
 
@@ -18,7 +18,7 @@
 #include <cstring>
 #include <vector>
 
-namespace strata::core {
+namespace lamina::core {
 namespace {
 
 constexpr uint64_t SESSION_STATE_ALIGN = 256;
@@ -38,7 +38,7 @@ uint64_t gdn_state_floats(const ModelGeometry& g) {
 /// `NG_HIST` rows of `hc_dim` floats: the PLE conv's history, which is the ONLY PLE state that lives in the
 /// session arena.  The table and the weights are model-level and the caller owns them.
 static uint64_t ple_hist_bytes() {
-    return (uint64_t) strata::kernels::NG_HIST * strata::kernels::NG_HC_DIM * sizeof(float);
+    return (uint64_t) lamina::kernels::NG_HIST * lamina::kernels::NG_HC_DIM * sizeof(float);
 }
 
 uint64_t session_bytes(const ModelGeometry& g, int64_t max_cells) {
@@ -132,7 +132,7 @@ struct CkptPart { void* dev; uint64_t bytes; uint64_t host; int64_t layer; };
 /// GDN layer's state, the PLE history, each QSA layer's indexer tail, spare key, open block's pooled row and block
 /// position; the PLE token window follows them on the host.
 std::vector<CkptPart> ckpt_parts(const SessionState& s, const ModelGeometry& g, int64_t pos, int64_t first = 0) {
-    strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     sh.idx_dim = g.idx_key_dim;
     const uint64_t row = (uint64_t) sh.idx_dim * sizeof(float);
     const uint64_t gdn = (uint64_t) gdn_state_floats(g) * sizeof(float);
@@ -167,7 +167,7 @@ constexpr uint64_t kCkptHostInts = 3;   // ple_prev[0], ple_prev[1], ple_token
 /// Where the token window starts in the host buffer.
 uint64_t ckpt_ints_at(const ModelGeometry& g) {
     const uint64_t row = (uint64_t) g.idx_key_dim * sizeof(float);
-    const strata::kernels::QsaShapes sh = strata::kernels::qsa_real_shapes();
+    const lamina::kernels::QsaShapes sh = lamina::kernels::qsa_real_shapes();
     return (uint64_t) g.n_gdn_layers() * gdn_state_floats(g) * sizeof(float) + ple_hist_bytes() +
            (uint64_t) g.n_qsa_layers() * ((uint64_t) (sh.idx_block + 1) * row + sizeof(int32_t));
 }
@@ -217,4 +217,4 @@ bool session_copy_failed(void* stream) {
     return false;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

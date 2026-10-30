@@ -19,7 +19,7 @@ constexpr int64_t kLoopCheckEvery = 512;
 constexpr double kLoopCoverage = 0.25;
 const char* kReasoningClose = "\n</think>\n\n";
 const char* kReasoningWrapUp = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n";
-const char* kPrefixEnd = "\x01strata-prefix-end\x01";   // where a message's shared part ends in the rendered prompt
+const char* kPrefixEnd = "\x01lamina-prefix-end\x01";   // where a message's shared part ends in the rendered prompt
 
 bool is_url(const std::string& s) { return starts_with(s, "http://") || starts_with(s, "https://"); }
 
@@ -183,14 +183,14 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
         for (const auto& p : parts) embeddings.keys.push_back(std::filesystem::path(p).stem().string().substr(0, 16));
         write_temporary(embeddings.path, parts);
     }
-    if (req != nullptr && !jget(*req, "strata_prefix").is_null())
-        (*req)["strata_prefix"] = resolve_prefix((*req)["strata_prefix"], messages, tools, kwargs, ids, !encoded.empty());
+    if (req != nullptr && !jget(*req, "lamina_prefix").is_null())
+        (*req)["lamina_prefix"] = resolve_prefix((*req)["lamina_prefix"], messages, tools, kwargs, ids, !encoded.empty());
     return {ids, !thinking_off, max_new};
 }
 
 json Service::resolve_prefix(const json& spec, const json& messages, const json& tools, const json& kwargs,
                              const std::vector<int32_t>& ids, bool has_images) {
-    // "strata_prefix" marks the start of the prompt as a shared read-only prefix (a long document many short
+    // "lamina_prefix" marks the start of the prompt as a shared read-only prefix (a long document many short
     // questions follow): {"messages": K}, {"message": I, "chars": N} or {"tokens": N} -> {"tokens": N}, or {} when the
     // prefix cannot be marked (said in the log); a malformed field is a 400
     const std::set<std::string> keys = {"messages", "message", "chars", "tokens"};
@@ -203,15 +203,15 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         }
     if (!ok || !(given == std::set<std::string>{"messages"} || given == std::set<std::string>{"tokens"} ||
                  given == std::set<std::string>{"message", "chars"}))
-        throw RequestError("strata_prefix: {\"messages\": K} (the first K messages), {\"message\": I, \"chars\": N} (the "
+        throw RequestError("lamina_prefix: {\"messages\": K} (the first K messages), {\"message\": I, \"chars\": N} (the "
                            "first N characters of message I) or {\"tokens\": N}");
     for (auto it = spec.begin(); it != spec.end(); ++it) {
         const int64_t lo = it.key() == "message" ? 0 : 1;
         if (!is_int(it.value()) || it.value().get<int64_t>() < lo)
-            throw RequestError("strata_prefix." + it.key() + ": a whole number (" + std::to_string(lo) + " or more)");
+            throw RequestError("lamina_prefix." + it.key() + ": a whole number (" + std::to_string(lo) + " or more)");
     }
     if (has_images) {
-        say("[lamina] strata_prefix ignored: the request has images");
+        say("[lamina] lamina_prefix ignored: the request has images");
         return json::object();
     }
     std::string what;
@@ -247,7 +247,7 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
     } else if (spec.contains("messages")) {
         const int64_t k = spec["messages"].get<int64_t>();
         if (k >= (int64_t) messages.size()) {
-            say("[lamina] strata_prefix.messages=" + std::to_string(k) + " ignored: the request has " +
+            say("[lamina] lamina_prefix.messages=" + std::to_string(k) + " ignored: the request has " +
                 std::to_string(messages.size()) + " message(s) and the prefix must leave at least the last one");
             return json::object();
         }
@@ -256,7 +256,7 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         const int64_t i = spec["message"].get<int64_t>(), chars = spec["chars"].get<int64_t>();
         const json text = i >= 0 && i < (int64_t) messages.size() ? jget(messages[(size_t) i], "content") : json(nullptr);
         if (!text.is_string() || chars > (int64_t) utf8_len(text.get_ref<const std::string&>())) {
-            say("[lamina] strata_prefix ignored: message " + std::to_string(i) + " has no text of " + std::to_string(chars) +
+            say("[lamina] lamina_prefix ignored: message " + std::to_string(i) + " has no text of " + std::to_string(chars) +
                 " characters");
             return json::object();
         }
@@ -274,7 +274,7 @@ json Service::resolve_prefix(const json& spec, const json& messages, const json&
         n = lcp(head_ids(cut), ids);
     }
     if (n < 1 || n >= (int64_t) ids.size() - 1) {
-        say("[lamina] strata_prefix " + what + " ignored: it leaves no usable prefix of the " + std::to_string(ids.size()) +
+        say("[lamina] lamina_prefix " + what + " ignored: it leaves no usable prefix of the " + std::to_string(ids.size()) +
             "-token prompt (common start " + std::to_string(n) + ")");
         return json::object();
     }
@@ -445,7 +445,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     embeddings = Embeddings{};
     if (!emb.empty() && !img_keys.empty()) {
         if (!sampling.is_object()) sampling = json::object();
-        sampling["strata_img_keys"] = img_keys;   // #2228: sent beside the embeddings file
+        sampling["lamina_img_keys"] = img_keys;   // #2228: sent beside the embeddings file
     }
     std::vector<json> segments;   // each pass's own DONE (a reasoning-budget continuation is another pass)
     json* tr = trace;
@@ -596,7 +596,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
             if (finish == "length" && (parser.state() == "reasoning" || parser.state() == "rcall"))
                 say("[lamina] the reply reached max tokens while still thinking, so it has no answer: a thinking budget "
                     "(reasoning_budget_tokens, in the request or in lamina-<model>.json for every request) leaves room to answer");
-            if (std::getenv("STRATA_DEBUG") != nullptr && !raw_ids.empty()) say("[lamina] raw: " + py_repr_value(json(tok.decode(raw_ids))));
+            if (std::getenv("LAMINA_DEBUG") != nullptr && !raw_ids.empty()) say("[lamina] raw: " + py_repr_value(json(tok.decode(raw_ids))));
         }
         st["busy"] = false;
         st.erase("tail");   // #212: the answer's end is not kept once it is done

@@ -11,7 +11,7 @@
 <script>
   // the theme before the first paint: the saved choice, else the system's
   try {
-    const t = localStorage.getItem("strata.theme") ||
+    const t = localStorage.getItem("lamina.theme") ||
       (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     document.documentElement.dataset.theme = t;
   } catch (e) {}

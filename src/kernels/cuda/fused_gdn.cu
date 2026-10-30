@@ -1,18 +1,18 @@
-// src/kernels/cuda/fused_gdn.cu - see include/strata/kernels/fused_gdn.hpp.
-#include "strata/kernels/fused_gdn.hpp"
-#include "strata/kernels/warp.cuh"
-#include "strata/core/geometry.hpp"
+// src/kernels/cuda/fused_gdn.cu - see include/lamina/kernels/fused_gdn.hpp.
+#include "lamina/kernels/fused_gdn.hpp"
+#include "lamina/kernels/warp.cuh"
+#include "lamina/core/geometry.hpp"
 
 #include <cuda_runtime.h>
 
 #include <cstdio>
 #include <cstdlib>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 
 constexpr int S = 128;          // state size (rows = cols = 128)
-static_assert(S == strata::core::kCompiledGeometry.ssm_state_size, "fused_gdn is compiled for core/geometry.hpp");
+static_assert(S == lamina::core::kCompiledGeometry.ssm_state_size, "fused_gdn is compiled for core/geometry.hpp");
 constexpr int RG = 4;           // row groups
 constexpr int RPG = S / RG;     // 32 rows per thread
 
@@ -177,4 +177,4 @@ void fused_gdn_step_norm_silu(float* state, const float* q, const float* k, cons
     step_norm<true>(state, q, k, v, gate, beta, z, gamma, eps, y, h_k, h_v, stream);
 }
 
-}  // namespace strata::kernels
+}  // namespace lamina::kernels

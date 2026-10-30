@@ -8,10 +8,10 @@
 // take each other's experts, so a layer whose whole block is slow keeps its CPU experts elsewhere.  The GPU tiers
 // still move experts as a conversation goes (on fixed text 8-17% of the CPU's expert reads were from slow places
 // afterwards, 18-30% without the moves): between requests the swaps follow them (replan, replace_some).
-#include "strata/core/expert_source.hpp"
+#include "lamina/core/expert_source.hpp"
 
-#include "strata/kernels/cpu/expert_layout.hpp"
-#include "strata/kernels/cpu/pool.hpp"
+#include "lamina/kernels/cpu/expert_layout.hpp"
+#include "lamina/kernels/cpu/pool.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -24,7 +24,7 @@
 #include <thread>
 #include <vector>
 
-namespace strata::core {
+namespace lamina::core {
 
 namespace {
 
@@ -37,15 +37,15 @@ std::atomic<uint64_t> g_sink{0};   // the reads' results, so that they happen
 class Crew {
 public:
     Crew() {
-        for (const auto& core : strata::kernels::cpu::physical_cores())
+        for (const auto& core : lamina::kernels::cpu::physical_cores())
             if (!core.empty()) cpus_.push_back(core.front());
         if (cpus_.empty()) cpus_.push_back(-1);
         std::rotate(cpus_.begin(), cpus_.end() - 1, cpus_.end());
         n_ = (int) cpus_.size();
-        prev_ = strata::kernels::cpu::pin_current_thread(cpus_[0]);
+        prev_ = lamina::kernels::cpu::pin_current_thread(cpus_[0]);
         for (int t = 1; t < n_; ++t)
             th_.emplace_back([this, t] {
-                (void) strata::kernels::cpu::pin_current_thread(cpus_[(size_t) t]);
+                (void) lamina::kernels::cpu::pin_current_thread(cpus_[(size_t) t]);
                 uint64_t seen = 0;
                 for (;;) {
                     const uint64_t g = go_.load(std::memory_order_acquire);
@@ -61,7 +61,7 @@ public:
         quit_.store(true);
         go_.fetch_add(1, std::memory_order_acq_rel);
         for (auto& t : th_) t.join();
-        strata::kernels::cpu::restore_thread_affinity(prev_);
+        lamina::kernels::cpu::restore_thread_affinity(prev_);
     }
     int size() const { return n_; }
     void run(const std::function<void(int)>& task) {
@@ -106,7 +106,7 @@ int64_t ArenaExpertSource::place_block(size_t q) const {
 uint8_t* ArenaExpertSource::place_addr(size_t q) const {
     const int64_t b = place_block(q);
     return layer_base_[(size_t) b] +
-           (uint64_t) ((int64_t) q - place_off_[(size_t) b]) * strata::kernels::cpu::expert_layout().blob_bytes(b);
+           (uint64_t) ((int64_t) q - place_off_[(size_t) b]) * lamina::kernels::cpu::expert_layout().blob_bytes(b);
 }
 
 void ArenaExpertSource::note_swap(size_t q1, size_t q2) {
@@ -124,7 +124,7 @@ std::vector<std::pair<size_t, size_t>> ArenaExpertSource::plan_swaps(const std::
                                                                      const std::vector<uint8_t>& on_gpu) const {
     // in each class of blocks with equal blobs, the fast places for the experts that deserve them: the CPU's hottest,
     // its coldest, then the GPUs' coldest; the swaps move the others' out of the slow places
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     const int64_t L = (int64_t) layer_base_.size(), E = n_expert_;
     std::map<uint64_t, std::vector<int64_t>> classes;
     for (int64_t b = 0; b < L; ++b)
@@ -157,14 +157,14 @@ std::vector<std::pair<size_t, size_t>> ArenaExpertSource::plan_swaps(const std::
 }
 
 bool ArenaExpertSource::place(const std::vector<int32_t>& rank, const std::vector<uint8_t>& on_gpu, std::string& line) {
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     const int64_t L = (int64_t) layer_base_.size(), E = n_expert_;
     if (L == 0 || rank.size() != (size_t) (L * E) || on_gpu.size() != (size_t) (L * E)) {
         line = "--arena-place: no arena, or a ranking for a different geometry";
         return true;
     }
-    // STRATA_ARENA_PLACE_DRY=1 (the A/B arm): times and reports, moves nothing, now or between requests
-    const char* dry_env = std::getenv("STRATA_ARENA_PLACE_DRY");
+    // LAMINA_ARENA_PLACE_DRY=1 (the A/B arm): times and reports, moves nothing, now or between requests
+    const char* dry_env = std::getenv("LAMINA_ARENA_PLACE_DRY");
     place_dry_ = dry_env != nullptr && std::atoi(dry_env) != 0;
     if (idx_.empty()) {   // each blob at its expert index
         idx_.resize((size_t) (L * E));
@@ -268,11 +268,11 @@ bool ArenaExpertSource::place(const std::vector<int32_t>& rank, const std::vecto
     std::snprintf(buf + len, sizeof buf - (size_t) len,
                   "; of the %lld experts on no GPU, %lld were in them, %lld are; %zu pairs %s (%.2f GiB in %.1f s)",
                   (long long) cpu_n, (long long) cpu_slow, (long long) cpu_in_slow(), swaps.size(),
-                  place_dry_ ? "to swap (STRATA_ARENA_PLACE_DRY: none moved)" : "swapped",
+                  place_dry_ ? "to swap (LAMINA_ARENA_PLACE_DRY: none moved)" : "swapped",
                   (double) moved / 1073741824.0, std::chrono::duration<double>(Clock::now() - t1).count());
     line = buf;
-    // STRATA_LOAD_VERIFY=1: every moved blob read again from the model and compared (a test)
-    if (const char* v = std::getenv("STRATA_LOAD_VERIFY"); v != nullptr && std::atoi(v) != 0 && !place_dry_) {
+    // LAMINA_LOAD_VERIFY=1: every moved blob read again from the model and compared (a test)
+    if (const char* v = std::getenv("LAMINA_LOAD_VERIFY"); v != nullptr && std::atoi(v) != 0 && !place_dry_) {
         std::vector<uint8_t> want(lay.max_blob);
         std::string err;
         int64_t checked = 0;
@@ -280,17 +280,17 @@ bool ArenaExpertSource::place(const std::vector<int32_t>& rank, const std::vecto
             for (const int32_t i : {place_occ_[q1], place_occ_[q2]}) {
                 const int64_t l = i / E, e = i % E;
                 if (!read_file_blob(l, e, want.data(), err)) {
-                    line += "; STRATA_LOAD_VERIFY: " + err;
+                    line += "; LAMINA_LOAD_VERIFY: " + err;
                     return true;
                 }
                 if (std::memcmp(want.data(), blob(l, e), (size_t) lay.blob_bytes(l)) != 0) {
-                    line += "; STRATA_LOAD_VERIFY: layer " + std::to_string(l) + " expert " + std::to_string(e) +
+                    line += "; LAMINA_LOAD_VERIFY: layer " + std::to_string(l) + " expert " + std::to_string(e) +
                             " differs from the model after the move";
                     return false;
                 }
                 ++checked;
             }
-        line += "; STRATA_LOAD_VERIFY: " + std::to_string(checked) + " moved blobs equal to the model's";
+        line += "; LAMINA_LOAD_VERIFY: " + std::to_string(checked) + " moved blobs equal to the model's";
     }
     return true;
 }
@@ -304,11 +304,11 @@ size_t ArenaExpertSource::replan(const std::vector<int32_t>& rank, const std::ve
 }
 
 size_t ArenaExpertSource::replace_some(size_t max) {
-    const auto& lay = strata::kernels::cpu::expert_layout();
+    const auto& lay = lamina::kernels::cpu::expert_layout();
     if (swap_buf_.size() < lay.max_blob) swap_buf_.resize(lay.max_blob);
-    // STRATA_LOAD_VERIFY=1: both moved blobs read again from the model and compared (a test)
+    // LAMINA_LOAD_VERIFY=1: both moved blobs read again from the model and compared (a test)
     static const bool verify = [] {
-        const char* v = std::getenv("STRATA_LOAD_VERIFY");
+        const char* v = std::getenv("LAMINA_LOAD_VERIFY");
         return v != nullptr && std::atoi(v) != 0;
     }();
     for (size_t k = 0; k < max && pending_at_ < pending_.size(); ++k) {
@@ -325,7 +325,7 @@ size_t ArenaExpertSource::replace_some(size_t max) {
             const int64_t l = i / n_expert_, e = i % n_expert_;
             std::string err;
             if (!read_file_blob(l, e, swap_buf_.data(), err) || std::memcmp(swap_buf_.data(), blob(l, e), bb) != 0) {
-                std::fprintf(stderr, "ArenaExpertSource: STRATA_LOAD_VERIFY: layer %lld expert %lld differs from the "
+                std::fprintf(stderr, "ArenaExpertSource: LAMINA_LOAD_VERIFY: layer %lld expert %lld differs from the "
                                      "model after a swap between requests %s\n", (long long) l, (long long) e, err.c_str());
                 std::abort();
             }
@@ -334,4 +334,4 @@ size_t ArenaExpertSource::replace_some(size_t max) {
     return pending_.size() - pending_at_;
 }
 
-}  // namespace strata::core
+}  // namespace lamina::core

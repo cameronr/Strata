@@ -22,8 +22,8 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
-#include "strata/kernels/native_rope.hpp"
-#include "strata/kernels/mrope.hpp"
+#include "lamina/kernels/native_rope.hpp"
+#include "lamina/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <atomic>
 #include <cmath>
@@ -32,7 +32,7 @@
 #include <limits>
 #include <stdexcept>
 
-namespace strata::kernels {
+namespace lamina::kernels {
 namespace {
 bool overlaps(const void* a, size_t an, const void* b, size_t bn) {
     auto x = reinterpret_cast<uintptr_t>(a), y = reinterpret_cast<uintptr_t>(b);
@@ -85,10 +85,10 @@ bool same_scaling(const RopeScaling& a, const RopeScaling& b) {
            a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor && a.attn_factor == b.attn_factor &&
            a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
 }
-// opt-in: STRATA_ROPE_TABLE=1 (the table's angles differ from the analytic ones in the last bits, so outputs move)
+// opt-in: LAMINA_ROPE_TABLE=1 (the table's angles differ from the analytic ones in the last bits, so outputs move)
 bool rope_table_enabled() {
     static const bool on = [] {
-        const char* e = std::getenv("STRATA_ROPE_TABLE");
+        const char* e = std::getenv("LAMINA_ROPE_TABLE");
         return e != nullptr && e[0] == '1';
     }();
     return on;

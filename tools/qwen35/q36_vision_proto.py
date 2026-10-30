@@ -1,5 +1,5 @@
 """vision_proto.py - pictures over the engine protocol (GENI / BGENI), no server: the ids come from llama.cpp's own tokenizer
-output (vc1/*.llama.log of vcmp.py), the rows from strata-vision (<picture>.sve).
+output (vc1/*.llama.log of vcmp.py), the rows from lamina-vision (<picture>.sve).
 
   python q36_vision_proto.py --exe E --args "--model M --max-context 8192 --vision --batch 4" --vc DIR --pics DIR
 

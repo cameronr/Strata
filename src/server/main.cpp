@@ -101,7 +101,7 @@ const char* kHelp =
     "                         devices on your network (set an API key); also \"host\" in the config\n"
     "  --port PORT            the port (default 8095; 0: one the system picks); also \"port\" in the config\n"
     "  --api-key KEY          require this key on the API (Authorization: Bearer ... or x-api-key); also\n"
-    "                         $STRATA_API_KEY and \"api_key\"; several keys separated by commas\n"
+    "                         $LAMINA_API_KEY and \"api_key\"; several keys separated by commas\n"
     "  --lazy                 start unloaded (the engine and the image encoder start with the first request)\n"
     "  --idle-unload SECONDS  unload the model after this long without requests (\"idle_unload_s\")\n"
     "  --min-free-vram-mib N  load an unloaded model only when this much VRAM is free, else 503 (\"min_free_vram_mib\")\n"
@@ -137,7 +137,7 @@ struct Args {
 
 Args parse_args(int argc, char** argv) {
     Args a;
-    if (const char* k = std::getenv("STRATA_API_KEY")) {
+    if (const char* k = std::getenv("LAMINA_API_KEY")) {
         a.api_key = k;
         a.api_key_given = true;
         a.api_key_empty = strip(a.api_key).empty();
@@ -277,7 +277,7 @@ std::shared_ptr<Engine> start_replicas(const json& cfg, const std::vector<std::v
             errors[i] = e.what();
         }
     };
-    const char* serial = std::getenv("STRATA_REPLICA_START");
+    const char* serial = std::getenv("LAMINA_REPLICA_START");
     if (serial != nullptr && std::string(serial) == "serial") {
         for (size_t i = 0; i < n; ++i) one(i);
     } else {
@@ -534,7 +534,7 @@ int run(int argc, char** argv) {
                     "it); set one, or leave api_key out");
         svc.cors_origins = origins_of(jget(cfg, "cors_origins"), "cors_origins", true);
         svc.trusted_origins = origins_of(jget(cfg, "trusted_origins"), "trusted_origins", false);
-        const char* env_hosts = std::getenv("STRATA_ALLOWED_HOSTS");
+        const char* env_hosts = std::getenv("LAMINA_ALLOWED_HOSTS");
         svc.allowed_hosts = allowed_hosts_of(jget(cfg, "allowed_hosts"), env_hosts != nullptr ? env_hosts : "");
         if (!svc.allowed_hosts.empty())
             say(std::find(svc.allowed_hosts.begin(), svc.allowed_hosts.end(), "*") != svc.allowed_hosts.end()

@@ -1,11 +1,11 @@
-#include "strata/program/serve_io.hpp"
+#include "lamina/program/serve_io.hpp"
 
 #include <cstdio>
 #include <iostream>
 #include <mutex>
 #include <vector>
 
-namespace strata::program {
+namespace lamina::program {
 namespace {
 
 ServeIo stdio_io() {
@@ -77,7 +77,7 @@ std::string read_vision_records(const std::string& path, int64_t n_embd, std::ve
         if (got == 0) break;
         if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[2] < 1 || hdr[3] < 1 ||
             (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != (int32_t) n_embd) {
-            ve = "bad embeddings file (expected strata-vision records of width " + std::to_string((long long) n_embd) +
+            ve = "bad embeddings file (expected lamina-vision records of width " + std::to_string((long long) n_embd) +
                  ")";
             break;
         }
@@ -105,4 +105,4 @@ uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const floa
                           : fnv1a(rows + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
 }
 
-}  // namespace strata::program
+}  // namespace lamina::program

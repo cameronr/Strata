@@ -1,20 +1,20 @@
-// src/prefill/prefill.cpp - see include/strata/prefill/prefill.hpp.
-#include "strata/prefill/prefill.hpp"
+// src/prefill/prefill.cpp - see include/lamina/prefill/prefill.hpp.
+#include "lamina/prefill/prefill.hpp"
 
-#include "strata/core/cuda_host.hpp"
-#include "strata/core/layout.hpp"
-#include "strata/kernels/dequant_bf16.hpp"
-#include "strata/kernels/kv_q4.hpp"
-#include "strata/kernels/native_qsa_indexer.hpp"
-#include "strata/kernels/native_ple_postops.hpp"
-#include "strata/kernels/ngram.hpp"
-#include "strata/kernels/qsa.hpp"
-#include "strata/kernels/qsa_decode_attn.hpp"
-#include "strata/kernels/qsa_select.hpp"
-#include "strata/kernels/verify_kernels.hpp"
-#include "strata/prefill/gemm.hpp"
-#include "strata/prefill/kernels.hpp"
-#include "strata/prefill/moe_mmq.hpp"
+#include "lamina/core/cuda_host.hpp"
+#include "lamina/core/layout.hpp"
+#include "lamina/kernels/dequant_bf16.hpp"
+#include "lamina/kernels/kv_q4.hpp"
+#include "lamina/kernels/native_qsa_indexer.hpp"
+#include "lamina/kernels/native_ple_postops.hpp"
+#include "lamina/kernels/ngram.hpp"
+#include "lamina/kernels/qsa.hpp"
+#include "lamina/kernels/qsa_decode_attn.hpp"
+#include "lamina/kernels/qsa_select.hpp"
+#include "lamina/kernels/verify_kernels.hpp"
+#include "lamina/prefill/gemm.hpp"
+#include "lamina/prefill/kernels.hpp"
+#include "lamina/prefill/moe_mmq.hpp"
 
 #include <cuda_runtime.h>
 
@@ -25,7 +25,7 @@
 #include <thread>
 #include <vector>
 
-namespace strata::prefill {
+namespace lamina::prefill {
 namespace {
 
 using Clock = std::chrono::steady_clock;
@@ -106,7 +106,7 @@ Bufs layout(Alloc& a, int64_t T, int64_t cap, int64_t max_blocks, bool offload) 
     b.ids = a.take<int32_t>(t * K);
     b.tok = a.take<int32_t>(t);
     b.w = a.take<float>(t * K);
-    b.steps = a.take<int32_t>(t * strata::kernels::kStepCount);
+    b.steps = a.take<int32_t>(t * lamina::kernels::kStepCount);
     b.ple_emb = a.take<float>(t * N);
     b.sums = offload ? a.take<uint16_t>(t * N) : nullptr;   // read by the next layer's sub-chunks
     b.mixed_bf = a.take<uint16_t>(p * N);
@@ -146,8 +146,8 @@ Bufs layout(Alloc& a, int64_t T, int64_t cap, int64_t max_blocks, bool offload) 
 
 // K and V of T cells from pos0 ([T, 2, 256] each) into a state's pools, in its format (the decode append's arithmetic)
 void append_kv(const core::QsaState& st, const float* Kr, const float* Vr, int64_t T, int64_t pos0,
-               const strata::kernels::QsaShapes& s, cudaStream_t cs) {
-    using strata::kernels::kv_append_q4_rows;
+               const lamina::kernels::QsaShapes& s, cudaStream_t cs) {
+    using lamina::kernels::kv_append_q4_rows;
     switch (st.kv) {
     case core::KvFormat::Q4:
         kv_append_q4_rows(st.k_q4, st.k_q4s, st.v_q4, st.v_q4s, st.page_table, pos0, T, Kr, Vr, 512, s, cs);
@@ -175,7 +175,7 @@ struct Prefill::Impl {
     ExpertRunner* offload = nullptr;
     ExpertRunner local;
     int64_t max_chunk = 0, T = 0;   // T: the chunk the buffers are bound for
-    strata::kernels::QsaShapes s;
+    lamina::kernels::QsaShapes s;
     int64_t cap = 0, max_blocks = 0;
     cudaStream_t cs = nullptr;
     // the second GPU's share, a sub-chunk at a time: the input goes out on `xfer`, the sums come back on `xsum`
@@ -244,8 +244,8 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert != NE || ss.k != K) {
         err = "prefill: geometry differs from the artifact's"; return false;
     }
-    m.s = strata::kernels::qsa_shapes(g);
-    m.cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, m.s);
+    m.s = lamina::kernels::qsa_shapes(g);
+    m.cap = lamina::kernels::qsa_selection_width(lamina::kernels::kTopkMaxCells, m.s);
     m.max_blocks = ss.qsa_states[0].max_cells / m.s.idx_block + 2;
     m.ev_in.assign((size_t) ((max_chunk + SUB - 1) / SUB), nullptr);
     m.ev_piece.assign(m.ev_in.size(), nullptr);
@@ -266,13 +266,13 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
         return false;
     }
     const size_t T = (size_t) max_chunk;
-    m.steps_host.resize(T * strata::kernels::kStepCount);
+    m.steps_host.resize(T * lamina::kernels::kStepCount);
     m.routed.assign((size_t) (g.n_layers * NE), 0);
     m.cnt.resize(NE);
     m.off.resize(NE + 1);
     m.entry_of.resize(T * K);
     for (int i = 0; i < 2 && m.first <= 1; ++i) {   // (a second stage never runs the PLE block: set_layers first)
-        m.ple_rows[i].resize(T * strata::kernels::PLE_N_HEADS);
+        m.ple_rows[i].resize(T * lamina::kernels::PLE_N_HEADS);
         if (cudaHostAlloc((void**) &m.ple_host[i], T * N * 4, cudaHostAllocDefault) != cudaSuccess) {
             err = "prefill: pinned PLE row buffers";
             return false;
@@ -311,9 +311,9 @@ float* Prefill::residual() const { return impl_->b.R; }
 void Prefill::set_in_events(const cudaEvent_t* ev, int64_t n) { impl_->in_ev.assign(ev, ev + n); }
 
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk, bool offload) {
-    const strata::kernels::QsaShapes s = strata::kernels::qsa_shapes(g);
+    const lamina::kernels::QsaShapes s = lamina::kernels::qsa_shapes(g);
     Alloc a;
-    layout(a, chunk, strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s),
+    layout(a, chunk, lamina::kernels::qsa_selection_width(lamina::kernels::kTopkMaxCells, s),
            ss.qsa_states[0].max_cells / s.idx_block + 2, offload);
     return a.used;
 }
@@ -386,8 +386,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     const Bufs& b = m.b;
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
-    const strata::kernels::QsaShapes& s = m.s;
-    constexpr int64_t SC = strata::kernels::kStepCount;
+    const lamina::kernels::QsaShapes& s = m.s;
+    constexpr int64_t SC = lamina::kernels::kStepCount;
     if (m.T <= 0) { err = "prefill: no buffers bound"; return false; }
     const auto t_start = Clock::now();
     const uint64_t gdn_floats = (uint64_t) g.ssm_state_size * g.ssm_v_heads * g.ssm_state_size +
@@ -399,7 +399,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             if (k == blocks) return p;
         if (m.w16_used + rows * cols > W16) return nullptr;
         uint16_t* p = b.w16 + m.w16_used;
-        strata::kernels::dequant_f16(type, blocks, 0, rows, cols, p, m.cs);
+        lamina::kernels::dequant_f16(type, blocks, 0, rows, cols, p, m.cs);
         m.w16_used += (rows * cols + 127) / 128 * 128;
         m.w16_have.emplace_back(blocks, p);
         return p;
@@ -505,7 +505,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             rms_rows(R, dk.norm_hidden, P, D, D, EPS, m.cs);
             to_f16(R, b.xn16, P * D, m.cs);
             m.gemm.f16(b.xn16, Wh, b.gated, P * HC, N, N);
-            strata::kernels::add_streams_broadcast(b.gated, b.bo, b.gated, N, (int) HC, (int) P, m.cs);
+            lamina::kernels::add_streams_broadcast(b.gated, b.bo, b.gated, N, (int) HC, (int) P, m.cs);
             gr_norm(b.gated, dk.hc_norm, EPS, b.xn, b.xn16, P, m.cs);
             m.gemm.bf16(b.xn16, dk.hc_down, b.lo, P, LR, D);
             gr_silu(b.lo, b.lo16, P, m.cs);
@@ -514,7 +514,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             m.gemm.f16(b.mixed_h, Wk, b.Kc, P, 512, N);
             m.gemm.f16(b.mixed_h, Wv, b.Vc, P, 512, N);
             rms_rows(b.Kc, dk.k_norm, P * 2, 256, 256, EPS, m.cs);
-            rope(b.Kc, P, 2, 256, 512, pp, strata::kernels::rope_scaling(), m.cs);
+            rope(b.Kc, P, 2, 256, 512, pp, lamina::kernels::rope_scaling(), m.cs);
             append_kv(st, b.Kc, b.Vc, P, pp, s, m.cs);
         }
         return true;
@@ -540,7 +540,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         uint32_t* rows = m.ple_rows[buf].data();
         for (int64_t t = 0; t < Tc; ++t) {
             const int32_t tok = (int32_t) tokens[c + t];
-            strata::kernels::ngram_rows(&tok, pa, 1, ss.ple.consts, rows + t * strata::kernels::PLE_N_HEADS);
+            lamina::kernels::ngram_rows(&tok, pa, 1, ss.ple.consts, rows + t * lamina::kernels::PLE_N_HEADS);
             pa[0] = pa[1];
             pa[1] = tok;
         }
@@ -556,7 +556,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
         return false;
     }
 
-    static const bool trace = std::getenv("STRATA_TRACE") != nullptr;
+    static const bool trace = std::getenv("LAMINA_TRACE") != nullptr;
     processed_ = 0;
     int64_t c0 = 0;
     for (; c0 < n; c0 += m.T) {
@@ -586,7 +586,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
             return true;
         };
         // ---- the QSA step records of every position in the chunk
-        for (int64_t t = 0; t < T; ++t) strata::kernels::qsa_step_fill(m.steps_host.data() + t * SC, p0 + t, s);
+        for (int64_t t = 0; t < T; ++t) lamina::kernels::qsa_step_fill(m.steps_host.data() + t * SC, p0 + t, s);
         cudaMemcpyAsync(b.steps, m.steps_host.data(), (size_t) T * SC * 4, cudaMemcpyHostToDevice, m.cs);
         if (L0 == 0) {   // the chunk's token ids for its embeddings (a picture's positions any valid id: overwritten)
             m.tok_host.resize((size_t) T);
@@ -652,7 +652,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 if (c0 + T < n) ple_start(c0 + T, 1 - ple_cur);
                 ple_cur = 1 - ple_cur;
                 stats_.ms_ple += core::ms_since(tp);
-                const strata::kernels::PleWeights& pw = ss.ple.w;
+                const lamina::kernels::PleWeights& pw = ss.ple.w;
                 for (int64_t t0 = 0; t0 < T; t0 += SUB) {
                     const int64_t P = std::min(SUB, T - t0);
                     if (pending) ffn_write(t0, P, nullptr);
@@ -670,7 +670,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     }
                     m.gemm.bf16(b.mixed_bf, pw.value_bf16, b.bo, P, N, N);
                     try {
-                        strata::kernels::native_ple_postops_tokens(
+                        lamina::kernels::native_ple_postops_tokens(
                             b.ple_kp, b.R + t0 * D, b.bo, ss.ple.hist, pw,
                             {b.ple_key, b.ple_q, b.inj_a, b.ple_gated, b.ple_q, b.R + t0 * D}, (int) P, m.cs);
                     } catch (const std::exception& e) { err = std::string("prefill PLE: ") + e.what(); return false; }
@@ -775,36 +775,36 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         if (!bf16_proj(m.gemm, wik, b.mixed_bf, b.idx_raw, P, v.name("indexer.k_proj.weight"), err)) return false;
                         if (!bf16_proj(m.gemm, wiq, b.mixed_bf, b.q_idx, P, v.name("indexer.q_proj.weight"), err)) return false;
                         rms_rows(b.Kc, (const float*) wkn->data, P * 2, 256, 256, EPS, m.cs);
-                        rope(b.Kc, P, 2, 256, 512, pp, strata::kernels::rope_scaling(), m.cs);
+                        rope(b.Kc, P, 2, 256, 512, pp, lamina::kernels::rope_scaling(), m.cs);
                         append_kv(st, b.Kc, b.Vc, P, pp, s, m.cs);
                         split_q(b.Qf, b.q, P, m.cs);
                         rms_rows(b.q, (const float*) wqn->data, P * 24, 256, 256, EPS, m.cs);
-                        rope(b.q, P, 24, 256, 6144, pp, strata::kernels::rope_scaling(), m.cs);
+                        rope(b.q, P, 24, 256, 6144, pp, lamina::kernels::rope_scaling(), m.cs);
                         rms_rows(b.q_idx, (const float*) wiqn->data, P * 4, 128, 128, EPS, m.cs);
-                        rope(b.q_idx, P, 4, 128, 512, pp, strata::kernels::rope_scaling(), m.cs);
+                        rope(b.q_idx, P, 4, 128, 512, pp, lamina::kernels::rope_scaling(), m.cs);
                         // the indexer appends of the sub-chunk; then scores + selection for many queries at once:
                         // a query reads completed blocks (final once completed) and `dead` for its own tail block
-                        const strata::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
+                        const lamina::kernels::QsaIndexerBuffers ib{st.idx_tail, st.idx_dead, st.idx_pooled, st.idx_block_pos};
                         mark(kPsQsaIndexer);
                         try {
-                            strata::kernels::native_qsa_indexer_append_multi(
-                                b.idx_raw, steps + strata::kernels::kStepPos, (int) SC, (int) P, 0,
-                                (const float*) wikn->data, EPS, ib, s, st.max_cells, strata::kernels::rope_scaling(), m.cs);
+                            lamina::kernels::native_qsa_indexer_append_multi(
+                                b.idx_raw, steps + lamina::kernels::kStepPos, (int) SC, (int) P, 0,
+                                (const float*) wikn->data, EPS, ib, s, st.max_cells, lamina::kernels::rope_scaling(), m.cs);
                         } catch (const std::exception& e) { err = std::string("prefill indexer: ") + e.what(); return false; }
                         mark(kPsQsaScores);
                         for (int64_t q0 = 0; q0 < P; q0 += SEL_BATCH) {
                             const int64_t nb = std::min(SEL_BATCH, P - q0);
                             // the batch's last query has completed the most blocks
                             const int64_t grid_blocks =
-                                m.steps_host[(size_t) (t0 + q0 + nb - 1) * SC + strata::kernels::kStepNBid] + 1;
-                            strata::kernels::qsa_block_scores(st.idx_pooled, st.idx_dead, b.q_idx + q0 * 512, steps + q0 * SC,
+                                m.steps_host[(size_t) (t0 + q0 + nb - 1) * SC + lamina::kernels::kStepNBid] + 1;
+                            lamina::kernels::qsa_block_scores(st.idx_pooled, st.idx_dead, b.q_idx + q0 * 512, steps + q0 * SC,
                                                               nb, m.max_blocks, s, b.sel_scores, m.cs, grid_blocks);
-                            strata::kernels::qsa_block_topk(b.sel_scores, steps + q0 * SC, nb, m.max_blocks, m.cap, s,
+                            lamina::kernels::qsa_block_topk(b.sel_scores, steps + q0 * SC, nb, m.max_blocks, m.cap, s,
                                                             b.sel_ids + q0 * m.cap, m.cs);
                         }
-                        const strata::kernels::QsaAttnPools pools = core::qsa_attn_pools(st);
+                        const lamina::kernels::QsaAttnPools pools = core::qsa_attn_pools(st);
                         mark(kPsQsaAttn);
-                        strata::kernels::qsa_prefill_attn(b.q, pools, b.sel_ids, steps, m.cap, s, b.attn, P, m.cs);
+                        lamina::kernels::qsa_prefill_attn(b.q, pools, b.sel_ids, steps, m.cap, s, b.attn, P, m.cs);
                         mark(kPsQsaOut);
                         gate_attn(b.attn, b.Qf, b.attn_h, P, m.cs);
                         if (!native_proj(wo, b.attn_h, b.bo, P, v.name("attn_output.weight"), err)) return false;
@@ -1023,4 +1023,4 @@ const char* prefill_section_name(int section) {
     return section >= 0 && section < kPsCount ? names[section] : "?";
 }
 
-}  // namespace strata::prefill
+}  // namespace lamina::prefill
