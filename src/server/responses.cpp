@@ -2,8 +2,6 @@
 // events -> Responses output items and typed events (serve/responses.py's port; the overview is in responses.hpp).
 #include "responses.hpp"
 
-#include "src/unicode.h"   // llama.cpp's: code point classes (repr's printable characters)
-
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
@@ -14,7 +12,6 @@ namespace lamina::responses {
 namespace {
 
 // ---------------------------------------------------------------------------------------------- Python's view
-bool is_str(const json& v, std::string_view s) { return v.is_string() && v.get_ref<const std::string&>() == s; }
 
 bool is_one_of(const json& v, std::initializer_list<std::string_view> set) {
     if (!v.is_string()) return false;
@@ -32,100 +29,13 @@ json get_or(const json& o, const std::string& key, const json& dflt) {
     return dflt;
 }
 
-/// type(v).__name__
-std::string type_name(const json& v) {
-    switch (v.type()) {
-        case json::value_t::null: return "NoneType";
-        case json::value_t::boolean: return "bool";
-        case json::value_t::number_integer:
-        case json::value_t::number_unsigned: return "int";
-        case json::value_t::number_float: return "float";
-        case json::value_t::string: return "str";
-        case json::value_t::array: return "list";
-        default: return "dict";
-    }
-}
-
-bool printable(uint32_t cp) {   // str.isprintable() of one character (llama.cpp's table: Unicode 15.1)
-    const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(cp);
-    return !(f.is_undefined || f.is_control || f.is_separator);
-}
-
-std::string repr(const json& v);
-
-std::string repr_str(std::string_view s) {
-    const bool single = s.find('\'') != std::string_view::npos;
-    const char quote = single && s.find('"') == std::string_view::npos ? '"' : '\'';
-    std::string out(1, quote);
-    char buf[16];
-    for (size_t i = 0; i < s.size();) {
-        size_t n = 1;
-        const uint32_t c = utf8_at(s, i, &n);
-        i += n;
-        if (c == (uint32_t) quote || c == '\\') {
-            out += '\\';
-            out += (char) c;
-        } else if (c == '\t') {
-            out += "\\t";
-        } else if (c == '\n') {
-            out += "\\n";
-        } else if (c == '\r') {
-            out += "\\r";
-        } else if (c < 0x20 || c == 0x7F) {
-            std::snprintf(buf, sizeof buf, "\\x%02x", c);
-            out += buf;
-        } else if (c < 0x7F) {
-            out += (char) c;
-        } else if (printable(c)) {
-            utf8_append(out, c);
-        } else {
-            if (c <= 0xFF) {
-                std::snprintf(buf, sizeof buf, "\\x%02x", c);
-            } else if (c <= 0xFFFF) {
-                std::snprintf(buf, sizeof buf, "\\u%04x", c);
-            } else {
-                std::snprintf(buf, sizeof buf, "\\U%08x", c);
-            }
-            out += buf;
-        }
-    }
-    out += quote;
-    return out;
-}
-
-/// repr() of a JSON value, as Python writes the error messages that name one
-std::string repr(const json& v) {
-    switch (v.type()) {
-        case json::value_t::null: return "None";
-        case json::value_t::boolean: return v.get<bool>() ? "True" : "False";
-        case json::value_t::number_integer: return std::to_string(v.get<int64_t>());
-        case json::value_t::number_unsigned: return std::to_string(v.get<uint64_t>());
-        case json::value_t::number_float: return py_repr(v.get<double>());
-        case json::value_t::string: return repr_str(v.get_ref<const std::string&>());
-        case json::value_t::array: {
-            std::string out = "[";
-            for (size_t i = 0; i < v.size(); ++i) out += (i ? ", " : "") + repr(v[i]);
-            return out + "]";
-        }
-        default: {
-            std::string out = "{";
-            for (auto it = v.begin(); it != v.end(); ++it)
-                out += (it == v.begin() ? "" : ", ") + repr_str(it.key()) + ": " + repr(it.value());
-            return out + "}";
-        }
-    }
-}
-
-/// str(v), as an f-string writes it
-std::string str_of(const json& v) { return v.is_string() ? v.get<std::string>() : repr(v); }
-
 /// sep.join(items): a TypeError on an item that is not a str
 std::string py_join(const std::vector<json>& items, std::string_view sep = "") {
     std::string out;
     for (size_t i = 0; i < items.size(); ++i) {
         if (!items[i].is_string())
             throw Malformed("TypeError: sequence item " + std::to_string(i) + ": expected str instance, " +
-                            type_name(items[i]) + " found");
+                            py_type_name(items[i]) + " found");
         if (i) out += sep;
         out += items[i].get_ref<const std::string&>();
     }
@@ -135,9 +45,9 @@ std::string py_join(const std::vector<json>& items, std::string_view sep = "") {
 /// a + b where one side is a str
 json py_add(const json& a, const json& b) {
     if (a.is_string() && b.is_string()) return a.get<std::string>() + b.get<std::string>();
-    if (a.is_string()) throw Malformed("TypeError: can only concatenate str (not \"" + type_name(b) + "\") to str");
-    if (a.is_array()) throw Malformed("TypeError: can only concatenate list (not \"" + type_name(b) + "\") to list");
-    throw Malformed("TypeError: unsupported operand type(s) for +: '" + type_name(a) + "' and '" + type_name(b) + "'");
+    if (a.is_string()) throw Malformed("TypeError: can only concatenate str (not \"" + py_type_name(b) + "\") to str");
+    if (a.is_array()) throw Malformed("TypeError: can only concatenate list (not \"" + py_type_name(b) + "\") to list");
+    throw Malformed("TypeError: unsupported operand type(s) for +: '" + py_type_name(a) + "' and '" + py_type_name(b) + "'");
 }
 
 /// a += s: a list takes the characters of s, one by one
@@ -152,13 +62,13 @@ void py_iadd(json& a, const std::string& s) {
             i += n;
         }
     } else {
-        throw Malformed("TypeError: unsupported operand type(s) for +=: '" + type_name(a) + "' and 'str'");
+        throw Malformed("TypeError: unsupported operand type(s) for +=: '" + py_type_name(a) + "' and 'str'");
     }
 }
 
 /// a dict key's hash: lists and dicts have none
 void hashable(const json& v) {
-    if (v.is_array() || v.is_object()) throw Malformed("TypeError: unhashable type: '" + type_name(v) + "'");
+    if (v.is_array() || v.is_object()) throw Malformed("TypeError: unhashable type: '" + py_type_name(v) + "'");
 }
 
 /// == between dict keys: True == 1 == 1.0, a str only equals a str
@@ -199,24 +109,6 @@ struct KeyMap {
 };
 
 // ---------------------------------------------------------------------------------------------- strings
-/// str.splitlines(): \n, \r, \r\n, \v, \f, \x1c-\x1e, \x85, U+2028 and U+2029 end a line
-std::vector<std::string> splitlines(std::string_view s) {
-    std::vector<std::string> lines;
-    size_t start = 0, i = 0;
-    while (i < s.size()) {
-        size_t n = 1;
-        const uint32_t c = utf8_at(s, i, &n);
-        if (c == '\n' || c == '\r' || c == 0x0B || c == 0x0C || (c >= 0x1C && c <= 0x1E) || c == 0x85 ||
-            c == 0x2028 || c == 0x2029) {
-            lines.emplace_back(s.substr(start, i - start));
-            if (c == '\r' && i + 1 < s.size() && s[i + 1] == '\n') ++n;
-            start = i + n;
-        }
-        i += n;
-    }
-    if (start < s.size()) lines.emplace_back(s.substr(start));
-    return lines;
-}
 
 /// the byte length of the last character
 size_t last_char_len(std::string_view s) {
@@ -312,7 +204,7 @@ json content_of(const json& content, const std::string& param) {
             parts.push_back({{"type", "input_image"}, {"image_url", part["image_url"]}});
             image = true;
         } else {
-            throw ResponsesError("content parts of type " + repr(kind) + " are not supported (text and images are)",
+            throw ResponsesError("content parts of type " + py_repr_value(kind) + " are not supported (text and images are)",
                                  at + ".type", "unsupported_parameter");
         }
     }
@@ -349,7 +241,7 @@ json reasoning_text(const json& item, const std::string& param) {
                 texts.push_back(truthy(t) ? t : json(""));
             }
     } else if (truthy(content) && !content.is_string() && !content.is_object()) {   // a str or dict: no parts
-        throw Malformed("TypeError: '" + type_name(content) + "' object is not iterable");
+        throw Malformed("TypeError: '" + py_type_name(content) + "' object is not iterable");
     }
     if (!texts.empty()) return py_join(texts);
     const json& enc = jget(item, "encrypted_content");
@@ -514,7 +406,7 @@ std::string title_text(const json& req) {
     const size_t at = text.find("User prompt:");
     if (at != std::string::npos) text = text.substr(at + std::string_view("User prompt:").size());
     std::string line = "Untitled";
-    for (const std::string& x : splitlines(text))
+    for (const std::string_view x : splitlines(text))
         if (!strip(x).empty()) {
             line = std::string(strip(x));
             break;
@@ -588,7 +480,7 @@ json input_messages(const json& req) {
         if (is_str(kind, "message")) {
             const json& role = jget(item, "role");
             if (!is_one_of(role, {"user", "assistant", "system", "developer"}))
-                throw ResponsesError("unknown message role " + repr(role), param + ".role");
+                throw ResponsesError("unknown message role " + py_repr_value(role), param + ".role");
             json content = content_of(jget(item, "content"), param + ".content");
             if (is_str(role, "assistant")) {
                 if (!content.is_string()) {
@@ -618,7 +510,7 @@ json input_messages(const json& req) {
             if (!name_v.is_string() || name_v.get_ref<const std::string&>().empty())
                 throw ResponsesError("a function_call needs a name", param + ".name");
             std::string name = name_v.get<std::string>();
-            if (truthy(jget(item, "namespace"))) name = str_of(item["namespace"]) + "." + name;
+            if (truthy(jget(item, "namespace"))) name = py_str(item["namespace"]) + "." + name;
             json args;
             if (is_str(kind, "function_call")) {
                 args = arguments(jget(item, "arguments"), param + ".arguments");
@@ -643,7 +535,7 @@ json input_messages(const json& req) {
                                  "themselves",
                                  param, "unsupported_parameter");
         } else {
-            throw ResponsesError("input items of type " + repr(kind) + " are not supported", param + ".type",
+            throw ResponsesError("input items of type " + py_repr_value(kind) + " are not supported", param + ".type",
                                  "unsupported_parameter");
         }
     }
@@ -683,7 +575,7 @@ RequestTools request_tools(const json& req) {
         if (!name_v.is_string() || name_v.get_ref<const std::string&>().empty())
             throw ResponsesError("a tool needs a name", param + ".name");
         const std::string& name = name_v.get_ref<const std::string&>();
-        const std::string flat = truthy(ns) ? str_of(ns) + "." + name : name;
+        const std::string flat = truthy(ns) ? py_str(ns) + "." + name : name;
         json description = truthy(jget(tool, "description")) ? tool["description"] : json("");
         if (truthy(ns_description))
             description = py_add(ns_description, truthy(description) ? py_add("\n\n", description) : json(""));
@@ -694,8 +586,8 @@ RequestTools request_tools(const json& req) {
         } else {   // custom: free-form text, maybe in a grammar the model reads
             const json& fmt = jget(tool, "format");
             if (fmt.is_object() && is_str(jget(fmt, "type"), "grammar") && truthy(jget(fmt, "definition")))
-                py_iadd(description, "\n\nThe input must follow this " + str_of(get_or(fmt, "syntax", "")) +
-                                      " grammar:\n" + str_of(fmt["definition"]));
+                py_iadd(description, "\n\nThe input must follow this " + py_str(get_or(fmt, "syntax", "")) +
+                                      " grammar:\n" + py_str(fmt["definition"]));
             json input = {{"type", "string"}, {"description", "the raw input"}};
             params = {{"type", "object"}, {"properties", {{"input", input}}}, {"required", json::array({"input"})}};
         }
@@ -705,7 +597,7 @@ RequestTools request_tools(const json& req) {
         if (truthy(ns)) {
             // Qwen writes Codex's MCP tools as `mcp__server__tool` (the flat name it learned), not
             // `mcp__server.tool`: map that spelling back as well
-            const std::string alias = str_of(ns) + "__" + name;
+            const std::string alias = py_str(ns) + "__" + name;
             if (!r.names.contains(alias)) r.names[alias] = entry;
         }
     };
@@ -722,7 +614,7 @@ RequestTools request_tools(const json& req) {
             if (!truthy(members)) continue;
             if (members.is_string() || members.is_object())   // iterated, its first character or key is no tool
                 throw ResponsesError("a namespace holds function tools", param + ".tools[0]");
-            if (!members.is_array()) throw Malformed("TypeError: '" + type_name(members) + "' object is not iterable");
+            if (!members.is_array()) throw Malformed("TypeError: '" + py_type_name(members) + "' object is not iterable");
             const json& ns_description = truthy(jget(tool, "description")) ? tool["description"] : json("");
             for (size_t j = 0; j < members.size(); ++j) {
                 const json& member = members[j];
@@ -831,7 +723,7 @@ void check_request(const json& req) {
 json template_kwargs(const json& req, const json& shared) {
     const json& reasoning = jget(req, "reasoning");   // (req.get("reasoning") or {}).get("effort")
     if (truthy(reasoning) && !reasoning.is_object())
-        throw Malformed("AttributeError: '" + type_name(reasoning) + "' object has no attribute 'get'");
+        throw Malformed("AttributeError: '" + py_type_name(reasoning) + "' object has no attribute 'get'");
     json effort = jget(reasoning, "effort");
     if (effort.is_null()) effort = jget(shared, "reasoning_effort");   // the Chat settings shared with apps
     try {

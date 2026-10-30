@@ -21,8 +21,6 @@ constexpr size_t kBlock = 64;            // tokens per hashed block of a prompt
 constexpr size_t kIndexMax = 262144;     // block hashes kept (about 17M tokens of prompts)
 constexpr double kHealCooldownS = 60.0;  // a replica that died is started again at most this often
 
-double mono() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-
 thread_local LaminaEngine* tl_current = nullptr;   // the replica this thread's request runs on
 
 std::vector<int> cards(const json& g) {

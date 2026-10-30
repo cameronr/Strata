@@ -1,11 +1,20 @@
 #include "json.hpp"
 
 #include "jinja/value.h"   // py_float_repr
+#include "src/unicode.h"   // llama.cpp's: code point classes (str.isprintable)
 
 #include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <sstream>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace lamina {
 namespace {
@@ -176,38 +185,6 @@ std::string py_g(double v) {
 
 namespace {
 
-/// str.isprintable's false (the categories Cc, Cf, Zl, Zp and Zs but the space), for the code points that reach a repr
-bool py_unprintable(uint32_t cp) {
-    return cp < 0x20 || (cp >= 0x7f && cp <= 0xa0) || cp == 0xad || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200f) ||
-           (cp >= 0x2028 && cp <= 0x202f) || (cp >= 0x205f && cp <= 0x2064) || cp == 0x3000 || cp == 0xfeff ||
-           (cp >= 0xd800 && cp <= 0xdfff);
-}
-
-void repr_str(const std::string& s, std::string& out) {
-    const bool dq = s.find('\'') != std::string::npos && s.find('"') == std::string::npos;
-    const char q = dq ? '"' : '\'';
-    out += q;
-    for (size_t i = 0; i < s.size();) {
-        size_t n = 1;
-        const uint32_t cp = utf8_at(s, i, &n);
-        char buf[16];
-        if (cp == '\\') out += "\\\\";
-        else if (cp == (uint32_t) q) (out += '\\') += q;
-        else if (cp == '\n') out += "\\n";
-        else if (cp == '\r') out += "\\r";
-        else if (cp == '\t') out += "\\t";
-        else if (py_unprintable(cp)) {
-            if (cp < 0x100) std::snprintf(buf, sizeof buf, "\\x%02x", cp);
-            else std::snprintf(buf, sizeof buf, "\\u%04x", cp);
-            out += buf;
-        } else {
-            out.append(s, i, n);
-        }
-        i += n;
-    }
-    out += q;
-}
-
 void repr_value(const json& v, std::string& out) {
     switch (v.type()) {
         case json::value_t::null: out += "None"; break;
@@ -215,7 +192,7 @@ void repr_value(const json& v, std::string& out) {
         case json::value_t::number_integer: out += std::to_string(v.get<int64_t>()); break;
         case json::value_t::number_unsigned: out += std::to_string(v.get<uint64_t>()); break;
         case json::value_t::number_float: out += py_repr(v.get<double>()); break;
-        case json::value_t::string: repr_str(v.get_ref<const std::string&>(), out); break;
+        case json::value_t::string: py_repr_str(out, v.get_ref<const std::string&>()); break;
         case json::value_t::array: {
             out += '[';
             bool first = true;
@@ -233,7 +210,7 @@ void repr_value(const json& v, std::string& out) {
             for (auto it = v.begin(); it != v.end(); ++it) {
                 if (!first) out += ", ";
                 first = false;
-                repr_str(it.key(), out);
+                py_repr_str(out, it.key());
                 out += ": ";
                 repr_value(it.value(), out);
             }
@@ -250,6 +227,57 @@ std::string py_repr_value(const json& v) {
     std::string out;
     repr_value(v, out);
     return out;
+}
+
+void py_repr_str(std::string& out, std::string_view s) {
+    const char quote = s.find('\'') != std::string_view::npos && s.find('"') == std::string_view::npos ? '"' : '\'';
+    out += quote;
+    char buf[16];
+    for (size_t i = 0; i < s.size();) {
+        size_t n = 1;
+        uint32_t cp = utf8_at(s, i, &n);
+        if (n == 1 && cp >= 0x80) cp = 0xFFFD;
+        if (cp == (uint32_t) quote || cp == '\\') {
+            out += '\\';
+            out += (char) cp;
+        } else if (cp == '\t') {
+            out += "\\t";
+        } else if (cp == '\n') {
+            out += "\\n";
+        } else if (cp == '\r') {
+            out += "\\r";
+        } else if (py_isprintable(cp)) {
+            utf8_append(out, cp);
+        } else {
+            if (cp <= 0xFF) std::snprintf(buf, sizeof buf, "\\x%02x", cp);
+            else if (cp <= 0xFFFF) std::snprintf(buf, sizeof buf, "\\u%04x", cp);
+            else std::snprintf(buf, sizeof buf, "\\U%08x", cp);
+            out += buf;
+        }
+        i += n;
+    }
+    out += quote;
+}
+
+std::string py_repr_str(std::string_view s) {
+    std::string out;
+    py_repr_str(out, s);
+    return out;
+}
+
+std::string py_str(const json& v) { return v.is_string() ? v.get<std::string>() : py_repr_value(v); }
+
+std::string py_type_name(const json& v) {
+    switch (v.type()) {
+        case json::value_t::null: return "NoneType";
+        case json::value_t::boolean: return "bool";
+        case json::value_t::number_integer:
+        case json::value_t::number_unsigned: return "int";
+        case json::value_t::number_float: return "float";
+        case json::value_t::string: return "str";
+        case json::value_t::array: return "list";
+        default: return "dict";
+    }
 }
 
 const json& jget(const json& o, std::string_view key) {
@@ -280,11 +308,23 @@ std::string jstr(const json& o, std::string_view key, std::string_view dflt) {
 
 bool is_int(const json& v) { return v.is_number_integer(); }
 bool is_num(const json& v) { return v.is_number(); }
+bool is_str(const json& v, std::string_view s) { return v.is_string() && v.get_ref<const std::string&>() == s; }
 
 // ---------------------------------------------------------------------------------------------- strings
 bool py_isspace(uint32_t c) {
     return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 || c == 0x1680 ||
            (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+bool after_unicode_15(uint32_t cp) {
+    return (cp >= 0x2FFC && cp <= 0x2FFF) || cp == 0x31EF || (cp >= 0x2EBF0 && cp <= 0x2EE5D);
+}
+
+bool py_isprintable(uint32_t cp) {
+    if (cp < 0x7F) return cp >= 0x20;
+    if (after_unicode_15(cp)) return false;
+    const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(cp);
+    return !(f.is_undefined || f.is_control || f.is_separator);
 }
 
 uint32_t utf8_at(std::string_view s, size_t i, size_t* n) {
@@ -328,6 +368,59 @@ void utf8_append(std::string& out, uint32_t cp) {
         out += (char) (0x80 | (cp & 0x3F));
     }
 }
+
+std::string decode_replace(std::string_view b) {
+    std::string out;
+    out.reserve(b.size());
+    for (size_t i = 0; i < b.size();) {
+        const auto c = (unsigned char) b[i];
+        if (c < 0x80) {
+            out += (char) c;
+            ++i;
+            continue;
+        }
+        size_t need = 0;                     // continuation bytes
+        unsigned char lo = 0x80, hi = 0xBF;  // the second byte's range
+        if (c >= 0xC2 && c <= 0xDF) {
+            need = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            need = 2;
+            if (c == 0xE0) lo = 0xA0;
+            if (c == 0xED) hi = 0x9F;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            need = 3;
+            if (c == 0xF0) lo = 0x90;
+            if (c == 0xF4) hi = 0x8F;
+        }
+        size_t k = 1;   // the bytes that still form a valid prefix
+        if (need > 0 && i + 1 < b.size() && (unsigned char) b[i + 1] >= lo && (unsigned char) b[i + 1] <= hi) {
+            k = 2;
+            while (k <= need && i + k < b.size() && ((unsigned char) b[i + k] & 0xC0) == 0x80) ++k;
+        }
+        if (need > 0 && k == need + 1) out.append(b.data() + i, k);
+        else utf8_append(out, 0xFFFD);
+        i += k;
+    }
+    return out;
+}
+
+#ifdef _WIN32
+std::wstring widen(std::string_view s) {
+    if (s.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), nullptr, 0);
+    std::wstring w((size_t) n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), w.data(), n);
+    return w;
+}
+
+std::string narrow(std::wstring_view w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int) w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s((size_t) n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int) w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+#endif
 
 std::string_view lstrip(std::string_view s) {
     size_t i = 0;
@@ -409,6 +502,36 @@ std::vector<std::string> split(std::string_view s, std::string_view sep) {
         out.emplace_back(s.substr(i, j - i));
         i = j + sep.size();
     }
+}
+
+std::vector<std::string> split_ws(std::string_view s) {
+    std::vector<std::string> out;
+    std::istringstream in{std::string(s)};
+    std::string f;
+    while (in >> f) out.push_back(f);
+    return out;
+}
+
+std::vector<std::string_view> splitlines(std::string_view s) {
+    std::vector<std::string_view> out;
+    size_t start = 0;
+    for (size_t i = 0; i < s.size();) {
+        size_t n = 1;
+        const uint32_t c = utf8_at(s, i, &n);
+        size_t brk = 0;
+        if (c == '\r') brk = i + 1 < s.size() && s[i + 1] == '\n' ? 2 : 1;
+        else if (c == '\n' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029)
+            brk = n;
+        if (brk == 0) {
+            i += n;
+            continue;
+        }
+        out.push_back(s.substr(start, i - start));
+        i += brk;
+        start = i;
+    }
+    if (start < s.size()) out.push_back(s.substr(start));
+    return out;
 }
 
 std::string lower(std::string_view s) {

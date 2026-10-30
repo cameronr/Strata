@@ -97,25 +97,17 @@ bool EnvLess::operator()(const std::string& a, const std::string& b) const {
 #endif
 }
 
+std::string exit_code_text(int code) {
+#ifdef _WIN32
+    return std::to_string((uint32_t) code);
+#else
+    return std::to_string(code);
+#endif
+}
+
 #ifdef _WIN32
 // ================================================================================================= Windows
 namespace {
-
-std::wstring widen(std::string_view s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), nullptr, 0);
-    std::wstring w((size_t) n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), w.data(), n);
-    return w;
-}
-
-std::string narrow(std::wstring_view w) {
-    if (w.empty()) return {};
-    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int) w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s((size_t) n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int) w.size(), s.data(), n, nullptr, nullptr);
-    return s;
-}
 
 std::string os_error(DWORD code) {
     wchar_t* buf = nullptr;

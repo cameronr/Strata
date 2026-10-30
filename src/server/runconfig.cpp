@@ -4,8 +4,6 @@
 // <name>.bak). Paths are read as pathlib reads them, and the messages quote values with Python's repr().
 #include "runconfig.hpp"
 
-#include "src/unicode.h"   // llama.cpp's: code point categories (str.isprintable for repr)
-
 #include <algorithm>
 #include <cerrno>
 #include <charconv>
@@ -63,71 +61,6 @@ const Editable* spec(std::string_view key) {
         if (e.key == key) return &e;
     return nullptr;
 }
-
-bool is_str(const json& v, std::string_view s) { return v.is_string() && v.get_ref<const std::string&>() == s; }
-
-// ---------------------------------------------------------------------------------------------- Python's repr
-/// str.isprintable() of one code point: none of the Unicode categories C* and Z*, but the space
-bool printable(uint32_t c) {
-    if (c < 0x7F) return c >= 0x20;
-    if (c == 0x7F) return false;
-    const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(c);
-    return !(f.is_undefined || f.is_control || f.is_separator);
-}
-
-std::string repr_str(std::string_view s) {
-    const char q = s.find('\'') != npos && s.find('"') == npos ? '"' : '\'';
-    std::string out(1, q);
-    char buf[16];
-    for (size_t i = 0; i < s.size();) {
-        size_t n = 1;
-        const uint32_t c = utf8_at(s, i, &n);
-        if (c == (uint32_t) q || c == '\\') {
-            out += '\\';
-            out += (char) c;
-        } else if (c == '\t') {
-            out += "\\t";
-        } else if (c == '\n') {
-            out += "\\n";
-        } else if (c == '\r') {
-            out += "\\r";
-        } else if (printable(c)) {
-            out.append(s.substr(i, n));
-        } else {
-            if (c <= 0xFF) std::snprintf(buf, sizeof buf, "\\x%02x", (unsigned) c);
-            else if (c <= 0xFFFF) std::snprintf(buf, sizeof buf, "\\u%04x", (unsigned) c);
-            else std::snprintf(buf, sizeof buf, "\\U%08x", (unsigned) c);
-            out += buf;
-        }
-        i += n;
-    }
-    return out + q;
-}
-
-std::string repr(const json& v) {
-    switch (v.type()) {
-        case json::value_t::boolean: return v.get<bool>() ? "True" : "False";
-        case json::value_t::number_integer: return std::to_string(v.get<int64_t>());
-        case json::value_t::number_unsigned: return std::to_string(v.get<uint64_t>());
-        case json::value_t::number_float: return py_repr(v.get<double>());
-        case json::value_t::string: return repr_str(v.get_ref<const std::string&>());
-        case json::value_t::array: {
-            std::string out = "[";
-            for (size_t i = 0; i < v.size(); ++i) out += (i ? ", " : "") + repr(v[i]);
-            return out + "]";
-        }
-        case json::value_t::object: {
-            std::string out = "{";
-            for (auto it = v.begin(); it != v.end(); ++it)
-                out += (it == v.begin() ? "" : ", ") + repr_str(it.key()) + ": " + repr(it.value());
-            return out + "}";
-        }
-        default: return "None";
-    }
-}
-
-/// str(): a string as it is, anything else as its repr
-std::string py_str(const json& v) { return v.is_string() ? v.get<std::string>() : repr(v); }
 
 // ---------------------------------------------------------------------------------------------- Python's ==
 /// an int, a bool (0 / 1) or an unsigned up to int64's top as int64; false for an unsigned beyond it
@@ -285,14 +218,6 @@ std::string with_name(PathParts pp, const std::string& name) {
 
 // ---------------------------------------------------------------------------------------------- files
 #ifdef _WIN32
-std::wstring widen(std::string_view s) {
-    std::wstring w;
-    if (s.empty()) return w;
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), nullptr, 0);
-    w.resize((size_t) n);
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int) s.size(), w.data(), n);
-    return w;
-}
 
 /// a Windows error's text as Python's OSError words it (FormatMessage without its trailing dot and line end)
 std::string win_text(DWORD code) {
@@ -321,7 +246,7 @@ std::string win_text(DWORD code) {
 /// an OSError from errno: "[Errno 2] No such file or directory: 'path'"
 [[noreturn]] void os_error(int err, const std::string& filename = "") {
     std::string msg = "[Errno " + std::to_string(err) + "] " + std::strerror(err);
-    if (!filename.empty()) msg += ": " + repr_str(filename);
+    if (!filename.empty()) msg += ": " + py_repr_str(filename);
     throw ConfigFileError(msg);
 }
 
@@ -392,14 +317,14 @@ void replace_file(const std::string& src, const std::string& dst) {
 #ifdef _WIN32
     if (!MoveFileExW(widen(src).c_str(), widen(dst).c_str(), MOVEFILE_REPLACE_EXISTING)) {
         const DWORD code = GetLastError();
-        throw ConfigFileError("[WinError " + std::to_string(code) + "] " + win_text(code) + ": " + repr_str(src) +
-                              " -> " + repr_str(dst));
+        throw ConfigFileError("[WinError " + std::to_string(code) + "] " + win_text(code) + ": " + py_repr_str(src) +
+                              " -> " + py_repr_str(dst));
     }
 #else
     if (std::rename(src.c_str(), dst.c_str()) != 0) {
         const int err = errno;
-        throw ConfigFileError("[Errno " + std::to_string(err) + "] " + std::strerror(err) + ": " + repr_str(src) +
-                              " -> " + repr_str(dst));
+        throw ConfigFileError("[Errno " + std::to_string(err) + "] " + std::strerror(err) + ": " + py_repr_str(src) +
+                              " -> " + py_repr_str(dst));
     }
 #endif
 }
@@ -477,7 +402,7 @@ json number(const std::string& key, const json& v, bool whole = false, double lo
         char rng[80];
         if (hi) std::snprintf(rng, sizeof rng, "%s %g and at most %g", lo_open ? "more than" : "at least", lo, *hi);
         else std::snprintf(rng, sizeof rng, "%s %g", lo_open ? "more than" : "at least", lo);
-        throw RequestError(key + ": expected a " + (whole ? "whole " : "") + "number, " + rng + ", not " + repr(v));
+        throw RequestError(key + ": expected a " + (whole ? "whole " : "") + "number, " + rng + ", not " + py_repr_value(v));
     }
     return whole && v.is_number_float() ? whole_value(v.get<double>()) : v;
 }
@@ -488,7 +413,7 @@ json as_float(const json& v) { return v.get<double>(); }
 
 json value_of(const json& cfg, std::string_view key) {
     const Editable* e = spec(key);
-    if (e == nullptr) throw std::out_of_range(repr_str(key));   // Python's KeyError
+    if (e == nullptr) throw std::out_of_range(py_repr_str(key));   // Python's KeyError
     if (e->kind == "sampling") {
         const json& s = jget(cfg, "sampling");
         return s.is_object() ? jget(s, key.substr(key.find('.') + 1)) : json(nullptr);
@@ -513,11 +438,11 @@ json view(const json& cfg, const std::string& path) {
 json check(const std::string& key, const json& v, const json& cfg) {
     const Editable* e = spec(key);
     if (e == nullptr)
-        throw RequestError(repr_str(key) + " cannot be changed here (only the keys the Settings view lists)");
+        throw RequestError(py_repr_str(key) + " cannot be changed here (only the keys the Settings view lists)");
     if (v.is_null()) return nullptr;
     const std::string_view k = e->kind;
     if (k == "bool") {
-        if (!v.is_boolean()) throw RequestError(key + ": expected true or false, not " + repr(v));
+        if (!v.is_boolean()) throw RequestError(key + ": expected true or false, not " + py_repr_value(v));
         if (key == "lazy_load" && v.get<bool>() && truthy(jget(cfg, "vision")))
             throw RequestError("lazy_load: lazy loading is text-only, and this model reads images (\"vision\")");
         return v;
@@ -528,7 +453,7 @@ json check(const std::string& key, const json& v, const json& cfg) {
         if (!known) {
             std::string choices;
             for (const auto c : e->choices) choices += (choices.empty() ? "" : ", ") + std::string(c);
-            throw RequestError(key + ": expected one of " + choices + ", not " + repr(v));
+            throw RequestError(key + ": expected one of " + choices + ", not " + py_repr_value(v));
         }
         return v;
     }
@@ -546,7 +471,7 @@ json check(const std::string& key, const json& v, const json& cfg) {
             ok = x.is_string() && !strip(x.get_ref<const std::string&>()).empty() &&
                  utf8_len(x.get_ref<const std::string&>()) <= 128;
         }
-        if (!ok) throw RequestError(key + ": expected a list of model names, not " + repr(names));
+        if (!ok) throw RequestError(key + ": expected a list of model names, not " + py_repr_value(names));
         return names.empty() ? json(nullptr) : names;
     }
     if (k == "int>=0" || k == "arg") return number(key, v, true);
@@ -605,7 +530,7 @@ std::string save(const std::string& path, const json& cfg) {
 #ifdef _WIN32
         std::replace(posix.begin(), posix.end(), '\\', '/');
 #endif
-        throw RequestError(std::string(kPathClass) + "(" + repr_str(posix) + ") has an empty name");
+        throw RequestError(std::string(kPathClass) + "(" + py_repr_str(posix) + ") has an empty name");
     }
     const std::string bak = with_name(pp, pp.tail.back() + ".bak");
     copy_file(target, bak);

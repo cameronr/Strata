@@ -25,14 +25,6 @@ namespace {
 
 constexpr std::string_view kBom = "\xEF\xBB\xBF";
 
-double now_s() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-
-/// str() of a decoded JSON value
-std::string py_str(const json& v) { return v.is_string() ? v.get<std::string>() : py_repr_value(v); }
-
-/// repr() of a str
-std::string repr(const std::string& s) { return py_repr_value(json(s)); }
-
 /// format(x, "g")
 std::string fmt_g(double x) {
     char buf[64];
@@ -56,43 +48,6 @@ std::string first_chars(std::string_view s, size_t n) {
         i += len;
     }
     return std::string(s.substr(0, i));
-}
-
-/// bytes.decode("utf-8", "replace"): each ill-formed part becomes one U+FFFD, cut where CPython's decoder cuts
-/// (a truncated sequence is one part; a byte that cannot continue it starts the next)
-std::string decode_replace(std::string_view b) {
-    std::string out;
-    out.reserve(b.size());
-    for (size_t i = 0; i < b.size();) {
-        const auto c = (unsigned char) b[i];
-        if (c < 0x80) {
-            out += (char) c;
-            ++i;
-            continue;
-        }
-        size_t need = 0;                     // continuation bytes
-        unsigned char lo = 0x80, hi = 0xBF;  // the second byte's range
-        if (c >= 0xC2 && c <= 0xDF) {
-            need = 1;
-        } else if (c >= 0xE0 && c <= 0xEF) {
-            need = 2;
-            if (c == 0xE0) lo = 0xA0;
-            if (c == 0xED) hi = 0x9F;
-        } else if (c >= 0xF0 && c <= 0xF4) {
-            need = 3;
-            if (c == 0xF0) lo = 0x90;
-            if (c == 0xF4) hi = 0x8F;
-        }
-        size_t k = 1;   // the bytes that still form a valid prefix
-        if (need > 0 && i + 1 < b.size() && (unsigned char) b[i + 1] >= lo && (unsigned char) b[i + 1] <= hi) {
-            k = 2;
-            while (k <= need && i + k < b.size() && ((unsigned char) b[i + k] & 0xC0) == 0x80) ++k;
-        }
-        if (need > 0 && k == need + 1) out.append(b.data() + i, k);
-        else utf8_append(out, 0xFFFD);
-        i += k;
-    }
-    return out;
 }
 
 /// json.loads of a str: as py_loads, but a leading BOM is refused (nlohmann's parser would skip it)
@@ -158,15 +113,6 @@ std::string clean(std::string_view name) {
 /// a tool's own name, as a string (the spec says it is one)
 std::string tool_name(const json& t) { return py_str(jget(t, "name")); }
 
-/// a process's exit code as Python's returncode has it (Windows: the DWORD, never negative)
-std::string exit_code(int code) {
-#ifdef _WIN32
-    return std::to_string((unsigned long) (uint32_t) code);
-#else
-    return std::to_string(code);
-#endif
-}
-
 // ------------------------------------------------------------------------------------------------ a request
 /// one request waiting for its response
 struct Slot {
@@ -200,10 +146,10 @@ struct Slot {
 
 /// waits for a response, looking at the chat's stop button and the deadline a few times a second
 json wait_slot(Slot& slot, double timeout, Cancel* cancel, const std::string& what) {
-    const double deadline = now_s() + timeout;
+    const double deadline = mono() + timeout;
     while (!slot.wait(0.05)) {
         if (cancel != nullptr && cancel->is_set()) throw McpCancelled("stopped");
-        if (now_s() > deadline) throw McpTimeout(what + " timed out after " + fmt_g(timeout) + " s");
+        if (mono() > deadline) throw McpTimeout(what + " timed out after " + fmt_g(timeout) + " s");
     }
     std::lock_guard<std::mutex> lk(slot.mu);
     if (slot.error) throw McpError(*slot.error);
@@ -331,7 +277,7 @@ void StdioTransport::start() {
     try {
         s.proc = std::make_unique<Process>(std::move(o));
     } catch (const std::exception& e) {
-        throw McpError("could not start " + repr(command) + ": " + e.what());
+        throw McpError("could not start " + py_repr_str(command) + ": " + e.what());
     }
     std::thread([self = impl_] { self->read(); }).detach();
 }
@@ -365,16 +311,16 @@ void StdioTransport::Impl::read() {
     ended = true;
     // the server's last log line says why it stopped: its stderr is let in first (the pipe ends with the process),
     // or the error raced it and said only "the server stopped"
-    const double until = now_s() + 1.2;
+    const double until = mono() + 1.2;
     proc->wait(1.0);
-    for (std::string before = proc->stderr_tail(); now_s() < until;) {
+    for (std::string before = proc->stderr_tail(); mono() < until;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         std::string after = proc->stderr_tail();
         if (after == before) break;
         before = std::move(after);
     }
     const std::optional<int> code = proc->poll();
-    const std::string err = "the server stopped" + (code ? " (exit code " + exit_code(*code) + ")" : std::string()) + tail();
+    const std::string err = "the server stopped" + (code ? " (exit code " + exit_code_text(*code) + ")" : std::string()) + tail();
     std::map<long long, std::shared_ptr<Slot>> slots;
     {
         std::lock_guard<std::mutex> lk(mu);
@@ -697,7 +643,7 @@ bool McpServer::start_locked() {
         error.reset();
         transport_ = t;
     }
-    last_start_ = now_s();
+    last_start_ = mono();
     const double timeout = num(jget(settings, "start_timeout_s"));
     try {
         t->start();
@@ -744,7 +690,7 @@ bool McpServer::start_locked() {
         std::string names;
         for (size_t i = 0; i < listed.size() && i < 8; ++i) names += (i ? ", " : "") + tool_name(listed[i]);
         if (listed.size() > 8) names += ", ...";
-        say("[lamina] MCP server " + repr(name) + ": " + std::to_string(listed.size()) + " tool" +
+        say("[lamina] MCP server " + py_repr_str(name) + ": " + std::to_string(listed.size()) + " tool" +
             (listed.size() != 1 ? "s" : "") + (listed.empty() ? "" : " (" + names + ")"));
         return true;
     } catch (const std::exception& e) {   // McpError (anything else would be a failed start as well)
@@ -755,7 +701,7 @@ bool McpServer::start_locked() {
             tools = json::array();
         }
         t->close();
-        say("[lamina] MCP server " + repr(name) + " did not start: " + e.what() +
+        say("[lamina] MCP server " + py_repr_str(name) + " did not start: " + e.what() +
             ". Its tools are left out; the chat works without them.");
         return false;
     }
@@ -776,9 +722,9 @@ json McpServer::call(const std::string& tool, const json& arguments, double time
                 was = status;
                 why = error;
             }
-            if (was == "failed" && now_s() - last_start_ < 10)
+            if (was == "failed" && mono() - last_start_ < 10)
                 throw McpError("the server is not running (" + (why && !why->empty() ? *why : std::string("it stopped")) + ")");
-            say("[lamina] MCP server " + repr(name) + " had stopped; starting it again");
+            say("[lamina] MCP server " + py_repr_str(name) + " had stopped; starting it again");
             if (!start_locked()) {
                 std::lock_guard<std::mutex> st(state_mu);
                 throw McpError("the server could not be started again: " + (error ? *error : std::string("None")));
@@ -946,7 +892,7 @@ json McpHub::openai_tools() {
 }
 
 json McpHub::call(const std::string& name, const json& arguments, Cancel* cancel) {
-    const double t0 = now_s();
+    const double t0 = mono();
     std::pair<McpServer*, std::string> route{nullptr, name};
     bool cached = false;
     {
@@ -965,7 +911,7 @@ json McpHub::call(const std::string& name, const json& arguments, Cancel* cancel
     std::string text;
     bool ok = false;
     if (server == nullptr) {
-        text = "error: there is no tool named " + repr(name);
+        text = "error: there is no tool named " + py_repr_str(name);
     } else {
         try {
             const json res = server->call(route.second, arguments.is_object() ? arguments : json::object(),
@@ -989,7 +935,7 @@ json McpHub::call(const std::string& name, const json& arguments, Cancel* cancel
     out["text"] = text;
     out["chars"] = full;
     out["truncated"] = truncated;
-    out["ms"] = (long long) ((now_s() - t0) * 1000);
+    out["ms"] = (long long) ((mono() - t0) * 1000);
     return out;
 }
 
@@ -1049,7 +995,7 @@ void McpHub::close() {
 namespace {
 
 json check_server(const std::string& name, const json& cfg, const std::string& where) {
-    const std::string who = "[lamina] " + where + ": MCP server " + repr(name);
+    const std::string who = "[lamina] " + where + ": MCP server " + py_repr_str(name);
     if (!cfg.is_object()) throw McpConfigError(who + " must be an object with \"command\" or \"url\"");
     if (truthy(jget(cfg, "url"))) {
         const json& type = jget(cfg, "type");
@@ -1086,7 +1032,7 @@ bool read_file(const std::string& path, std::string& text, std::string& error) {
 #endif
     if (f == nullptr) {
         const int e = errno;
-        error = "[Errno " + std::to_string(e) + "] " + std::strerror(e) + ": " + repr(path);
+        error = "[Errno " + std::to_string(e) + "] " + std::strerror(e) + ": " + py_repr_str(path);
         return false;
     }
     char buf[65536];

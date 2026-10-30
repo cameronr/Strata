@@ -214,10 +214,7 @@ Args parse_args(int argc, char** argv) {
 
 void open_browser(const std::string& url) {
 #ifdef _WIN32
-    const int n = MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, nullptr, 0);
-    std::wstring w((size_t) n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, url.c_str(), -1, w.data(), n);
-    ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    ShellExecuteW(nullptr, L"open", widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 #else
     try {
         SpawnOptions o;
@@ -308,9 +305,6 @@ std::string server_names(const McpHub& hub) {
     for (const auto& srv : hub.servers) out += (out.empty() ? "" : ", ") + srv->name;
     return out;
 }
-
-/// str() of a value as Python prints it
-std::string py_str(const json& v) { return v.is_string() ? v.get<std::string>() : py_repr_value(v); }
 
 /// "k=v, ..." as Python prints a dict's items
 std::string items(const json& d) {

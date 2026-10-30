@@ -35,27 +35,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-double since(Clock::time_point t0) { return std::chrono::duration<double>(Clock::now() - t0).count(); }
-
 // ---------------------------------------------------------------------------------------------- Python's view
-bool is_str(const json& v, std::string_view s) { return v.is_string() && v.get_ref<const std::string&>() == s; }
-
-/// type(v).__name__
-std::string type_name(const json& v) {
-    switch (v.type()) {
-        case json::value_t::null: return "NoneType";
-        case json::value_t::boolean: return "bool";
-        case json::value_t::number_integer:
-        case json::value_t::number_unsigned: return "int";
-        case json::value_t::number_float: return "float";
-        case json::value_t::string: return "str";
-        case json::value_t::array: return "list";
-        default: return "dict";
-    }
-}
-
-/// str(v)
-std::string py_str(const json& v) { return v.is_string() ? v.get<std::string>() : py_repr_value(v); }
 
 /// `v or dflt`
 json or_else(const json& v, json dflt) { return truthy(v) ? v : std::move(dflt); }
@@ -150,7 +130,7 @@ int64_t py_int(const json& v) {
         case json::value_t::string: return int_of_str(v.get_ref<const std::string&>());
         default:
             throw ConfigTypeError("TypeError", "int() argument must be a string, a bytes-like object or a real number, not '" +
-                                                   type_name(v) + "'");
+                                                   py_type_name(v) + "'");
     }
 }
 
@@ -192,7 +172,7 @@ double py_float(const json& v) {
         case json::value_t::number_float: return v.get<double>();
         case json::value_t::string: return float_of_str(v.get_ref<const std::string&>());
         default:
-            throw ConfigTypeError("TypeError", "float() argument must be a string or a real number, not '" + type_name(v) + "'");
+            throw ConfigTypeError("TypeError", "float() argument must be a string or a real number, not '" + py_type_name(v) + "'");
     }
 }
 
@@ -211,13 +191,13 @@ std::vector<json> py_iter(const json& v) {
     } else if (v.is_object()) {
         for (auto it = v.begin(); it != v.end(); ++it) out.emplace_back(it.key());
     } else {
-        throw ConfigTypeError("TypeError", "'" + type_name(v) + "' object is not iterable");
+        throw ConfigTypeError("TypeError", "'" + py_type_name(v) + "' object is not iterable");
     }
     return out;
 }
 
 std::string path_type_error(const json& v) {
-    return "argument should be a str or an os.PathLike object where __fspath__ returns a str, not '" + type_name(v) + "'";
+    return "argument should be a str or an os.PathLike object where __fspath__ returns a str, not '" + py_type_name(v) + "'";
 }
 
 // ---------------------------------------------------------------------------------------------- paths
@@ -377,32 +357,6 @@ std::string token_hex(size_t nbytes) {
 }
 
 // ---------------------------------------------------------------------------------------------- sd-cli's output
-/// bytes as Python decodes UTF-8 with errors="replace": one U+FFFD for each maximal invalid part
-std::string decode_replace(std::string_view s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size();) {
-        const auto c = (unsigned char) s[i];
-        if (c < 0x80) {
-            out += (char) c;
-            ++i;
-            continue;
-        }
-        // the continuation bytes a start byte takes, and the second one's range (Unicode's well-formed sequences)
-        const size_t need = c >= 0xC2 && c <= 0xDF ? 1 : c >= 0xE0 && c <= 0xEF ? 2 : c >= 0xF0 && c <= 0xF4 ? 3 : 0;
-        const int lo = c == 0xE0 ? 0xA0 : c == 0xF0 ? 0x90 : 0x80;
-        const int hi = c == 0xED ? 0x9F : c == 0xF4 ? 0x8F : 0xBF;
-        size_t k = 1;
-        for (; need > 0 && k <= need && i + k < s.size(); ++k) {
-            const int b = (unsigned char) s[i + k];
-            if (b < (k == 1 ? lo : 0x80) || b > (k == 1 ? hi : 0xBF)) break;
-        }
-        if (need > 0 && k == need + 1) out.append(s.substr(i, k));
-        else out += "\xEF\xBF\xBD";
-        i += k;
-    }
-    return out;
-}
 
 /// universal newlines: "\r\n" and "\r" -> "\n"
 std::string newlines(std::string_view s) {
@@ -413,29 +367,6 @@ std::string newlines(std::string_view s) {
         else if (i + 1 < s.size() && s[i + 1] == '\n') continue;
         else out += '\n';
     }
-    return out;
-}
-
-/// str.splitlines() of UTF-8 text
-std::vector<std::string_view> splitlines(std::string_view s) {
-    std::vector<std::string_view> out;
-    size_t start = 0;
-    for (size_t i = 0; i < s.size();) {
-        size_t n = 1;
-        const uint32_t c = utf8_at(s, i, &n);
-        size_t brk = 0;
-        if (c == '\r') brk = i + 1 < s.size() && s[i + 1] == '\n' ? 2 : 1;
-        else if (c == '\n' || c == 0x0B || c == 0x0C || c == 0x1C || c == 0x1D || c == 0x1E || c == 0x85 || c == 0x2028 || c == 0x2029)
-            brk = n;
-        if (brk == 0) {
-            i += n;
-            continue;
-        }
-        out.push_back(s.substr(start, i - start));
-        i += brk;
-        start = i;
-    }
-    if (start < s.size()) out.push_back(s.substr(start));
     return out;
 }
 
@@ -533,15 +464,6 @@ private:
     std::streamoff pos_ = 0;
     std::string part_;
 };
-
-/// the exit code as Python's returncode shows it (Windows: the DWORD, unsigned)
-std::string exit_code(int rc) {
-#ifdef _WIN32
-    return std::to_string((uint32_t) rc);
-#else
-    return std::to_string(rc);
-#endif
-}
 
 template <class F>
 struct OnExit {
@@ -686,7 +608,7 @@ Environment image_env(const json& cfg, const Environment* base) {
     if (!gpu.is_null()) {
         const json& backend = jget(cfg, "backend");
         if (backend.is_array() || backend.is_object())
-            throw ConfigTypeError("TypeError", "unhashable type: '" + type_name(backend) + "'");
+            throw ConfigTypeError("TypeError", "unhashable type: '" + py_type_name(backend) + "'");
         const char* var = is_str(backend, "cuda") ? "CUDA_VISIBLE_DEVICES" : is_str(backend, "vulkan") ? "GGML_VK_VISIBLE_DEVICES" : nullptr;
         if (var != nullptr) {
             env[var] = py_str(gpu);
@@ -695,7 +617,7 @@ Environment image_env(const json& cfg, const Environment* base) {
     }
     const json& extra = jget(cfg, "env");
     if (truthy(extra)) {
-        if (!extra.is_object()) throw ConfigTypeError("AttributeError", "'" + type_name(extra) + "' object has no attribute 'items'");
+        if (!extra.is_object()) throw ConfigTypeError("AttributeError", "'" + py_type_name(extra) + "' object has no attribute 'items'");
         for (auto it = extra.begin(); it != extra.end(); ++it) env[it.key()] = py_str(it.value());
     }
     return env;
@@ -897,7 +819,7 @@ std::pair<std::vector<std::string>, json> ImageGen::run(const Job& job, Cancel* 
         const size_t first = lines.size() > 12 ? lines.size() - 12 : 0;
         std::string tail;
         for (size_t i = first; i < lines.size(); ++i) tail += (i > first ? "\n" : "") + std::string(lines[i]);
-        const std::string what = !why.empty() ? why : rc && *rc != 0 ? "sd-cli exited with code " + exit_code(*rc) : "sd-cli wrote no image";
+        const std::string what = !why.empty() ? why : rc && *rc != 0 ? "sd-cli exited with code " + exit_code_text(*rc) : "sd-cli wrote no image";
         say("image job failed: " + what + "\n" + tail);
         throw ImageJobFailed(what + "; the end of its log:\n" + tail);
     }

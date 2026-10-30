@@ -1,5 +1,7 @@
 #include "tokenizer.hpp"
 
+#include "json.hpp"
+
 #include "gguf.h"
 #include "src/unicode.h"   // llama.cpp's: the pre-tokenizer split (unicode_regex_split)
 
@@ -28,24 +30,6 @@ std::array<uint32_t, 256> byte_to_unicode() {
     uint32_t n = 0;
     for (int b = 0; b < 256; ++b) map[b] = direct[b] ? (uint32_t) b : 256 + n++;
     return map;
-}
-
-void append_utf8(std::string& out, uint32_t cp) {
-    if (cp < 0x80) {
-        out += (char) cp;
-    } else if (cp < 0x800) {
-        out += (char) (0xC0 | (cp >> 6));
-        out += (char) (0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += (char) (0xE0 | (cp >> 12));
-        out += (char) (0x80 | ((cp >> 6) & 0x3F));
-        out += (char) (0x80 | (cp & 0x3F));
-    } else {
-        out += (char) (0xF0 | (cp >> 18));
-        out += (char) (0x80 | ((cp >> 12) & 0x3F));
-        out += (char) (0x80 | ((cp >> 6) & 0x3F));
-        out += (char) (0x80 | (cp & 0x3F));
-    }
 }
 
 /// a token's text (byte-alphabet characters) -> its bytes; false when a character is outside the alphabet
@@ -189,7 +173,7 @@ std::unique_ptr<Tokenizer> Tokenizer::from_gguf(const std::string& path) {
     const std::array<uint32_t, 256> b2u = byte_to_unicode();
     for (int b = 0; b < 256; ++b) {
         std::string ch;
-        append_utf8(ch, b2u[b]);
+        utf8_append(ch, b2u[b]);
         const auto it = ids.find(ch);
         if (it == ids.end()) throw std::runtime_error("the vocabulary lacks the byte token of " + std::to_string(b));
         t->byte_token_[b] = it->second;

@@ -24,16 +24,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-double mono() { return std::chrono::duration<double>(Clock::now().time_since_epoch()).count(); }
 double wall() { return std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count(); }
-
-std::vector<std::string> fields(const std::string& line) {
-    std::vector<std::string> out;
-    std::istringstream s(line);
-    std::string f;
-    while (s >> f) out.push_back(f);
-    return out;
-}
 
 bool digits(const std::string& s) { return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos; }
 
@@ -130,7 +121,7 @@ void LaminaEngine::pump() {
     std::string line;
     while (out->pop(line, -1) == 1) {
         if (starts_with(line, "BT ") || starts_with(line, "BDONE ")) {
-            const std::vector<std::string> f = fields(line);
+            const std::vector<std::string> f = split_ws(line);
             if (f.size() > 1 && digits(f[1]) && std::stoul(f[1]) < qs.size()) {
                 qs[std::stoul(f[1])]->push(line);
                 continue;
@@ -290,7 +281,7 @@ void LaminaEngine::control(Cancel& cancel, const std::function<void(int32_t)>& o
                 stopped = true;
             }
         } else if (starts_with(line, "PP ")) {
-            const std::vector<std::string> f = fields(line);
+            const std::vector<std::string> f = split_ws(line);
             if (f.size() >= 3 && digits(f[1]) && digits(f[2])) {
                 progress = std::make_pair((int64_t) std::atoll(f[1].c_str()), (int64_t) std::atoll(f[2].c_str()));
                 progress_ms = f.size() >= 4 ? std::atof(f[3].c_str()) : 0.0;
@@ -305,11 +296,11 @@ void LaminaEngine::control(Cancel& cancel, const std::function<void(int32_t)>& o
             parse_done(line);
             last_done_ = line;
         } else if (starts_with(line, "BADM ")) {
-            const std::vector<std::string> f = fields(line);
+            const std::vector<std::string> f = split_ws(line);
             ctl_result_ = std::make_pair(std::string("badm"), f.size() >= 3 && f[2] == "1");
             return;
         } else if (starts_with(line, "YIELDED ")) {   // the read gave way (BYIELD): <slot> <tokens read>
-            const std::vector<std::string> f = fields(line);
+            const std::vector<std::string> f = split_ws(line);
             if (f.size() >= 3 && digits(f[2]) && (digits(f[1]) || (f[1].size() > 1 && f[1][0] == '-' && digits(f[1].substr(1)))))
                 yielded_ = std::make_pair(std::stoi(f[1]), (int64_t) std::stoll(f[2]));
         } else if (starts_with(line, "ERR")) {
@@ -326,7 +317,7 @@ void LaminaEngine::control(Cancel& cancel, const std::function<void(int32_t)>& o
 }
 
 std::string LaminaEngine::done_finish() const {
-    const std::vector<std::string> f = fields(last_done_);
+    const std::vector<std::string> f = split_ws(last_done_);
     return f.size() > 5 ? f[5] : "";
 }
 
@@ -398,12 +389,12 @@ void LaminaEngine::release_slot_when_done(int slot, std::optional<std::vector<in
                 break;
             }
             if (starts_with(line, "BT ")) {
-                const std::vector<std::string> f = fields(line);
+                const std::vector<std::string> f = split_ws(line);
                 if (f.size() > 2 && digits(f[2])) tail.push_back((int32_t) std::stol(f[2]));
                 else tail.clear();
             }
             if (starts_with(line, "BDONE ")) {
-                const std::vector<std::string> f = fields(line);
+                const std::vector<std::string> f = split_ws(line);
                 if (f.size() > 3 && f[3] == "nonfinite") tail.clear();   // #879: the engine dropped the slot's state
                 break;
             }
@@ -570,7 +561,7 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                 drain_control("DONE", born);
             } else if (phase == "admit") {
                 const std::string line = drain_control("BADM", born);
-                const std::vector<std::string> f = fields(line);
+                const std::vector<std::string> f = split_ws(line);
                 if (starts_with(line, "BADM ") && f.size() > 2 && f[2] == "1") phase = "slot";
             }
         } catch (const EngineDied&) {
@@ -579,7 +570,7 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
         if (phase == "slot" && slot && !out.empty() && kEosIds.count(out.back()) && gen_ == born) {
             const std::string bd = bdone_after_eos(*slot);   // (#1869) the slot's figures, not the admission's
             if (!bd.empty()) {
-                apply_bdone(fields(bd));
+                apply_bdone(split_ws(bd));
                 bdone_in = true;
             }
         }
@@ -871,7 +862,7 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                     throw EngineDied("the engine stopped unexpectedly (exit code " + std::to_string(rc_.load()) + ")");
                 }
                 if (starts_with(line, "BT ")) {
-                    const std::vector<std::string> f = fields(line);
+                    const std::vector<std::string> f = split_ws(line);
                     const int32_t t = f.size() > 2 ? (int32_t) std::atoi(f[2].c_str()) : 0;
                     {
                         std::lock_guard<std::mutex> lk(slot_mu_);
@@ -892,7 +883,7 @@ void LaminaEngine::generate_batched(const std::vector<int32_t>& ids, int64_t max
                     }
                 } else if (starts_with(line, "BDONE ")) {
                     phase = "none";
-                    const std::vector<std::string> f = fields(line);
+                    const std::vector<std::string> f = split_ws(line);
                     apply_bdone(f);
                     {
                         // what the slot's sessions hold now: the prompt and every token fed (all but the last one)

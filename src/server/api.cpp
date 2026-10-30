@@ -18,8 +18,6 @@ namespace {
 // the verify windows, so a PP that close to the end says the prompt is read (a client would see a full bar at once)
 constexpr int64_t kPpDoneTail = 64;
 
-double mono() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-
 bool is_json_text(const std::string& text) {
     json v;
     return py_loads(text, v);

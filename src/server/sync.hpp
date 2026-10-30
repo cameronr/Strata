@@ -1,5 +1,5 @@
 // src/server/sync.hpp - what threads of the server hand each other: a request's cancellation, and lines (from the
-// engine thread, from a child process's output).
+// engine thread, from a child process's output); the steady clock their waits are timed by.
 #pragma once
 
 #include <atomic>
@@ -12,6 +12,16 @@
 #include <string>
 
 namespace lamina {
+
+/// seconds on the steady clock (time.monotonic())
+inline double mono() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+/// the seconds since t0 on the steady clock
+inline double since(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
 
 /// a request's cancellation: set by the HTTP side (the client left) or the server (shutdown, unload)
 class Cancel {

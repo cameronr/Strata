@@ -53,9 +53,6 @@ std::string head_chars(const std::string& s, size_t n) {
     return s.substr(0, i);
 }
 
-/// str() of a value as Python prints it ("x" without quotes, True, 0.7)
-std::string py_str(const json& v) { return v.is_string() ? v.get<std::string>() : py_repr_value(v); }
-
 /// int() of a request field: an int, a float (truncated), a bool or a string of digits; RequestError otherwise
 int64_t py_int(const json& v) {
     if (v.is_boolean()) return v.get<bool>() ? 1 : 0;

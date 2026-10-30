@@ -299,19 +299,6 @@ std::string sanitized(std::string_view s) {
 bool is_digit(uint32_t c) { return c >= '0' && c <= '9'; }
 bool is_ascii_letter(uint32_t c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
 
-/// assigned in llama.cpp's Unicode 15.1 tables, unassigned in Python 3.12's Unicode 15.0
-bool after_unicode_15(uint32_t cp) {
-    return (cp >= 0x2FFC && cp <= 0x2FFF) || cp == 0x31EF || (cp >= 0x2EBF0 && cp <= 0x2EE5D);
-}
-
-/// str.isprintable() of one character: what repr() writes as is (not Cc, Cf, Cs, Co, Cn, Zl, Zp, Zs but the space)
-bool py_printable(uint32_t cp) {
-    if (cp < 0x7F) return cp >= 0x20;
-    if (after_unicode_15(cp)) return false;
-    const unicode_cpt_flags f = unicode_cpt_flags_from_cpt(cp);
-    return !(f.is_undefined || f.is_control || f.is_separator);
-}
-
 /// str.isalpha() of one character
 bool py_alpha(uint32_t cp) {
     if (cp < 0x80) return is_ascii_letter(cp);
@@ -398,40 +385,6 @@ const std::vector<uint32_t>* sre_extra_cases(uint32_t lo) {
 }
 
 // ============================================================================================ repr() and str()
-void repr_str(std::string& out, std::string_view s) {
-    const bool single = s.find('\'') != npos, dbl = s.find('"') != npos;
-    const char quote = single && !dbl ? '"' : '\'';
-    out += quote;
-    char buf[16];
-    for (size_t i = 0; i < s.size();) {
-        size_t n = 1;
-        const uint32_t cp = cp_at(s, i, &n);
-        if (cp == (uint32_t) quote || cp == '\\') {
-            out += '\\';
-            out += (char) cp;
-        } else if (cp == '\t') {
-            out += "\\t";
-        } else if (cp == '\n') {
-            out += "\\n";
-        } else if (cp == '\r') {
-            out += "\\r";
-        } else if (cp < 0x20 || cp == 0x7F) {
-            std::snprintf(buf, sizeof buf, "\\x%02x", cp);
-            out += buf;
-        } else if (cp < 0x7F) {
-            out += (char) cp;
-        } else if (!py_printable(cp)) {
-            if (cp <= 0xFF) std::snprintf(buf, sizeof buf, "\\x%02x", cp);
-            else if (cp <= 0xFFFF) std::snprintf(buf, sizeof buf, "\\u%04x", cp);
-            else std::snprintf(buf, sizeof buf, "\\U%08x", cp);
-            out += buf;
-        } else {
-            utf8_append(out, cp);
-        }
-        i += n;
-    }
-    out += quote;
-}
 
 void repr_scalar(std::string& out, const Val& v) {
     switch (v.k) {
@@ -440,7 +393,7 @@ void repr_scalar(std::string& out, const Val& v) {
         case K::Int: out += std::to_string(v.i); break;
         case K::Big: out += v.s; break;
         case K::Float: out += py_repr(v.f); break;
-        case K::Str: repr_str(out, v.s); break;
+        case K::Str: py_repr_str(out, v.s); break;
         default: break;
     }
 }
@@ -477,7 +430,7 @@ void repr_into(std::string& out, const Val& root) {
         if (list) {
             visit(v.list[j]);
         } else {
-            repr_str(out, v.dict[j].key);
+            py_repr_str(out, v.dict[j].key);
             out += ": ";
             visit(v.dict[j].val);
         }
@@ -487,12 +440,6 @@ void repr_into(std::string& out, const Val& root) {
 std::string repr(const Val& v) {
     std::string out;
     repr_into(out, v);
-    return out;
-}
-
-std::string repr_text(std::string_view s) {
-    std::string out;
-    repr_str(out, s);
     return out;
 }
 
@@ -1489,7 +1436,7 @@ private:
     }
     [[noreturn]] void fail(std::string msg, size_t offset = 0) const { error(pat_, std::move(msg), tell() - offset); }
     void checkgroupname(const std::u32string& name, size_t offset) const {
-        if (!py_isidentifier(name)) fail("bad character in group name " + repr_text(utf8_of(name)), name.size() + offset);
+        if (!py_isidentifier(name)) fail("bad character in group name " + py_repr_str(utf8_of(name)), name.size() + offset);
     }
     void checklookbehind(int64_t gid) const {
         if (!state.lookbehind) return;
@@ -1576,7 +1523,7 @@ Node Parser::unicode_escape(std::u32string esc) {
     // \N{name}: Python looks the name up in the Unicode database, which is not here
     if (!match('{')) fail("missing {");
     const std::u32string name = getuntil('}', "character name");
-    fail("undefined character name " + repr_text(utf8_of(name)), name.size() + 4);
+    fail("undefined character name " + py_repr_str(utf8_of(name)), name.size() + 4);
 }
 
 Node Parser::escape(std::u32string esc) {
@@ -1832,7 +1779,7 @@ SeqP Parser::parse_seq(bool verbose, int nested, bool first) {
                         const std::u32string ref = getuntil(')', "group name");
                         checkgroupname(ref, 1);
                         const auto it = state.groupdict.find(ref);
-                        if (it == state.groupdict.end()) fail("unknown group name " + repr_text(utf8_of(ref)), ref.size() + 1);
+                        if (it == state.groupdict.end()) fail("unknown group name " + py_repr_str(utf8_of(ref)), ref.size() + 1);
                         if (!state.checkgroup(it->second)) fail("cannot refer to an open group", ref.size() + 1);
                         checklookbehind(it->second);
                         items.push_back(node(Op::GroupRef, (uint32_t) it->second));
@@ -1876,7 +1823,7 @@ SeqP Parser::parse_seq(bool verbose, int nested, bool first) {
                         checkgroupname(condname, 1);
                         const auto it = state.groupdict.find(condname);
                         if (it == state.groupdict.end())
-                            fail("unknown group name " + repr_text(utf8_of(condname)), condname.size() + 1);
+                            fail("unknown group name " + py_repr_str(utf8_of(condname)), condname.size() + 1);
                         condgroup = it->second;
                     } else {
                         std::string digits = utf8_of(condname);
@@ -1926,7 +1873,7 @@ SeqP Parser::parse_seq(bool verbose, int nested, bool first) {
                 if (name) {
                     const auto it = state.groupdict.find(*name);
                     if (it != state.groupdict.end())
-                        fail("redefinition of group name " + repr_text(utf8_of(*name)) + " as group " +
+                        fail("redefinition of group name " + py_repr_str(utf8_of(*name)) + " as group " +
                                  std::to_string(group) + "; was group " + std::to_string(it->second),
                              name->size() + 1);
                     state.groupdict[*name] = group;
@@ -3006,14 +2953,14 @@ public:
         crawl_once();
         if (const Anchor* a = find_anchor(uri, name)) return *a;
         const Resource* r = find(uri);
-        if (r == nullptr) raise("KeyError", repr_text(uri));
+        if (r == nullptr) raise("KeyError", py_repr_str(uri));
         if (const std::optional<std::string> canonical = resource_id(*r->contents, r->spec))
             if (const Anchor* a = find_anchor(*canonical, name)) return *a;
         if (name.find('/') != npos)
             raise("InvalidAnchor", "'#" + name + "' is not a valid anchor, neither as a plain name anchor nor as a "
                                    "JSON Pointer. You may have intended to use '#/" + name +
                                    "', as the slash is required *before each segment* of a JSON pointer.");
-        raise("NoSuchAnchor", repr_text(name) + " does not exist within " + repr(*r->contents));
+        raise("NoSuchAnchor", py_repr_str(name) + " does not exist within " + repr(*r->contents));
     }
     /// anchor() for DynamicAnchor.resolve, where NoSuchAnchor is no anchor
     const Anchor* try_anchor(const std::string& uri, const std::string& name) {
@@ -3203,7 +3150,7 @@ std::optional<int64_t> py_int(const std::string& s) {
 }
 
 [[noreturn]] void nowhere(const std::string& ptr, const Resource& rs) {
-    std::string msg = repr_text(ptr) + " does not exist within " + repr(*rs.contents);
+    std::string msg = py_repr_str(ptr) + " does not exist within " + repr(*rs.contents);
     if (ptr == "/")
         msg += ". The pointer '/' is a valid JSON Pointer but it points to an empty string property ''. If you "
                "intended to point to the entire resource, you should use '#'.";
@@ -3218,7 +3165,7 @@ Resolved pointer(Run& r, const Resource& rs, const std::string& ptr, Resolver re
         Segment seg;
         if (contents->k == K::List || contents->k == K::Str) {
             const std::optional<int64_t> idx = py_int(raw);
-            if (!idx) raise("ValueError", "invalid literal for int() with base 10: " + repr_text(raw));
+            if (!idx) raise("ValueError", "invalid literal for int() with base 10: " + py_repr_str(raw));
             const bool list = contents->k == K::List;
             const int64_t n = list ? (int64_t) contents->list.size() : (int64_t) utf8_len(contents->s);
             const int64_t k = *idx < 0 ? *idx + n : *idx;
@@ -3605,11 +3552,11 @@ KEYWORD(kw_additional_properties) {
         for (const Member* m : extras) keys.push_back(m->key);
         std::sort(keys.begin(), keys.end());
         std::vector<std::string> reprs;
-        for (const std::string& k : keys) reprs.push_back(repr_text(k));
+        for (const std::string& k : keys) reprs.push_back(py_repr_str(k));
         if (pp != nullptr) {
             std::sort(pats.begin(), pats.end());
             std::vector<std::string> preprs;
-            for (const std::string& p : pats) preprs.push_back(repr_text(p));
+            for (const std::string& p : pats) preprs.push_back(py_repr_str(p));
             return joined(reprs) + (extras.size() == 1 ? " does" : " do") + " not match any of the regexes: " + joined(preprs);
         }
         return "Additional properties are not allowed (" + extras_msg(reprs) + " unexpected)";
@@ -3749,7 +3696,7 @@ KEYWORD(kw_max_length) {
 bool required_names(Run& r, const Val& names, const std::string& property, const Val& inst, Sink& s) {
     return each_item(names, [&](const Val& each) {
         if (py_in(each, inst)) return true;
-        return emit(r, s, [&] { return repr(each) + " is a dependency of " + repr_text(property); });
+        return emit(r, s, [&] { return repr(each) + " is a dependency of " + py_repr_str(property); });
     });
 }
 
@@ -3930,7 +3877,7 @@ KEYWORD(kw_dependencies_d3) {
         if (dep.k == K::Dict) {
             if (!descend(r, c, inst, dep, s)) return false;
         } else if (dep.k == K::Str) {
-            if (!inst.has(dep.s) && !emit(r, s, [&] { return repr(dep) + " is a dependency of " + repr_text(m.key); }))
+            if (!inst.has(dep.s) && !emit(r, s, [&] { return repr(dep) + " is a dependency of " + py_repr_str(m.key); }))
                 return false;
         } else if (!required_names(r, dep, m.key, inst, s)) {
             return false;
@@ -4020,7 +3967,7 @@ KEYWORD(kw_properties_d3) {
         const Val* req = m.val.get("required");
         if (req != nullptr && truthy(*req)) {
             const PathPush p(r, &m.key);
-            if (!emit(r, s, [&] { return repr_text(m.key) + " is a required property"; })) return false;
+            if (!emit(r, s, [&] { return py_repr_str(m.key) + " is a required property"; })) return false;
         }
     }
     return true;
@@ -4217,7 +4164,7 @@ bool unevaluated_properties(Run& r, const Ctx& c, const Val& v, const Val& inst,
         const bool none_allowed = v.k == K::Bool && !v.b;
         if (none_allowed) std::sort(keys.begin(), keys.end());
         std::vector<std::string> reprs;
-        for (const std::string& k : keys) reprs.push_back(repr_text(k));
+        for (const std::string& k : keys) reprs.push_back(py_repr_str(k));
         return none_allowed ? "Unevaluated properties are not allowed (" + extras_msg(reprs) + " unexpected)"
                             : "Unevaluated properties are not valid under the given schema (" + extras_msg(reprs) +
                                   " unevaluated and invalid)";

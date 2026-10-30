@@ -31,6 +31,9 @@ using Environment = std::map<std::string, std::string, EnvLess>;
 /// this process's environment
 Environment environment();
 
+/// an exit code as Python's returncode shows it (Windows: the DWORD, unsigned)
+std::string exit_code_text(int code);
+
 struct SpawnOptions {
     std::vector<std::string> args;     ///< the program and its arguments; with `shell`, one command line
     bool shell = false;                ///< args[0] runs through the shell (cmd.exe /c, /bin/sh -c)

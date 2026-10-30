@@ -15,8 +15,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-double since(Clock::time_point t) { return std::chrono::duration<double>(Clock::now() - t).count(); }
-
 // the engine's own words for a verifier that cannot go on: it may even print DONE, but must not take another request
 const char* kFatalPrefixes[] = {"ERR verify: timed out at layer ", "ERR verify batch: timed out at layer ",
                                 "ERR verify: an earlier window never finished",
@@ -26,14 +24,6 @@ constexpr int64_t kPpChunkMax = 32768;   // the longest prompt chunk before the 
 constexpr double kPpFloorTokS = 50.0;    // ... read at the slowest PC's rate
 constexpr double kPpSlack = 3.0;         // a chunk may take this many times the last one's time
 constexpr int kQuitWaitS = 120;          // an engine's QUIT: the time to free its memory and save what it learned
-
-std::vector<std::string> fields(const std::string& line) {
-    std::vector<std::string> out;
-    std::istringstream s(line);
-    std::string f;
-    while (s >> f) out.push_back(f);
-    return out;
-}
 
 bool digits(const std::string& s, bool sign = false) {
     if (s.empty()) return false;
@@ -143,14 +133,14 @@ void LaminaEngine::start() {
         if (got == 0) continue;
         if (got < 0) break;
         if (starts_with(line, "INFO ")) {
-            for (size_t i = 1; const auto& kv : fields(line)) {
+            for (size_t i = 1; const auto& kv : split_ws(line)) {
                 if (i++ == 1) continue;
                 const size_t eq = kv.find('=');
                 const std::string k = kv.substr(0, eq), v = eq == std::string::npos ? "" : kv.substr(eq + 1);
                 info[k] = digits(v, true) ? json(std::atoll(v.c_str())) : json(v);
             }
         } else if (starts_with(line, "READY")) {
-            const std::vector<std::string> f = fields(line);
+            const std::vector<std::string> f = split_ws(line);
             max_context_ = f.size() > 1 ? std::atoll(f[1].c_str()) : 0;
             can_stop = std::find(f.begin() + std::min<size_t>(2, f.size()), f.end(), "stop") != f.end();
             break;
@@ -327,7 +317,7 @@ EngineSilent LaminaEngine::silent(const std::string& what) {
 }
 
 bool LaminaEngine::note_line(const std::string& line) {
-    const std::vector<std::string> f = fields(line);
+    const std::vector<std::string> f = split_ws(line);
     if (f.empty()) return false;
     if (f[0] == "LP") {
         json scores = json::object();
@@ -354,7 +344,7 @@ bool LaminaEngine::note_line(const std::string& line) {
 }
 
 void LaminaEngine::parse_done(const std::string& line) {
-    const std::vector<std::string> f = fields(line);
+    const std::vector<std::string> f = split_ws(line);
     auto i = [&](size_t k) { return k < f.size() ? (int64_t) std::atoll(f[k].c_str()) : 0; };
     auto d = [&](size_t k) { return k < f.size() ? std::atof(f[k].c_str()) : 0.0; };
     json& fig = figures();
@@ -560,7 +550,7 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
                 return;
             }
         } else if (starts_with(l, "PP ")) {
-            const std::vector<std::string> f = fields(l);
+            const std::vector<std::string> f = split_ws(l);
             if (f.size() >= 3 && digits(f[1]) && digits(f[2])) {
                 progress = std::make_pair((int64_t) std::atoll(f[1].c_str()), (int64_t) std::atoll(f[2].c_str()));
                 progress_ms = f.size() >= 4 ? std::atof(f[3].c_str()) : 0.0;
@@ -576,7 +566,7 @@ void LaminaEngine::generate(const std::vector<int32_t>& ids, int64_t max_new, co
                 return;
             }
         } else if (starts_with(l, "RESUME ")) {   // the reused tokens: the first chunk starts after them
-            const std::vector<std::string> f = fields(l);
+            const std::vector<std::string> f = split_ws(l);
             if (f.size() > 1 && digits(f[1])) read_to = reused = std::atoll(f[1].c_str());
         } else if (note_line(l)) {
         } else if (starts_with(l, "DONE")) {

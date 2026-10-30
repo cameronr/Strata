@@ -24,22 +24,6 @@ void put(std::string& out, const T&... parts) {
     (out.append(parts), ...);
 }
 
-bool is_str(const json& v, std::string_view s) { return v.is_string() && v.get_ref<const std::string&>() == s; }
-
-/// f"{v}": str() of a value. A list or an object (which Service::metrics() never puts where a label or a value is
-/// read) prints as JSON, not as Python's repr
-std::string py_str(const json& v) {
-    switch (v.type()) {
-        case json::value_t::null: return "None";
-        case json::value_t::boolean: return v.get<bool>() ? "True" : "False";
-        case json::value_t::number_integer: return std::to_string(v.get<int64_t>());
-        case json::value_t::number_unsigned: return std::to_string(v.get<uint64_t>());
-        case json::value_t::number_float: return py_repr(v.get<double>());
-        case json::value_t::string: return v.get<std::string>();
-        default: return py_dumps(v);
-    }
-}
-
 /// round(v, nd) on a JSON number: an int stays itself
 json round_json(const json& v, int nd) { return v.is_number_float() ? json(py_round(v.get<double>(), nd)) : v; }
 
