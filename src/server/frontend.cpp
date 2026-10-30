@@ -284,11 +284,10 @@ json effort_kwargs(const json& value) {
     if (value.is_null() || (value.is_string() && value.get_ref<const std::string&>().empty())) return json::object();
     if (value.is_boolean() && !value.get<bool>()) return {{"enable_thinking", false}};
     // str(value).strip().lower(); the message shows repr(value)
-    const std::string text = value.is_string() ? value.get<std::string>() : value.is_boolean() ? "True" : py_dumps(value);
+    const std::string text = value.is_string() ? value.get<std::string>() : py_repr_value(value);
     const auto it = effort.find(lower(strip(text)));
     if (it == effort.end())
-        throw RequestError("unknown reasoning effort " + (value.is_string() ? "'" + text + "'" : text) +
-                           ": use none, low, medium or high");
+        throw RequestError("unknown reasoning effort " + py_repr_value(value) + ": use none, low, medium or high");
     if (it->second.empty()) return {{"enable_thinking", false}};
     return {{"reasoning_effort", it->second}};
 }
@@ -542,13 +541,15 @@ json env_to_user(json messages) {
     return messages;
 }
 
-/// the template takes a system message only at the start: later ones (Claude Code's hook context, a late
-/// "developer" message) become user messages in place
+}  // namespace
+
 json late_system_to_user(json messages) {
     for (size_t i = 1; i < messages.size(); ++i)
         if (jstr(messages[i], "role") == "system") messages[i]["role"] = "user";
     return messages;
 }
+
+namespace {
 
 /// #460: a request's "messages" (or a message's "tool_calls") as a list of objects; a JSON string of one is decoded
 json object_list(const json& value, const std::string& name) {

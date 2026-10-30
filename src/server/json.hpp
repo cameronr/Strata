@@ -20,6 +20,12 @@ std::string py_dumps(const json& v, bool ensure_ascii = true, bool compact = fal
 bool py_loads(std::string_view text, json& out, std::string* err = nullptr);
 /// a float as Python's repr writes it
 std::string py_repr(double v);
+/// round(x, n): correctly rounded, as Python rounds (0.125 -> 0.12)
+double py_round(double x, int n);
+/// format(v, "g"): six significant digits ("%g")
+std::string py_g(double v);
+/// repr() of the decoded value: None / True / False, quoted strings ('x', "it's"), dict and list reprs
+std::string py_repr_value(const json& v);
 
 /// dict.get: the member, or a null value (also when `o` is not an object)
 const json& jget(const json& o, std::string_view key);

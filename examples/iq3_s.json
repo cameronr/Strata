@@ -1,8 +1,5 @@
 {
-  "exe": "./build/lamina.exe",
   "args": [
-    "--pack",
-    "../Lamina-data/packs/iq3_s",
     "--native",
     "../Lamina-data/models/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
     "--expert-profile",
@@ -42,7 +39,6 @@
     "RTX 3090"
   ],
   "cwd": ".",
-  "tokenizer": "../Lamina-data/packs/iq3_s/tokenizer",
   "model_name": "qwen3.8-flash-next-iq3_s",
   "port": 8081,
   "sampling": {

@@ -1,8 +1,8 @@
 # Using Lamina
 
-The server, `serve/server.py`, keeps the engine running and serves the OpenAI and Anthropic APIs and a web app. The
-launchers setup writes start it with the model's config (`run-iq3_s.bat`, or from the clone's folder
-`.venv\Scripts\python.exe serve\server.py --config lamina-iq3_s.json`). It listens on the config's `port` (setup's
+The server, `lamina-server`, runs the engine in its own process and serves the OpenAI, Anthropic and Responses APIs
+and a web app. The launchers setup writes start it with the model's config (`run-iq3_s.bat`, or from the clone's
+folder `build\lamina-server.exe --config lamina-iq3_s.json`). It listens on the config's `port` (setup's
 defaults: 8081 for IQ3_S, 8082 for UD-Q4_K_XL, 8083 for Qwen3.6-35B-A3B; `--port` overrides it), on this PC only unless
 told otherwise ([below](#from-other-devices)). Ctrl+C in its window stops the engine, which saves its learned expert
 profile, and the server.
@@ -28,6 +28,7 @@ only the page itself can save them.
 | Everything the Monitor shows; Prometheus' format with vLLM's names on `Accept: text/plain` | `GET /metrics` |
 | Request totals in Prometheus' format under llama-server's names | `GET /metrics/prometheus` |
 | The MCP servers, their state and tools | `GET /mcp` |
+| The prompt a chat request is read as; a text's token ids and back (llama-server's fields) | `POST /apply-template`, `POST /tokenize`, `POST /detokenize` |
 | Image generation, when set up ([below](#image-generation)) | `POST /v1/images/generations` |
 | Unload the model now, or load it ahead of a request | `POST /unload`, `POST /load` |
 
@@ -252,12 +253,13 @@ On a PC that also games or runs another model server, these keys (also server op
 | `"lazy_load": true` | `--lazy` | start the API unloaded; the first request loads the model |
 
 `POST /unload` unloads it now (`?wait=1` waits for a running request first) and `POST /load` loads it, both with
-`Content-Type: application/json`. Unloading ends the engine and the image encoder, so their VRAM and RAM go back; the
-model files stay in the OS file cache, so loading again is quick while that RAM is not needed elsewhere.
+`Content-Type: application/json`. Unloading ends the engine and the image encoder, so their VRAM and RAM go back (the
+server keeps each GPU's CUDA context: about 200 MiB on the main GPU, less on the others); the model files stay in the
+OS file cache, so loading again is quick while that RAM is not needed elsewhere.
 
 **Behind [llama-swap](https://github.com/mostlygeek/llama-swap)**, which starts the server a request names and stops
 the others: run the server itself with llama-swap's port, so that stopping it stops the engine too
-(`cmd: sh -c 'cd /path/to/Lamina && exec .venv/bin/python serve/server.py --config lamina-iq3_s.json --port ${PORT}'`),
+(`cmd: sh -c 'cd /path/to/Lamina && exec build/lamina-server --config lamina-iq3_s.json --port ${PORT}'`),
 with `checkEndpoint: /health` (the server listens once the model has loaded) and a `healthCheckTimeout` of a few
 minutes. llama-swap passes the client's `Host` through: without an API key, add the name clients reach it by to
 `allowed_hosts` ([below](#from-other-devices)), or those requests get 403.
@@ -272,7 +274,7 @@ them (or `"replicas": [{"gpus": [0, 1]}, {"gpus": [2, 3]}]`). Each engine pins i
 The server listens on this PC only (`127.0.0.1`). `"host": "0.0.0.0"` in the config (or `--host`) opens it to the
 network, with an API key: `"api_key": "a-long-secret"` (or the `STRATA_API_KEY` variable; several keys
 comma-separated or as a list), which clients then send as their API key. The server window prints this PC's addresses;
-on Windows the firewall blocks them until Python is allowed on private networks. Through a tunnel or a proxy, set the
+on Windows the firewall blocks them until lamina-server is allowed on private networks. Through a tunnel or a proxy, set the
 key first, and add the address the page is reached at to `"trusted_origins"` for the web app's settings and MCP tools.
 
 - **Browsers (CORS)**: off by default; `"cors_origins": ["https://chat.example.com"]` lets those pages call `/v1/*`.

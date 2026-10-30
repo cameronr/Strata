@@ -84,6 +84,9 @@ struct Converted {
     json tools = nullptr;
     json kwargs = json::object();
 };
+/// the template takes a system message only at the start: later ones (Claude Code's hook context, a late
+/// "developer" message) become user messages in place
+json late_system_to_user(json messages);
 Converted openai_to_messages(const json& req);
 std::string pin_billing_stamp(std::string system);
 /// `think_unasked`: a request without "thinking", an effort or a budget gets the template's default (it thinks);
@@ -135,6 +138,8 @@ public:
     int rescued = 0;   ///< calls delivered from the reasoning
     int refused = 0;   ///< declared calls kept as reasoning text
     const std::string& state() const { return state_; }
+    const std::string& buf() const { return buf_; }      ///< text held back (a tag still arriving)
+    bool has_pending() const { return !pending_.empty(); }   ///< calls from the reasoning waiting to settle
 
 private:
     bool ok_at(size_t p);

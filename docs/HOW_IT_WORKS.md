@@ -141,11 +141,13 @@ it returns to the engine, which places them in the prompt with their positions i
 
 ## The server
 
-`serve/server.py` serves the OpenAI, Anthropic and Responses APIs and the web app. It renders the chat template and
-tokenizes with the model's own tokenizer, runs the engine as a child process (`lamina --serve`) that takes prompts as
-token ids on its stdin and writes tokens as each pass accepts them, and turns them back into text, reasoning and tool
-calls, streamed. Flash-Next runs one request at a time, the others wait; when the engine stops, the server starts it
-again.
+`lamina-server` serves the OpenAI, Anthropic and Responses APIs and the web app, which is built into it. It renders
+the model's chat template (from its GGUF, with llama.cpp's Jinja engine) and tokenizes with the model's tokenizer (from
+the GGUF too), and runs the engine on a thread of its own process: the engine takes prompts as token ids and writes
+tokens as each pass accepts them, through in-process channels that carry the line protocol `lamina --serve` speaks on
+stdin and stdout. The server turns the tokens back into text, reasoning and tool calls, streamed. Flash-Next runs one
+request at a time, the others wait; when the engine stops, the server starts it again. With replicas (opt-in) each
+engine is a `lamina --serve` child on its own GPUs.
 
 ## Exactness
 

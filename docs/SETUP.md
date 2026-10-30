@@ -34,10 +34,10 @@ Setup asks nothing, installs no system software (it names what is missing) and m
 result is already there is skipped, so setup runs again after an interruption or for another model:
 
 1. llama.cpp at the commit the engine is built against, into `third_party/llama.cpp`: ggml for the engine, mtmd for
-   the image encoder, gguf-py for the packs.
-2. The engine, `build/lamina` (`.exe`, with the CUDA runtime DLLs beside it), for this PC's GPUs, and the image encoder,
-   `build-vision/bin/lamina-vision`: llama.cpp's mtmd library with the model's projector, run on the CPU beside the
-   engine so the GPUs keep their VRAM for experts. The encoder is built for any AVX2 CPU: a native build on an AVX-512
+   the image encoder, gguf-py for the preparation tools.
+2. The server with the engine, `build/lamina-server` (`.exe`, with the CUDA runtime DLLs beside it; `build/lamina` is
+   the engine alone), for this PC's GPUs, and the image encoder, `build-vision/bin/lamina-vision`: llama.cpp's mtmd
+   library with the model's projector, run on the CPU beside the engine so the GPUs keep their VRAM for experts. The encoder is built for any AVX2 CPU: a native build on an AVX-512
    CPU loses flash attention and encodes about half as fast.
 3. The model's files from Hugging Face at pinned revisions, into the data folder, resumed when interrupted and checked
    once by size and SHA-256 (`<file>.sha256` beside each records the check):
@@ -45,13 +45,12 @@ result is already there is skipped, so setup runs again after an interruption or
    [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) and
    [unsloth/Qwen3.6-35B-A3B-MTP-GGUF](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF). `HF_ENDPOINT` names a
    mirror.
-4. Their preparation. For Flash-Next: the pack, `packs/<model>`, which `tools/iq_pack.py` makes from the GGUF files in
-   seconds (the tokenizer with the chat template, the model's float tensors in the forms the engine takes, and an index
-   of the rest: the engine reads the experts and most projections from the GGUF at start); the MTP draft layer,
-   `mtp/rt-distilled`, from
+4. Their preparation, for Flash-Next only: the MTP draft layer, `mtp/rt-distilled`, from
    [eddoursul/Lamina-Qwen3.8-Flash-Next-MTP](https://huggingface.co/eddoursul/Lamina-Qwen3.8-Flash-Next-MTP); with
    pictures, ISTA-DASLab's image projector converted to Q8_0 (`tools/mmproj_q8.py`), which the CPU encodes ~20% faster.
-   For Qwen3.6: its tokenizer, and with pictures the file's own projector.
+   Everything else comes from the GGUF files at start: the server reads the tokenizer and the chat template, the engine
+   the experts, the projections and the float tensors (put in the forms it takes in memory, in milliseconds).
+   Qwen3.6 with pictures uses the file's own projector.
 5. The config, `lamina-<model>.json`, and its launcher, `run-<model>.bat` (`run-<model>.sh` on Linux), from
    `examples/<model>.json` with this PC's GPUs and data folder. A config written before keeps the keys the example
    lacks (an `api_key`, an `images` section).
@@ -62,9 +61,9 @@ result is already there is skipped, so setup runs again after an interruption or
 
 | Key | |
 | --- | --- |
-| `exe`, `args` | the engine and its options (below and `build/lamina --help`) |
+| `args` | the engine's options (below and `build/lamina --help`) |
 | `cwd`, `lib_dirs` | the folder the engine runs in; on Linux, folders for the CUDA libraries (setup writes the toolkit's) |
-| `tokenizer`, `model_name` | the pack's tokenizer; the name the API lists |
+| `model_name` | the name the API lists |
 | `port`, `log` | the server's port; the engine's log file |
 | `sampling` | the defaults for requests that send no sampling fields ([USING.md](USING.md#sampling)) |
 | `vision` | the image encoder: its binary, the projector, the model, `threads` (the CPU's logical cores) |
@@ -125,7 +124,7 @@ keeping them.
 
 The engine runs Qwen3.6-35B-A3B (GGUF architecture `qwen35moe`) on a path of its own (`src/qwen35`): `lamina` switches
 to it from the model file's header, so its config names the file with `--native` like the others. It reads the GGUF as
-it is (no pack, no expert profile; the drafts come from the file's own MTP block, `--mtp N` of them), keeps every
+it is (no expert profile; the drafts come from the file's own MTP block, `--mtp N` of them), keeps every
 expert that fits in the main GPU's VRAM and computes the rest on the CPU. It uses one GPU.
 
 Its K and V are kept in fp32, ~45 KB a cell, so the context decides how many experts fit: on a 24 GB GPU every expert at

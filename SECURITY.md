@@ -9,7 +9,7 @@ involved, the commit) and what an attacker gains. Findings that are safe to disc
 
 ## What the server exposes
 
-The server (`serve/server.py`) serves the model over HTTP. Its settings: [USING.md](docs/USING.md#from-other-devices).
+The server (`lamina-server`) serves the model over HTTP. Its settings: [USING.md](docs/USING.md#from-other-devices).
 
 - **Where it listens.** `127.0.0.1` by default: this PC only. `"host": "0.0.0.0"` in the config (or `--host`) opens it
   to the network, and the server warns when no API key is set.

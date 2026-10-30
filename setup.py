@@ -10,13 +10,14 @@ environment (.venv) and run this file in it. It asks nothing: the flags say what
     setup.bat --check [--model M]         what this PC has and what the model needs; nothing is changed
 
 The steps:
-1. llama.cpp at the pinned commit, into third_party/llama.cpp: ggml for the engine, mtmd for pictures, and gguf-py for
-   the packs.
+1. llama.cpp at the pinned commit, into third_party/llama.cpp: ggml for the engine, mtmd for pictures, gguf-py for
+   the image projector's conversion, and the server's libraries (cpp-httplib, nlohmann/json, Jinja).
 2. lamina and lamina-vision, built with CMake, Ninja, the CUDA toolkit, and MSVC or GCC. Missing tools are named, not
    installed.
 3. The model's files from Hugging Face at pinned revisions. Downloads resume, and each file's size and SHA-256 are
    checked.
-4. Their preparation: the pack, the draft layer, the Q8_0 image projector, and Qwen3.6's tokenizer.
+4. Their preparation: for Flash-Next the draft layer and the Q8_0 image projector. The engine reads the rest from
+   the GGUF files.
 5. lamina-<model>.json and run-<model>.bat (or .sh) beside this file, from examples/<model>.json.
 A step whose result is already there is skipped. Files already in place are checked and kept: setup moves or deletes
 nothing.
@@ -107,16 +108,15 @@ DRAFT = [
 class Model:
     title: str
     files: list
-    flash_next: bool      # Qwen3.8-Flash-Next: a pack and the draft layer; else Qwen3.6's path (only its tokenizer)
-    pack_args: tuple
+    flash_next: bool      # Qwen3.8-Flash-Next: the draft layer too; else Qwen3.6's path
     port: int
     ram_gb: int           # the RAM it takes while running (its experts pinned)
 
 
 MODELS = {
-    "iq3_s": Model("Qwen3.8-Flash-Next IQ3_S", IQ3_S, True, (), 8081, 53),
-    "ud-q4_k_xl": Model("Qwen3.8-Flash-Next UD-Q4_K_XL", UD_Q4_K_XL, True, ("--compat-bf16",), 8082, 81),
-    "qwen36-ud-q4_k_xl": Model("Qwen3.6-35B-A3B UD-Q4_K_XL", QWEN36, False, (), 8083, 22),
+    "iq3_s": Model("Qwen3.8-Flash-Next IQ3_S", IQ3_S, True, 8081, 53),
+    "ud-q4_k_xl": Model("Qwen3.8-Flash-Next UD-Q4_K_XL", UD_Q4_K_XL, True, 8082, 81),
+    "qwen36-ud-q4_k_xl": Model("Qwen3.6-35B-A3B UD-Q4_K_XL", QWEN36, False, 8083, 22),
 }
 
 
@@ -404,7 +404,7 @@ def cmake_build(tc: Toolchain, src: Path, b: Path, target: str, defs: list, env:
     # tried once more: CUDA 13.0's ptxas now and then fails to read a PTX file it just wrote, and the same command then
     # gets past it (upstream #45).
     jobs = os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or str(max(2, (os.cpu_count() or 4) // 2))
-    build = [tc.cmake, "--build", b, "--target", target, "-j", jobs]
+    build = [tc.cmake, "--build", b, "--target", *target.split(), "-j", jobs]
     say("  $ " + " ".join(map(str, build)))
     if subprocess.run([str(c) for c in build], env=env).returncode != 0:
         say("  (the build stopped: trying it once more)")
@@ -413,13 +413,13 @@ def cmake_build(tc: Toolchain, src: Path, b: Path, target: str, defs: list, env:
 
 def build_engine(tc: Toolchain, archs: str, portable: bool, env: dict):
     b = ROOT / "build"
-    cmake_build(tc, ROOT, b, "lamina", ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
+    cmake_build(tc, ROOT, b, "lamina lamina-server", ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF",
                                          f"-DCMAKE_CUDA_ARCHITECTURES={archs}", f"-DSTRATA_GGML_DIR={LLAMA.as_posix()}",
                                          f"-DSTRATA_PORTABLE={'ON' if portable else 'OFF'}", *cuda_defs(tc.nvcc)], env)
     if WIN:   # the CUDA runtime beside the engine
         for dll in cuda_dlls(tc.nvcc):
             shutil.copy2(dll, b / dll.name)
-    ok(f"the engine: build/lamina{EXE} (CUDA architectures {archs})")
+    ok(f"the engine and the server: build/lamina{EXE}, build/lamina-server{EXE} (CUDA architectures {archs})")
 
 
 def cuda_dlls(nvcc: str) -> list:
@@ -558,12 +558,10 @@ def tool(name: str, *args):
 
 
 def prepare(key: str, m: Model, data: Path, vision: bool):
-    pack = data / "packs" / key
+    """What the GGUF files do not hold: Flash-Next's draft layer and, with pictures, the image projector (Flash-Next's
+    in Q8_0). The engine computes its float tensors' forms from the GGUF at load, and the server reads the tokenizer
+    and the chat template from it."""
     if m.flash_next:
-        if (pack / "native_experts.txt").exists():          # iq_pack.py writes it last
-            ok(f"the pack: {pack}")
-        else:
-            tool("iq_pack.py", "--gguf", data / m.files[0].dest, "--out", pack, *m.pack_args)
         for f in DRAFT:
             fetch(f, data)
         if vision:
@@ -572,13 +570,8 @@ def prepare(key: str, m: Model, data: Path, vision: bool):
                 ok(f"the image projector: {data / FLASH_MMPROJ_Q8}")
             else:
                 tool("mmproj_q8.py", data / FLASH_MMPROJ.dest, data / FLASH_MMPROJ_Q8)
-    else:
-        if (pack / "tokenizer" / "chat_template.jinja").exists():   # strata_tokenizer.py writes it last
-            ok(f"the tokenizer: {pack / 'tokenizer'}")
-        else:
-            tool("strata_tokenizer.py", "--gguf", data / m.files[0].dest, "--out", pack)
-        if vision:
-            fetch(QWEN36_MMPROJ, data)
+    elif vision:
+        fetch(QWEN36_MMPROJ, data)
 
 
 # ---- the config and the launcher
@@ -618,9 +611,8 @@ def write_config(key: str, data: Path, main_gpu: str, port: int, vision: bool, c
         args = [a for a in args if a != "--vision"]
         cfg.pop("vision", None)
     cfg["args"] = args
-    for k in ("exe", "tokenizer", "log"):
-        if k in cfg:
-            cfg[k] = fix(cfg[k])
+    if "log" in cfg:
+        cfg["log"] = fix(cfg["log"])
     if "expert_profile_save" in cfg:                    # what the runs learn, kept with the model's data
         cfg["expert_profile_save"] = f"{ref}/{key}-learned.bin"
     cfg["port"] = port
@@ -632,22 +624,16 @@ def write_config(key: str, data: Path, main_gpu: str, port: int, vision: bool, c
 
 
 def write_launcher(key: str, m: Model, cfg: Path, port: int) -> Path:
-    venv = Path(sys.prefix).resolve() == (ROOT / ".venv").resolve()
     if WIN:
-        py = r".venv\Scripts\python.exe" if venv else sys.executable
         p = ROOT / f"run-{key}.bat"
         lines = ["@echo off", f"title Lamina {m.title}",
                  f"rem {m.title} on http://127.0.0.1:{port}/v1 ({cfg.name}, written by setup.py).",
-                 "rem A PYTHONPATH set for another Python would mix that Python's packages into this one's.",
-                 'set "PYTHONPATH="', 'cd /d "%~dp0"', f'"{py}" serve\\server.py --config {cfg.name} %*',
-                 "pause"]
+                 'cd /d "%~dp0"', f'build\\lamina-server.exe --config {cfg.name} %*', "pause"]
         p.write_bytes(("\r\n".join(lines) + "\r\n").encode())
     else:
-        py = ".venv/bin/python" if venv else sys.executable
         p = ROOT / f"run-{key}.sh"
         lines = ["#!/bin/sh", f"# {m.title} on http://127.0.0.1:{port}/v1 ({cfg.name}, written by setup.py).",
-                 'cd "$(dirname "$0")" || exit 1', "unset PYTHONPATH",
-                 f'exec "{py}" serve/server.py --config {cfg.name} "$@"']
+                 'cd "$(dirname "$0")" || exit 1', f'exec build/lamina-server --config {cfg.name} "$@"']
         p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
         p.chmod(0o755)
     return p
@@ -660,7 +646,7 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", choices=list(MODELS), help="the model to prepare (without it: the engine only)")
     ap.add_argument("--data-dir", default=str(ROOT.parent / "Lamina-data"),
-                    help="the models, packs and draft layer (default: Lamina-data beside this checkout)")
+                    help="the models, the draft layer and the image projector (default: Lamina-data beside this checkout)")
     ap.add_argument("--vision", choices=("on", "off"), default="on", help="pictures (the encoder runs on the CPU)")
     ap.add_argument("--main-gpu", help="the GPU the model runs on: its name, UUID or nvidia-smi index (default: the one "
                                        "with the most VRAM that drives no display)")
@@ -716,7 +702,7 @@ def main() -> int:
             warn(f"it takes ~{m.ram_gb} GB of RAM while running, and this PC has {ram_gb():.0f} GB")
         if free_gb(data) < missing / 1e9 + 5:
             warn("the data folder's drive is short of room for the downloads")
-    build = not (a.no_build and (ROOT / "build" / f"lamina{EXE}").exists())
+    build = not (a.no_build and (ROOT / "build" / f"lamina-server{EXE}").exists())
     archs = a.cuda_archs or cuda_archs(usable)
     problems = tc.problems() if build else []
     if problems:

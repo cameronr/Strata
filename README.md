@@ -82,8 +82,8 @@ How to connect clients, the config's keys, images, image generation, MCP tools a
 
 Lamina is under the MIT license ([LICENSE](LICENSE)), as Strata is. Some parts carry their own: `third_party/ggml`
 (MIT, llama.cpp's), the web app's font, [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL Open Font License 1.1,
-`serve/web/fonts/OFL.txt`), and the vector in `data/experimental-speed-projection` (Qwen Community License 1.0). It
-builds on:
+`src/server/web/fonts/OFL.txt`), and what lamina-server takes from llama.cpp's checkout (its Jinja engine,
+cpp-httplib, nlohmann/json, stb_image: MIT). It builds on:
 
 - [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors: the engine Lamina grew from, with ideas
   Strata took from [Splash](https://github.com/incoai/splash), [ninfer](https://github.com/Neroued/ninfer) and

@@ -2,6 +2,7 @@
 
 #include "jinja/value.h"   // py_float_repr
 
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -108,17 +109,148 @@ std::string py_dumps(const json& v, bool ensure_ascii, bool compact, int indent)
     return out;
 }
 
+namespace {
+
+/// Python's json.loads stops at its recursion limit (about 1000 levels).  nlohmann copies and dumps a value
+/// recursively: a value nested deeper than any real one could use up a request thread's stack.
+constexpr int kMaxDepth = 1000;
+
+/// the first bracket past kMaxDepth levels ('[' or '{'), or 0
+char too_deep(std::string_view text) {
+    int depth = 0;
+    bool in_str = false, esc = false;
+    for (const char c : text) {
+        if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') in_str = false;
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '[' || c == '{') {
+            if (++depth > kMaxDepth) return c;
+        } else if (c == ']' || c == '}') {
+            --depth;
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
 bool py_loads(std::string_view text, json& out, std::string* err) {
+    if (const char c = too_deep(text)) {
+        if (err != nullptr)
+            *err = std::string("maximum recursion depth exceeded while decoding a JSON ") +
+                   (c == '[' ? "array" : "object") + " from a unicode string";
+        return false;
+    }
     try {
         out = json::parse(text.begin(), text.end());
         return true;
     } catch (const std::exception& e) {
-        if (err != nullptr) *err = e.what();
+        if (err != nullptr) {   // "[json.exception.parse_error.101] parse error at line 1, column 3: ..." without its tag
+            *err = e.what();
+            const size_t tag = err->find("] ");
+            if (starts_with(*err, "[json.exception.") && tag != std::string::npos) err->erase(0, tag + 2);
+        }
         return false;
     }
 }
 
 std::string py_repr(double v) { return jinja::py_float_repr(v); }
+
+double py_round(double x, int n) {
+    if (!std::isfinite(x)) return x;
+    char buf[400];
+    const auto r = std::to_chars(buf, buf + sizeof buf, x, std::chars_format::fixed, n);
+    double out = x;
+    if (r.ec == std::errc()) std::from_chars(buf, r.ptr, out);
+    return out;
+}
+
+std::string py_g(double v) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%g", v);
+    return buf;
+}
+
+namespace {
+
+/// str.isprintable's false (the categories Cc, Cf, Zl, Zp and Zs but the space), for the code points that reach a repr
+bool py_unprintable(uint32_t cp) {
+    return cp < 0x20 || (cp >= 0x7f && cp <= 0xa0) || cp == 0xad || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200f) ||
+           (cp >= 0x2028 && cp <= 0x202f) || (cp >= 0x205f && cp <= 0x2064) || cp == 0x3000 || cp == 0xfeff ||
+           (cp >= 0xd800 && cp <= 0xdfff);
+}
+
+void repr_str(const std::string& s, std::string& out) {
+    const bool dq = s.find('\'') != std::string::npos && s.find('"') == std::string::npos;
+    const char q = dq ? '"' : '\'';
+    out += q;
+    for (size_t i = 0; i < s.size();) {
+        size_t n = 1;
+        const uint32_t cp = utf8_at(s, i, &n);
+        char buf[16];
+        if (cp == '\\') out += "\\\\";
+        else if (cp == (uint32_t) q) (out += '\\') += q;
+        else if (cp == '\n') out += "\\n";
+        else if (cp == '\r') out += "\\r";
+        else if (cp == '\t') out += "\\t";
+        else if (py_unprintable(cp)) {
+            if (cp < 0x100) std::snprintf(buf, sizeof buf, "\\x%02x", cp);
+            else std::snprintf(buf, sizeof buf, "\\u%04x", cp);
+            out += buf;
+        } else {
+            out.append(s, i, n);
+        }
+        i += n;
+    }
+    out += q;
+}
+
+void repr_value(const json& v, std::string& out) {
+    switch (v.type()) {
+        case json::value_t::null: out += "None"; break;
+        case json::value_t::boolean: out += v.get<bool>() ? "True" : "False"; break;
+        case json::value_t::number_integer: out += std::to_string(v.get<int64_t>()); break;
+        case json::value_t::number_unsigned: out += std::to_string(v.get<uint64_t>()); break;
+        case json::value_t::number_float: out += py_repr(v.get<double>()); break;
+        case json::value_t::string: repr_str(v.get_ref<const std::string&>(), out); break;
+        case json::value_t::array: {
+            out += '[';
+            bool first = true;
+            for (const auto& x : v) {
+                if (!first) out += ", ";
+                first = false;
+                repr_value(x, out);
+            }
+            out += ']';
+            break;
+        }
+        case json::value_t::object: {
+            out += '{';
+            bool first = true;
+            for (auto it = v.begin(); it != v.end(); ++it) {
+                if (!first) out += ", ";
+                first = false;
+                repr_str(it.key(), out);
+                out += ": ";
+                repr_value(it.value(), out);
+            }
+            out += '}';
+            break;
+        }
+        default: out += "None"; break;
+    }
+}
+
+}  // namespace
+
+std::string py_repr_value(const json& v) {
+    std::string out;
+    repr_value(v, out);
+    return out;
+}
 
 const json& jget(const json& o, std::string_view key) {
     static const json null_value;

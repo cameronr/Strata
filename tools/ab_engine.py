@@ -1,9 +1,10 @@
 """A/B two engine builds or environments on one config: restart the server per arm, alternate arms over rounds.
 
-    python tools/ab_engine.py strata-q2_0.json A:exe=/path/a B:exe=/path/b,STRATA_EXP_MODE=0 [--rounds 3]
+    python tools/ab_engine.py lamina-iq3_s.json A:exe=/path/a B:exe=/path/b,STRATA_HC_Q8=2 [--rounds 3]
 
-An arm is NAME:key=value,...; `exe` replaces the config's engine, `xargs` appends ';'-separated engine arguments,
-every other key is set in the engine's environment.  Each round starts the server once per arm (the arms' order alternates), warms it up with one short
+An arm is NAME:key=value,...; `exe` is the server to run (lamina-server, the engine in it; default build/'s), `xargs`
+appends ';'-separated engine arguments, every other key is set in the server's environment (the engine reads it).
+Each round starts the server once per arm (the arms' order alternates), warms it up with one short
 answer, then sends the same requests: greedy, fixed prompts, a short chat set and one long prompt.  Prints the
 server's own timings (llama.cpp's `timings`: decode and prompt tokens per second) per request and the per-arm
 medians.  Decode numbers move run to run (the adaptive expert tier, the OS), so compare medians over rounds.
@@ -88,8 +89,7 @@ def main() -> int:
         for name, env in order:
             cfg = dict(base)
             e = dict(env)
-            if "exe" in e:
-                cfg["exe"] = e.pop("exe")
+            server = e.pop("exe", None) or str(ROOT / "build" / ("lamina-server.exe" if os.name == "nt" else "lamina-server"))
             if "xargs" in e:                       # extra engine arguments, ';'-separated
                 cfg["args"] = list(base["args"]) + e.pop("xargs").split(";")
             cfg["port"] = a.port
@@ -97,8 +97,7 @@ def main() -> int:
             cpath = Path(tempfile.gettempdir()) / f"ab_{name}.json"
             cpath.write_text(json.dumps(cfg, indent=1))
             penv = dict(os.environ, **e)
-            proc = subprocess.Popen([sys.executable, str(ROOT / "serve" / "server.py"), "--config",
-                                     str(cpath), "--port", str(a.port)], cwd=str(ROOT), env=penv,
+            proc = subprocess.Popen([server, "--config", str(cpath), "--port", str(a.port)], cwd=str(ROOT), env=penv,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 t0 = time.time()

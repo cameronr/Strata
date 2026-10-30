@@ -1,6 +1,6 @@
 """Decoding streams while long cold prompts join: how smooth the streams stay, and what the joining prompt pays.
 
-Runs against a running `serve/server.py` (OpenAI API). N streams decode long greedy answers (thinking off); after a
+Runs against a running lamina-server (OpenAI API). N streams decode long greedy answers (thinking off); after a
 delay one or two long cold prompts join. Every streamed token's arrival is timed on the client. Reported per scenario:
 
   joiner_ttft_s            the joining prompt's time to first token
@@ -50,7 +50,7 @@ _FILES = []
 def corpus(chars, offset):
     """About `chars` characters of this repository's own files, from the `offset`-th file on (at most 60,000 each)."""
     if not _FILES:
-        for sub, pat in (("src", "*.cpp"), ("src", "*.cu"), ("include", "*.hpp"), ("serve", "*.py"), ("tools", "*.py"),
+        for sub, pat in (("src", "*.cpp"), ("src", "*.cu"), ("include", "*.hpp"), ("tools", "*.py"),
                          ("docs", "*.md")):
             _FILES.extend(sorted((ROOT / sub).rglob(pat)))
     parts, n, i = [], 0, offset

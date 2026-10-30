@@ -58,6 +58,7 @@ add_subdirectory(${LLAMA_DIR} llama EXCLUDE_FROM_ALL)
 add_executable(lamina-vision strata_vision.cpp)
 target_link_libraries(lamina-vision PRIVATE mtmd llama)
 target_compile_features(lamina-vision PRIVATE cxx_std_17)
+install(TARGETS lamina-vision RUNTIME DESTINATION bin COMPONENT lamina)
 set_target_properties(lamina-vision PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 if(UNIX AND NOT APPLE)
   # the libraries it needs are the ones in its own folder (a component folder is relocatable): RUNPATH $ORIGIN

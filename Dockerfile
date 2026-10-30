@@ -17,7 +17,7 @@ ARG CUDA_VERSION=13.0.0
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates python3 python3-venv \
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates libssl-dev python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/lamina
 COPY . .
@@ -29,12 +29,12 @@ RUN python3 -m venv .venv && \
 
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 NVIDIA_DRIVER_CAPABILITIES=compute,utility
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 python3 python3-venv tini \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 libssl3 python3 python3-venv tini \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/lamina
 COPY . .
 RUN python3 -m venv .venv && .venv/bin/pip install --no-cache-dir -r requirements.txt
-COPY --from=build /opt/lamina/build/lamina build/
+COPY --from=build /opt/lamina/build/lamina /opt/lamina/build/lamina-server build/
 COPY --from=build /opt/lamina/build-vision/bin/lamina-vision build-vision/bin/
 COPY --from=build /opt/lamina/third_party/llama.cpp/gguf-py third_party/llama.cpp/gguf-py/
 COPY --from=build /opt/lamina/third_party/llama.cpp/.lamina-commit third_party/llama.cpp/

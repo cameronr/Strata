@@ -472,6 +472,10 @@ if(STRATA_NATIVE_EXPERTS)
     set(_strata_llama_root ${strata_llamacpp_SOURCE_DIR})
   endif()
   set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
+  # lamina-server's outgoing HTTPS: WinHTTP on Windows (no OpenSSL DLLs beside it), OpenSSL through cpp-httplib elsewhere
+  if(WIN32)
+    set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
+  endif()
   foreach(_o LLAMA_BUILD_TESTS LLAMA_BUILD_TOOLS LLAMA_BUILD_EXAMPLES LLAMA_BUILD_SERVER LLAMA_BUILD_APP
              LLAMA_ALL_WARNINGS LLAMA_TOOLS_INSTALL LLAMA_TESTS_INSTALL)
     set(${_o} OFF CACHE BOOL "" FORCE)
@@ -663,4 +667,40 @@ if(TARGET cpp-httplib AND TARGET ggml-base)
   target_link_libraries(lamina_text PUBLIC lamina_jinja lamina_unicode nlohmann ggml-base strata_warnings)
   add_executable(lamina-check src/server/check.cpp)
   target_link_libraries(lamina-check PRIVATE lamina_text)
+  if(TARGET strata_program)
+    # the web app inside the binary (cmake/embed_web.cmake)
+    file(GLOB_RECURSE _lamina_web CONFIGURE_DEPENDS src/server/web/*)
+    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp
+      COMMAND ${CMAKE_COMMAND} -DWEB_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src/server/web
+              -DOUT=${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_web.cmake
+      DEPENDS ${_lamina_web} cmake/embed_web.cmake
+      COMMENT "Embedding the web app")
+    add_library(lamina_server_core STATIC src/server/api.cpp src/server/config.cpp src/server/engine.cpp
+                src/server/engine_batch.cpp src/server/http_client.cpp src/server/http_server.cpp src/server/images.cpp
+                src/server/keepawake.cpp src/server/mcp.cpp src/server/net.cpp src/server/process.cpp
+                src/server/prometheus.cpp src/server/replicas.cpp src/server/responses.cpp src/server/runconfig.cpp
+                src/server/service.cpp src/server/service_run.cpp src/server/structured.cpp src/server/telemetry.cpp
+                src/server/vision.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_assets.cpp)
+    target_include_directories(lamina_server_core PUBLIC src/server ${_strata_llama_root}/vendor
+                               ${_strata_llama_root}/vendor/cpp-httplib)
+    target_link_libraries(lamina_server_core PUBLIC lamina_text cpp-httplib vendor-hash strata_program strata_warnings)
+    if(WIN32)
+      target_link_libraries(lamina_server_core PUBLIC winhttp ws2_32 ole32 windowscodecs shell32)
+    else()
+      find_package(Threads REQUIRED)
+      target_link_libraries(lamina_server_core PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+    endif()
+    add_executable(lamina-server src/server/main.cpp)
+    target_link_libraries(lamina-server PRIVATE lamina_server_core)
+    # cmake --install <build> --component lamina --prefix <dir>: the programs in <dir>/bin, on Windows with the CUDA
+    # runtime beside them (lamina-vision installs from tools/vision's own build; the component leaves out the install
+    # rules of llama.cpp's libraries)
+    install(TARGETS lamina lamina-server RUNTIME DESTINATION bin COMPONENT lamina)
+    if(WIN32)
+      file(GLOB _lamina_cuda_dlls "${CUDAToolkit_BIN_DIR}/cudart64_*.dll" "${CUDAToolkit_BIN_DIR}/cublas64_*.dll"
+           "${CUDAToolkit_BIN_DIR}/cublasLt64_*.dll" "${CUDAToolkit_BIN_DIR}/x64/cudart64_*.dll"
+           "${CUDAToolkit_BIN_DIR}/x64/cublas64_*.dll" "${CUDAToolkit_BIN_DIR}/x64/cublasLt64_*.dll")
+      install(FILES ${_lamina_cuda_dlls} DESTINATION bin COMPONENT lamina)
+    endif()
+  endif()
 endif()

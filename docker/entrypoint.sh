@@ -1,6 +1,6 @@
 #!/bin/sh
 # The Lamina container's start (Dockerfile): setup.py --no-build prepares MODEL in /data (the downloads and the pack
-# once; later starts check them), then the server serves it on port 8080 to other machines, with API_KEY.
+# once; later starts check them), then lamina-server serves it on port 8080 to other machines, with API_KEY.
 set -eu
 cd /opt/lamina
 if [ -z "${MODEL:-}" ]; then
@@ -18,4 +18,4 @@ set -- --no-build --model "$MODEL" --data-dir /data --vision "${VISION:-on}"
 # the key reaches the server through its environment, not its command line
 STRATA_API_KEY="$API_KEY"
 export STRATA_API_KEY
-exec .venv/bin/python serve/server.py --config "lamina-$MODEL.json" --host 0.0.0.0 --port 8080
+exec build/lamina-server --config "lamina-$MODEL.json" --host 0.0.0.0 --port 8080

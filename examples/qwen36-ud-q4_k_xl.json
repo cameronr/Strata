@@ -1,5 +1,4 @@
 {
-  "exe": "./build/lamina.exe",
   "args": [
     "--native",
     "../Lamina-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
@@ -14,7 +13,6 @@
     "--vision"
   ],
   "cwd": ".",
-  "tokenizer": "../Lamina-data/packs/qwen36-ud-q4_k_xl/tokenizer",
   "model_name": "qwen3.6-35b-a3b-ud-q4_k_xl",
   "port": 8083,
   "sampling": {
