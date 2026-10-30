@@ -128,3 +128,25 @@ Sweep (medians, 2 rounds, 2026-10-30): solo 126.5 / batch 120.2 chat tok/s
 +20-30% the plan hoped for: 2 slots x 5 rows fit the window even before this
 phase (the trim only bit at 3+ slots), and at 4 slots the draft depth, not the
 window, is the binding constraint. The window itself costs nothing on solo.
+
+## As built (2026-10-30, 48ddce97c) - the 16-row window regressed 4x; default capped at 8
+
+A user-reported 4x regression confirmed against the pre-p10 baseline: old 4x
+medians 101.8/104.3/96.8/107.2/105.9 vs 93.7-97.6 after this phase. A
+same-binary alternating A/B pinned the cause on the window itself:
+`STRATA_BATCH_WINDOW=8` -> 104.7/105.5, `=16` -> 98.0/97.4. 2x stayed flat
+(88.1 vs 88.3), which is why the sweep's two-round medians missed it.
+
+This refines the "draft depth binds" note above. At 4 slots the 16-row window
+is not free: windows over 8 columns lose the interleaved q8_1 fast path (this
+phase routed `ncols > 8` to `native_mmvq`), and the extra verification rows
+outweigh the deeper drafts they let the scheduler batch. The draft depth still
+binds the 2x upside; it just no longer explains 4x.
+
+Shipped: the `batch_step` trim defaults to an 8-row window. The
+`STRATA_BATCH_WINDOW` env knob raises it, capped at `kVerifyMaxT`. Raising the
+default again needs a
+>8-column interleaved fast path or drafts cheap enough that the wide-window
+verification pays; until then 16 stays an experiment knob, not the default.
+Post-cap sanity (default build, no env, 2 rounds): 4x median 104.6 tok/s
+(98.3-106.2), back on the pre-p10 distribution.
