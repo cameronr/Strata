@@ -1,16 +1,12 @@
-// src/core/pinned.cu - P2.S1: the pinned host arena and the parallel expert load.
+// src/core/pinned.cu - P2.S1: the pinned host arena.
 #include "strata/core/pinned.hpp"
 #include "strata/platform/memory.hpp"
 
 #include <cuda_runtime.h>
 
-#include <atomic>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <mutex>
-#include <thread>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -75,15 +71,6 @@ void release(void* p, uint64_t bytes) {
 }
 
 }  // namespace
-
-uint64_t fnv1a64(const uint8_t* p, uint64_t n, uint64_t seed) {
-    uint64_t h = seed;
-    for (uint64_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 1099511628211ull;
-    }
-    return h;
-}
 
 namespace {
 bool clear_error() { (void) cudaGetLastError(); return true; }
@@ -182,87 +169,5 @@ PinnedArena::~PinnedArena() {
         base = nullptr;
     }
 }
-
-LoadStats load_experts(const std::string& path, uint8_t* dst, uint64_t blob_bytes, uint64_t blobs_per_layer,
-                       uint64_t layers, int threads, uint64_t chunk) {
-    std::vector<uint64_t> off((size_t) layers), n((size_t) layers, blobs_per_layer * blob_bytes);
-    for (uint64_t L = 0; L < layers; ++L) off[(size_t) L] = L * blobs_per_layer * blob_bytes;
-    return load_experts_ranges(path, dst, off, n, threads, chunk);
-}
-
-LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::vector<uint64_t>& layer_off,
-                              const std::vector<uint64_t>& layer_bytes, int threads, uint64_t chunk) {
-    std::vector<uint8_t*> layer_dst;
-    for (uint64_t off : layer_off) layer_dst.push_back(dst + off);
-    return load_experts_ranges(path, layer_dst, layer_off, layer_bytes, threads, chunk);
-}
-
-LoadStats load_experts_ranges(const std::string& path, const std::vector<uint8_t*>& layer_dst,
-                              const std::vector<uint64_t>& layer_off, const std::vector<uint64_t>& layer_bytes, int threads,
-                              uint64_t chunk, const std::function<void(uint64_t)>& done) {
-    LoadStats st;
-    const uint64_t layers = (uint64_t) layer_off.size();
-    st.layers = layers;
-    st.bytes = 0;
-    for (uint64_t b : layer_bytes) st.bytes += b;
-    if (threads < 1) threads = 1;
-
-    const auto t0 = std::chrono::steady_clock::now();
-    std::vector<uint64_t> layer_hash((size_t) layers, 1469598103934665603ull);
-    std::atomic<uint64_t> next_layer{0};
-    std::mutex err_mu;
-    std::string err;
-
-    auto worker = [&]() {
-        std::vector<uint8_t> buf((size_t) chunk);
-        for (;;) {
-            const uint64_t L = next_layer.fetch_add(1);
-            if (L >= layers) break;
-            const uint64_t off = layer_off[(size_t) L];
-            uint64_t remaining = layer_bytes[(size_t) L];
-            uint64_t pos = 0;
-            uint64_t h = 1469598103934665603ull;
-            // one handle per thread, seeked once per layer: a shared handle would need a lock around the seek
-            // and would serialise the very thing the threads are here to parallelise
-            std::ifstream f(path, std::ios::binary);
-            if (!f) {
-                std::lock_guard<std::mutex> g(err_mu);
-                err = "cannot open " + path;
-                return;
-            }
-            f.seekg((std::streamoff) off);
-            while (remaining > 0) {
-                const uint64_t n = remaining < chunk ? remaining : chunk;
-                f.read((char*) buf.data(), (std::streamsize) n);
-                if ((uint64_t) f.gcount() != n) {
-                    std::lock_guard<std::mutex> g(err_mu);
-                    err = "short read in layer " + std::to_string(L);
-                    return;
-                }
-                std::memcpy(layer_dst[(size_t) L] + pos, buf.data(), (size_t) n);
-                h = fnv1a64(buf.data(), n, h);
-                pos += n;
-                remaining -= n;
-            }
-            layer_hash[(size_t) L] = h;
-            if (done) done(L);
-        }
-    };
-
-    std::vector<std::thread> pool;
-    for (int i = 1; i < threads; ++i) pool.emplace_back(worker);
-    worker();
-    for (auto& t : pool) t.join();
-
-    if (!err.empty()) {
-        std::fprintf(stderr, "load_experts: %s\n", err.c_str());
-        st.seconds = -1.0;
-        return st;
-    }
-    st.layer_checksums = std::move(layer_hash);
-    st.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    return st;
-}
-
 
 }  // namespace strata::core

@@ -12,7 +12,6 @@
 #else
 #include <cpuid.h>
 #endif
-#include <fstream>
 #include <sstream>
 
 namespace strata::kernels::cpu {
@@ -299,7 +298,7 @@ void act_quant_any(const float* x, int n, ActQ& a) {
 }
 
 #if !defined(STRATA_NATIVE_EXPERTS)
-// Without ggml-cpu no native pack loads (expert_layout_load refuses), so these are never reached.
+// Without ggml-cpu no native pack loads (expert_layout_load_text refuses), so these are never reached.
 bool native_experts_available() noexcept { return false; }
 bool native_fmt(int, int, int64_t, int64_t, NativeFmt&, std::string& err) { err = "built without native experts"; return false; }
 void native_quant_act(const NativeFmt&, const float*, void*) { std::abort(); }
@@ -336,8 +335,7 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
                     L.version = std::atoi(line.c_str() + sizeof tag - 1);
                     if (L.version > kExpertLayoutVersion) {
                         err = "native_experts.txt is v" + std::to_string(L.version) + "; this engine reads up to v" +
-                              std::to_string(kExpertLayoutVersion) + " (the pack was written by a newer tools/"
-                              "iq_pack.py: update the engine, or repack with this one)";
+                              std::to_string(kExpertLayoutVersion);
                         return false;
                     }
                 }
@@ -351,7 +349,7 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
         }
         std::istringstream ss(line);
         long long l = -1, gt = -1, dt = -1;
-        unsigned long long off = 0, blob = 0, go = 0, uo = 0, dox = 0;
+        unsigned long long off = 0, blob = 0;
         if (!(ss >> l >> gt >> dt >> off >> blob) || l < 0 || l >= n_layers) {
             err = "native_experts.txt: a malformed line: " + line;
             return false;
@@ -362,38 +360,6 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
             err = "native_experts.txt: layer " + std::to_string(l) + " blob is " + std::to_string(blob) +
                   " B but its formats make " + std::to_string(f.bytes);
             return false;
-        }
-        if (ss >> go >> uo >> dox) {   // v2 lines: the GGUF offsets
-            if (L.gguf_off.empty()) L.gguf_off.assign((size_t) (3 * n_layers), 0);
-            L.gguf_off[(size_t) (3 * l)] = go;
-            L.gguf_off[(size_t) (3 * l + 1)] = uo;
-            L.gguf_off[(size_t) (3 * l + 2)] = dox;
-            std::string file;             // v3: the shard that holds this layer (a file name beside --native)
-            if (ss >> file) {
-                if (L.gguf_file.empty()) L.gguf_file.assign((size_t) (3 * n_layers), std::string());
-                // One name covers all three roles.  When a shard boundary falls inside a layer the packer writes
-                // "gate,up,down" instead (v4), an empty field meaning the --native shard.  A GGUF file name has no
-                // comma, so the split is unambiguous; an engine older than v4 fails to open such a "file" loudly.
-                // The comma form is from #255 (gopinath87607).
-                std::vector<std::string> parts;
-                for (size_t from = 0;;) {
-                    const size_t comma = file.find(',', from);
-                    parts.push_back(file.substr(from, comma == std::string::npos ? comma : comma - from));
-                    if (comma == std::string::npos) break;
-                    from = comma + 1;
-                }
-                if (parts.size() == 1) {
-                    const std::string one = parts[0];   // not parts.assign(3, parts[0]): that aliases the element
-                    parts.assign(3, one);                //   the assignment is about to overwrite
-                }
-                std::string extra;
-                if (parts.size() != 3 || (ss >> extra)) {
-                    err = "native_experts.txt: layer " + std::to_string(l) + ": the shard column is one name or "
-                          "gate,up,down, not: " + line;
-                    return false;
-                }
-                for (size_t r = 0; r < 3; ++r) L.gguf_file[(size_t) (3 * l) + r] = parts[r];
-            }
         }
         L.fmt[(size_t) l] = f;
         L.offset[(size_t) l] = off;
@@ -414,19 +380,6 @@ bool native_layout_load(std::istream& in, int64_t n_layers, int64_t n_expert, st
 #endif
 }
 }  // namespace
-
-bool expert_layout_load(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err) {
-    std::ifstream in(pack_dir + "/native_experts.txt");
-    if (!in) {
-        ExpertLayout L;
-        L.n_layers = n_layers;
-        L.n_expert = n_expert;
-        L.total = (uint64_t) n_layers * (uint64_t) n_expert * (uint64_t) BLOB;
-        g_layout = L;
-        return true;
-    }
-    return native_layout_load(in, n_layers, n_expert, err);
-}
 
 bool expert_layout_load_text(const std::string& native_experts, int64_t n_layers, int64_t n_expert,
                              std::string& err) {

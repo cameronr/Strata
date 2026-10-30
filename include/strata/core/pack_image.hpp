@@ -1,19 +1,16 @@
 // include/strata/core/pack_image.hpp - the native pack, computed from the model's GGUF at load.
 //
-// tools/iq_pack.py writes a pack directory from the GGUF: index.txt (one row per non-expert tensor: a float tensor's
-// place in dense.bin, or the shape of a quantized one the engine serves from the GGUF), dense.bin (the float tensors
-// in the form the engine reads them: as stored, or converted per the tool's FORM table) and native_experts.txt (each
-// layer's expert formats and blob size).  All three follow from the GGUF's tensor directory and its float tensors,
-// so the engine computes them itself and --pack is optional: the two texts byte for byte as the tool writes them, and
-// dense.bin as a list of pieces (a tensor's bytes in its shard and the conversion they take) whose bytes `read` makes
-// on demand - nothing is written to disk.  For the GSQ-RCO IQ3_S and UD-Q4_K_XL files all three are byte for byte
-// the packs the tool made of them.
+// The pack is what the engine reads besides the GGUF itself: index.txt (one row per non-expert tensor: a float
+// tensor's place in dense.bin, or the shape of a quantized one the engine serves from the GGUF), dense.bin (the float
+// tensors in the form the engine reads them: as stored, or converted per the FORM table) and native_experts.txt (each
+// layer's expert formats and blob size).  All three follow from the GGUF's tensor directory and its float tensors:
+// the two texts are made here, and dense.bin as a list of pieces (a tensor's bytes in its shard and the conversion
+// they take) whose bytes `read` makes on demand - nothing is written to disk.
 //
-// The format is the one the engine's packs have: native_experts.txt v3 without the GGUF offsets (the engine finds
-// each expert tensor by name, so a layer split across shards needs no shard column), the conversions of the tool's
-// --compat-bf16 whenever a tensor needs them (round-to-nearest-even: an ordinary quant's Q8_0 projections have no
-// other form the engine reads; GSQ-RCO files need none), and an F32 PLE conv narrowed to F16 here (index kind 5:
-// the values the loader's kind-3 narrowing would make).
+// native_experts.txt is v3 without GGUF offsets (the engine finds each expert tensor by name, so a layer split across
+// shards needs no shard column); a float tensor stored in another form than the engine reads is converted, rounding
+// to nearest-even (an ordinary quant's Q8_0 projections have no other form the engine reads; GSQ-RCO files need
+// none), and an F32 PLE conv narrowed to F16 here (index kind 5: the values the loader's kind-3 narrowing would make).
 //
 // CPU only, and building reads the shards' headers only; the float tensors are read when `read` asks for them.
 #pragma once
@@ -47,17 +44,16 @@ public:
         uint64_t off = 0;         ///< in dense.bin (the row's src_off)
         uint64_t bytes = 0;       ///< in dense.bin (the row's src_bytes)
         /// A quantized tensor in the GGUF (not F32 0, F16 1 or BF16 30): its values are dequantized and rounded to
-        /// the form, the rounding iq_pack.py does only with --compat-bf16.
+        /// the form.
         bool dequantized() const { return conv != Conv::Copy && type != 0 && type != 1 && type != 30; }
     };
 
     /// The pack of the model whose first shard is `gguf_first_shard` (the other shards are found by name; the index
-    /// and expert headers name this file).  False with `err` where tools/iq_pack.py refuses, in its words.
+    /// and expert headers name this file).  False with `err` for a model the engine cannot run: a tensor it has no
+    /// form or kernels for, NVFP4 or Hadamard-folded experts, a truncated file.
     static bool build(const std::string& gguf_first_shard, PackImage& out, std::string& err);
 
-    /// index.txt, as tools/iq_pack.py writes it.
     const std::string& index_text() const override { return index_; }
-    /// native_experts.txt, as tools/iq_pack.py writes it.
     const std::string& native_experts_text() const { return experts_; }
     /// dense.bin's bytes [offset, offset + n): the pieces' bytes converted as they are read, the padding zeros.
     /// Opens the shards it needs for each call, so concurrent calls are safe.

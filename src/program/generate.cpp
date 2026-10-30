@@ -109,8 +109,6 @@ uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ull) 
 }
 
 struct Options {
-    /// --pack: a pack directory tools/iq_pack.py wrote; empty = the pack computed from --native's GGUF at load
-    std::string pack;
     std::vector<int64_t> tokens;      // the prompt, PRE-TOKENIZED
     int64_t max_new = 16;
     int64_t max_context = 4096;
@@ -129,8 +127,8 @@ struct Options {
     bool disable_hit = false;          // every routed expert on the CPU (exact's reference)
     std::string expert_math = "fast";  // the GPU's native expert arithmetic: fast (llama.cpp q8_1) or exact (CPU ggml)
     /// the model's GGUF (its first shard: a split model's others are found by name): the quantized tensors,
-    /// the head, the token embedding and the PLE table come from it, the float tensors from the pack (computed
-    /// from it too unless --pack names one)
+    /// the head, the token embedding and the PLE table come from it, the float tensors from the pack computed
+    /// from it at load
     std::string native_preset;
     std::vector<std::string> native_dense_gguf;   ///< its shards, and the PLE table's (set from it)
     /// Plan v0.3 P2: how the n-gram table is read. Direct (default) = unbuffered SSD reads, table never in RAM.
@@ -142,7 +140,6 @@ struct Options {
     /// publishes exactly this much to pinned memory.
     std::string dump_routing;
     int pool_workers = 0;         ///< R2.2: 0 = "all physical cores minus the host's"; >0 overrides
-    bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     /// the VRAM tier's slots (--expert-cache: 0 = the profile's count, -1 = auto, sized from the free VRAM)
     int expert_cache = 0;
     /// R4.2e: a `profile.bin` from `tools/make_profile.py`.  **When given, it decides residency instead of the
@@ -293,10 +290,7 @@ void usage() {
     std::fprintf(stderr,
                  "lamina --native MODEL.gguf --spec T --prefill N --tokens \"1,2,3\" [options]\n"
                  "\n"
-                 "  --pack DIR           a pack directory tools/iq_pack.py wrote (index.txt, dense.bin,\n"
-                 "                       native_experts.txt, optionally experts.bin); default: none, the engine\n"
-                 "                       computes the same pack from --native's GGUF at load\n"
-                 "  --tokens LIST        the prompt as comma-separated token IDS (required)\n"
+                 "  --tokens LIST       the prompt as comma-separated token IDS (required)\n"
                  "  --tokens-file PATH   pretokenized prompt, commas or whitespace (alternative to --tokens)\n"
                  "  --ple-gguf PATH      the PLE table: the model shard holding per_layer_token_embd (with --native,\n"
                  "                       the --native model's shard that holds it by default)\n"
@@ -316,7 +310,7 @@ void usage() {
                  "  --yarn-attn-factor F  --yarn-beta-fast F  --yarn-beta-slow F  the remaining YaRN knobs\n"
                  "  --native MODEL.gguf  the model's GGUF (its first shard; a split model's others are found by\n"
                  "                       name): the quantized tensors, the head, the embedding and the PLE table\n"
-                 "                       come from it, and the pack unless --pack names one (required)\n"
+                 "                       come from it, and the pack the engine computes from it at load (required)\n"
                  "  --expert-math M      native packs: how the GPU computes the experts it holds. fast (default):\n"
                  "                       llama.cpp's CUDA q8_1 arithmetic. exact (K-quant files): the CPU pool's ggml\n"
                  "                       arithmetic (Q8_K/Q8_0 activations, ggml's x86 summation order, one expf on\n"
@@ -392,7 +386,7 @@ void usage() {
                  "                       (default 0.7; between 0 and 1)\n"
                  "  --vram-pin-gib G     the profile's hottest experts, up to G GiB, live only in the main GPU's\n"
                  "                       VRAM: its lowest slots keep them for good and the RAM arena leaves them out\n"
-                 "                       (experts that outgrow the RAM then fit; native packs read from the GGUF)\n"
+                 "                       (experts that outgrow the RAM then fit)\n"
                  "  --second-gpu-pin-gib G  the next ones, up to G GiB, only in the second GPU's VRAM\n"
                  "  --prompt-shift F     with --second-gpu: in prompt chunks of 8K tokens and more the second GPU also\n"
                  "                       computes the likeliest F (0..1) of each layer's experts the main GPU holds, copied\n"
@@ -457,9 +451,7 @@ void usage() {
                  "                       it), kernel (a copy kernel stages it inside the window's graph) or direct\n"
                  "                       (the expert kernels read the mapped RAM)\n"
                  "  --pool-workers N     the CPU expert pool's workers (default 0: every physical core but the\n"
-                 "                       host loop's)\n"
-                 "  --mmap-experts       the experts read through a mapping of the pack's experts.bin (--pack;\n"
-                 "                       tools/iq_pack.py --experts-bin) instead of the RAM arena\n");
+                 "                       host loop's)\n");
 }
 
 bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) {
@@ -1161,7 +1153,6 @@ int strata::program::run(int argc, char** argv) {
             }
         }
         if (a == "--help" || a == "-h") { usage(); return 0; }
-        else if (a == "--pack") o.pack = next("--pack");
         else if (a == "--tokens") {
             if (have_tokens) { std::fprintf(stderr, "supply one token input only\n"); return 2; }
             std::string e;
@@ -1247,7 +1238,6 @@ int strata::program::run(int argc, char** argv) {
             }
         }
         else if (a == "--expert-profile") o.expert_profile = next("--expert-profile");
-        else if (a == "--mmap-experts") o.mmap_experts = true;
         else if (a == "--stats") o.stats = true;
         else {
             // An unknown flag is an ERROR and not a warning: a typo'd `--max-neww` that silently generated 16
@@ -1398,18 +1388,13 @@ int strata::program::run(int argc, char** argv) {
         std::fprintf(stderr, "lamina: invalid --expert-cache or --pool-workers\n");
         return 2;
     }
-    if (o.mmap_experts && o.pack.empty()) {
-        std::fprintf(stderr, "lamina: --mmap-experts maps a pack's experts.bin: it needs --pack\n");
-        return 2;
-    }
 
     std::string err;
-    // The pack: --pack's directory (tools/iq_pack.py), or the same pack computed from --native's GGUF here
-    // (core::PackImage: the index and the expert table as the tool writes them, dense.bin's bytes made as the loader
-    // reads them; nothing on disk).  It outlives the weight table, which may read it again (read_bf16_host).
+    // The pack, computed from --native's GGUF here (core::PackImage: the index and the expert table, dense.bin's bytes
+    // made as the loader reads them; nothing on disk).  It outlives the weight table, which may read it again
+    // (read_bf16_host).
     strata::core::PackImage pack_image;
-    const bool own_pack = o.pack.empty();
-    if (own_pack) {
+    {
         const Clock::time_point t0 = Clock::now();
         if (!strata::core::PackImage::build(o.native_preset, pack_image, err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
@@ -1427,24 +1412,16 @@ int strata::program::run(int argc, char** argv) {
                      pack_image.pieces().size(), (double) pack_image.dense_bytes() / 1048576.0, converted, dequantized,
                      pack_image.served());
     }
-    const std::string pack_name = own_pack ? pack_image.where() : o.pack;
-    // Plan v0.3 P6: where the experts live.  A native pack (tools/iq_pack.py: the IQ2_XS / IQ3_XXS files) keeps
-    // every quantized tensor in its GGUF form, so it needs --native (the dense projections, head and embedding
-    // come from the model file) and runs its experts in verify windows only (--spec).
+    const std::string pack_name = pack_image.where();
+    // Plan v0.3 P6: where the experts live.  The pack keeps every quantized tensor in its GGUF form (the dense
+    // projections, head and embedding come from the model file), and its experts run in verify windows only (--spec).
     {
         const strata::core::ModelGeometry g0;
-        const bool laid = own_pack ? strata::kernels::cpu::expert_layout_load_text(pack_image.native_experts_text(),
-                                                                                   g0.n_layers, g0.n_expert, err)
-                                   : strata::kernels::cpu::expert_layout_load(o.pack, g0.n_layers, g0.n_expert, err);
-        if (!laid) {
+        if (!strata::kernels::cpu::expert_layout_load_text(pack_image.native_experts_text(), g0.n_layers, g0.n_expert,
+                                                           err)) {
             std::fprintf(stderr, "lamina: %s\n", err.c_str());
             return 1;
         }
-    }
-    if (!strata::kernels::cpu::expert_layout().native) {
-        std::fprintf(stderr, "lamina: %s is not a native pack (tools/iq_pack.py makes one from the GGUF)\n",
-                     pack_name.c_str());
-        return 2;
     }
     for (int64_t l = 0; l < strata::kernels::cpu::expert_layout().n_layers; ++l) {
         const auto& f = strata::kernels::cpu::expert_layout().fmt[(size_t) l];
@@ -1502,8 +1479,7 @@ int strata::program::run(int argc, char** argv) {
     }
     uint64_t pool_bytes = 0;
     const std::set<std::string>* skipped = skip.empty() ? nullptr : &skip;
-    if (!(own_pack ? strata::core::WeightTable::pool_bytes(pack_image, pool_bytes, err, skipped)
-                   : strata::core::WeightTable::pool_bytes(o.pack, pool_bytes, err, skipped))) {
+    if (!strata::core::WeightTable::pool_bytes(pack_image, pool_bytes, err, skipped)) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
     }
@@ -1515,8 +1491,7 @@ int strata::program::run(int argc, char** argv) {
     }
     at_exit.undo.push_back([arena] { cudaFree(arena); });
     strata::core::WeightTable wt;
-    if (!(own_pack ? wt.load(pack_image, arena, pool_bytes, err, skipped)
-                   : wt.load(o.pack, arena, pool_bytes, err, skipped))) {
+    if (!wt.load(pack_image, arena, pool_bytes, err, skipped)) {
         std::fprintf(stderr, "lamina: %s\n", err.c_str());
         return 1;
     }
@@ -1602,14 +1577,11 @@ int strata::program::run(int argc, char** argv) {
     {
         const char* ev = std::getenv("STRATA_KV_GROW");
         const bool asked = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
-        // not with --mmap-experts (as upstream's: every expert in RAM): a slot given up there is read back from the
-        // file by the prompt path, and a UD-Q4_K_XL session at 64 GB of RAM ended in a crash after the first growth
-        const bool on = asked && o.serve && !o.expert_profile.empty() && o.expert_cache != 0 && !o.mmap_experts &&
-                        !o.disable_hit && strata::core::vmm_available();
+        const bool on = asked && o.serve && !o.expert_profile.empty() && o.expert_cache != 0 && !o.disable_hit &&
+                        strata::core::vmm_available();
         if (asked && !on)
             std::fprintf(stderr, "lamina: --kv-grow is off here: it needs --serve, --expert-profile, an expert "
-                                 "cache with GPU hits (not --disable-hit), every expert in RAM (not --mmap-experts) "
-                                 "and CUDA virtual memory\n");
+                                 "cache with GPU hits (not --disable-hit) and CUDA virtual memory\n");
         const char* iv = std::getenv("STRATA_KV_GROW_INIT");
         strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
         strata::core::ExpertCache::set_vmm(on);
@@ -1764,24 +1736,9 @@ int strata::program::run(int argc, char** argv) {
 
     // ---- the CPU expert pool
     //
-    // R2.1: the experts are loaded into a RESIDENT ARENA by default.  The mmap path is kept behind
-    // `--mmap-experts` because it is the A/B arm, not because it is competitive.
-    //
-    // The reasoning is the review's C1 and it is now measured on both sides.  `FileExpertSource` maps the 34 GB
-    // file, and mapped file pages are the first thing the OS reclaims; the engine's rate then depends on whether
-    // the standby list happens to hold `experts.bin`, which is why two consecutive runs of the SAME BINARY with
-    // the SAME FLAGS measured 71.97 and 34.78 ms/token in the pool (7.54 vs 12.18 tok/s).  The arena is
-    // anonymous memory the engine owns, and the pool runs at 19.41 ms/token - 1.79x better than the warm mmap
-    // and 3.7x better than the cold one.
-    //
-    // IT IS NOT PINNED, and that is reported rather than hidden: `cudaHostRegister` on 31.64 GiB fails with
-    // "out of memory" (you cannot pin 34 of 63 GB) and the arena falls back to 4 KB anonymous pages.  That is
-    // fine for the CPU pool - which is all that exists today - and NOT fine for Phase 3, whose cache fills and
-    // CPU/PCIe miss split need the GPU to DMA out of this arena.  Read `note()` when that lands.
-    //
-    // The earlier "the arena does not fit" conclusion was WRONG and is worth recording: the failure was a stale
-    // CUDA error left set by the failed `cudaHostRegister` and read later by `gr_read`'s launch check.  See the
-    // note in `pinned.cu`.
+    // R2.1: the experts are read from the model's GGUF into a resident arena (ArenaExpertSource): memory the engine
+    // owns, which the OS has no cheaper reason to evict.  A mapping of the experts' file ran the pool 1.8x slower warm
+    // and 3.7x cold: mapped file pages are the first the OS reclaims.
     // ---- --vram-pin-gib / --second-gpu-pin-gib: the profile's hottest experts live only in VRAM.  The main GPU's
     // go into its lowest slots, the second's into the second GPU's lowest, where nothing evicts them, lends them to
     // the prompt path or gives them to the K/V; a GPU computes them whenever they are routed, and the arena leaves
@@ -1792,8 +1749,7 @@ int strata::program::run(int argc, char** argv) {
     std::vector<uint8_t> vram_only;   // per (layer, expert): 1 only in the main GPU's VRAM, 2 only in the second's
     const bool pinning = o.vram_pin_gib > 0 || o.second_gpu_pin_gib > 0;
     if (pinning) {
-        const char* why = o.mmap_experts ? "--mmap-experts reads every expert from the file"
-                        : o.expert_profile.empty() ? "it needs --expert-profile (its first experts are the ones pinned)"
+        const char* why = o.expert_profile.empty() ? "it needs --expert-profile (its first experts are the ones pinned)"
                         : o.disable_hit ? "--disable-hit computes every expert on the CPU, which has no copy of them"
                         : o.second_gpu_pin_gib > 0 && o.second_gpu < 0 ? "--second-gpu-pin-gib needs --second-gpu"
                         : o.second_gpu_pin_gib > 0 && o.no_prompt_offload
@@ -1804,43 +1760,33 @@ int strata::program::run(int argc, char** argv) {
             return 2;
         }
     }
-    strata::core::FileExpertSource src;
     strata::core::ArenaExpertSource arena_src;
     strata::core::ExpertSource* srcp = nullptr;
     auto load_experts = [&]() -> bool {
-        if (o.mmap_experts) {
-            if (!src.open(o.pack, g.n_layers, g.n_expert, err)) {
-                std::fprintf(stderr, "lamina: %s\n", err.c_str());
-                return false;
-            }
-            std::fprintf(stderr, "lamina: experts via mmap (--mmap-experts; the A/B arm of R2.1)\n");
-            srcp = &src;
-        } else {
-            arena_src.set_gguf(native_shards);   // plan v0.3 P6: a native pack may take its experts from the GGUF
-            if (!vram_only.empty()) {
-                // --prompt-split: the second stage streams the experts of its layers that its GPU lacks from this arena,
-                // and the main GPU's pinned ones of those layers live nowhere else, so they stay here too (the first
-                // stage's experts the main GPU lacks are the second GPU's, pinned there or streamed: as without the
-                // split).  Before, a prompt of two chunks or more stopped at "the expert source has no blob".
-                std::vector<uint8_t> left_out = vram_only;
-                if (o.prompt_split > 0)
-                    for (int64_t l = (int64_t) o.prompt_split; l < g.n_layers; ++l)
-                        for (int64_t e = 0; e < g.n_expert; ++e)
-                            if (uint8_t& v = left_out[(size_t) (l * g.n_expert + e)]; v == 1) v = 0;
-                arena_src.set_vram_only(std::move(left_out));
-            }
-            arena_src.set_uncached(o.no_file_cache);
-            if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err)) {
-                std::fprintf(stderr, "lamina: %s\n", err.c_str());
-                return false;
-            }
-            std::fprintf(stderr, "lamina: expert arena: %s\n", arena_src.note().c_str());
-            std::fprintf(stderr, "lamina: loaded %.2f GiB at %.2f GiB/s\n",
-                         (double) (strata::kernels::cpu::expert_layout().total - arena_src.vram_only_bytes()) /
-                             (1024.0 * 1024 * 1024),
-                         arena_src.load_gib_per_second());
-            srcp = &arena_src;
+        arena_src.set_gguf(native_shards);
+        if (!vram_only.empty()) {
+            // --prompt-split: the second stage streams the experts of its layers that its GPU lacks from this arena,
+            // and the main GPU's pinned ones of those layers live nowhere else, so they stay here too (the first
+            // stage's experts the main GPU lacks are the second GPU's, pinned there or streamed: as without the
+            // split).  Before, a prompt of two chunks or more stopped at "the expert source has no blob".
+            std::vector<uint8_t> left_out = vram_only;
+            if (o.prompt_split > 0)
+                for (int64_t l = (int64_t) o.prompt_split; l < g.n_layers; ++l)
+                    for (int64_t e = 0; e < g.n_expert; ++e)
+                        if (uint8_t& v = left_out[(size_t) (l * g.n_expert + e)]; v == 1) v = 0;
+            arena_src.set_vram_only(std::move(left_out));
         }
+        arena_src.set_uncached(o.no_file_cache);
+        if (!arena_src.open(g.n_layers, g.n_expert, /*threads=*/6, err)) {
+            std::fprintf(stderr, "lamina: %s\n", err.c_str());
+            return false;
+        }
+        std::fprintf(stderr, "lamina: expert arena: %s\n", arena_src.note().c_str());
+        std::fprintf(stderr, "lamina: loaded %.2f GiB at %.2f GiB/s\n",
+                     (double) (strata::kernels::cpu::expert_layout().total - arena_src.vram_only_bytes()) /
+                         (1024.0 * 1024 * 1024),
+                     arena_src.load_gib_per_second());
+        srcp = &arena_src;
         return true;
     };
     if (!pinning && !load_experts()) return 1;

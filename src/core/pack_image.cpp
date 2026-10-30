@@ -1,8 +1,7 @@
 // src/core/pack_image.cpp - the native pack, computed from the model's GGUF at load.  See the header.
 //
-// tools/iq_pack.py's standalone path with its tables, refusals and texts: Model (the shards and their tensors'
-// sizes), expert_layout (native_experts.txt), index_standalone, convert and write_index (index.txt and dense.bin).
-// The comments name the tool's function each part follows.
+// In order: the shards and their tensors' sizes, the expert table (native_experts.txt), then the index rows and
+// dense.bin's pieces with their conversions.
 #include "strata/core/pack_image.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
@@ -30,7 +29,7 @@ constexpr uint32_t kF32 = 0, kF16 = 1, kBf16 = 30, kNvfp4 = 40;
 // elements converted at a time by `read`: a multiple of every block size, so only a range's ends split a block
 constexpr uint64_t kChunk = 1ull << 20;
 
-/// tools/gguf_reader.py's BLOCK_GEOMETRY (elements and bytes per block): the types the tool can size.
+/// Elements and bytes per block (tools/gguf_reader.py's BLOCK_GEOMETRY): the types the pack can size.
 bool block_of(uint32_t type, uint64_t& elems, uint64_t& bytes) {
     struct G {
         uint32_t type;
@@ -53,7 +52,7 @@ bool block_of(uint32_t type, uint64_t& elems, uint64_t& bytes) {
     return false;
 }
 
-/// TensorInfo.expected_bytes(): false for a type the tool cannot size or an element count that is not whole blocks.
+/// A tensor's bytes: false for a type the pack cannot size or an element count that is not whole blocks.
 bool expected_bytes(const TensorInfo& t, uint64_t& out) {
     uint64_t be = 0, bb = 0;
     if (!block_of(t.type, be, bb)) return false;
@@ -63,7 +62,7 @@ bool expected_bytes(const TensorInfo& t, uint64_t& out) {
     return true;
 }
 
-/// gguf_reader.py's GGML_TYPES names, for the tool's messages.
+/// The GGML type names (tools/gguf_reader.py's GGML_TYPES), for the messages.
 std::string type_str(uint32_t t) {
     static const char* const names[] = {
         "F32",     "F16",      "Q4_0",     "Q4_1",       "Q4_2",       "Q4_3",       "Q5_0",   "Q5_1",
@@ -196,8 +195,8 @@ void decode(uint32_t type, const uint8_t* src, size_t n, float* out) {
     }
 }
 
-/// `n` values in the piece's engine form at `out` (convert's arithmetic: BF16 and F16 round to nearest-even, as
-/// gguf-py's quantize(BF16) and numpy's astype(float16) do), or false with the tool's refusal.
+/// `n` values in the piece's engine form at `out` (BF16 and F16 round to nearest-even, as gguf-py's quantize(BF16)
+/// and numpy's astype(float16) do), or false with the refusal.
 bool encode(const PackImage::Piece& p, const float* v, size_t n, uint8_t* out, std::string& err) {
     switch (p.conv) {
         case PackImage::Conv::ToBf16: {
@@ -305,7 +304,7 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
     PackImage img;
     img.source_ = file_name(gguf_first_shard);
     try {
-        // ---- Model: every shard (a missing one is an error), the split keys checked, each tensor sized and inside
+        // ---- the shards: every one (a missing one is an error), the split keys checked, each tensor sized and inside
         // its file
         img.shards_ = strata::gguf_split_paths(gguf_first_shard);
         const strata::GgufModel model(img.shards_);
@@ -321,7 +320,7 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
             }
         }
 
-        // ---- expert_layout: the expert table first, so a model that cannot be packed is refused before the rest
+        // ---- the expert table first, so a model that cannot be packed is refused before the rest
         int64_t n_layers = 0;
         bool experts = false;
         for (size_t s = 0; s < model.size(); ++s)
@@ -385,10 +384,8 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
                 return false;
             }
             if (ts[0]->type == kNvfp4 || ts[2]->type == kNvfp4) {
-                // the GGUF holds NVFP4 experts without their per-expert scales, which iq_pack.py appends to each
-                // blob in experts.bin
-                err = "layer " + std::to_string(l) + ": NVFP4 experts are read from experts.bin, which only "
-                      "tools/iq_pack.py writes: run with --pack";
+                // the GPU expert kernels have no NVFP4, and the GGUF keeps these experts' scales out of their blobs
+                err = "layer " + std::to_string(l) + ": NVFP4 experts, which this engine has no GPU kernels for";
                 return false;
             }
             const uint64_t blob = per[0] + per[1] + per[2];
@@ -398,18 +395,18 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
         }
         img.experts_ = "# strata native experts v3: layer gu_type d_type offset blob_bytes (n_expert " +
                        std::to_string(n_expert) + ", total " + std::to_string(total) + "; the engine takes the "
-                       "experts from " + img.source_ + " by tensor name, or from experts.bin)\n" + lines;
-        // prism.hadamard: iq_pack.py marks such a pack v5 (with hadamard.txt), which this engine refuses
+                       "experts from " + img.source_ + " by tensor name)\n" + lines;
+        // prism.hadamard: experts folded with a Hadamard rotation, which this engine does not run
         if (model.meta().get("prism.hadamard.version") != nullptr) {
             err = "prism.hadamard: the experts are Hadamard-folded (native_experts.txt v5), which this engine does "
                   "not run";
             return false;
         }
 
-        // ---- index_standalone: every non-expert tensor in the shards' order.  Quantized ones the engine reads
-        // from the GGUF are rows of their shape; the floats it reads from the pack go into dense.bin in the form it
-        // reads them (FORM), converted where stored otherwise - --compat-bf16's rounding included, the only form
-        // an ordinary quant's quantized projections have for this engine.
+        // ---- the index: every non-expert tensor in the shards' order.  Quantized ones the engine reads from the
+        // GGUF are rows of their shape; the floats it reads from the pack go into dense.bin in the form it reads them
+        // (FORM), converted where stored otherwise - dequantized and rounded too, the only form an ordinary quant's
+        // quantized projections have for this engine.
         struct Todo {
             const TensorInfo* t;
             size_t shard;
@@ -444,8 +441,8 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
             if (problems.size() > 8) err += "; ... and " + std::to_string(problems.size() - 8) + " more";
             return false;
         }
-        // write_index: the rows' arena offsets (dst_off) at the alignment, the pool their sum; dense.bin's pieces
-        // at the same alignment
+        // the rows' arena offsets (dst_off) at the alignment, the pool their sum; dense.bin's pieces at the same
+        // alignment
         std::string rows;
         uint64_t at = 0, pool = 0;
         for (const Todo& d : todo) {
@@ -456,7 +453,7 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
                 rows += t.name + " 0 0 0 0 " + std::to_string(pool) + " 0 " + shape + " 8 0 32 0 0 0 0 0 0 0\n";
                 continue;
             }
-            // convert: as stored when that is the form (or there is none), else to the form; index kinds 4 BF16,
+            // as stored when that is the form (or there is none), else converted to the form; index kinds 4 BF16,
             // 5 F16, 2 F32
             Piece p;
             p.name = t.name;
@@ -478,7 +475,7 @@ bool PackImage::build(const std::string& gguf_first_shard, PackImage& out, std::
             img.pieces_.push_back(std::move(p));
         }
         img.dense_bytes_ = at;
-        img.index_ = "# strata pack index v3 -- generated by tools/iq_pack.py (native experts) from " + img.source_ +
+        img.index_ = "# strata pack index v3 -- computed by the engine (native experts) from " + img.source_ +
                      "\n# align " + std::to_string(kAlign) + " pool " + std::to_string(pool) + " tensors " +
                      std::to_string(todo.size()) + "\n" + rows;
     } catch (const std::exception& e) {

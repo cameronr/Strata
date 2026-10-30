@@ -37,11 +37,7 @@ class SecondGpu;
 /// it holds of a verify window's layer beside the CPU pool.
 constexpr int kMaxGpuTiers = 3;
 
-/// Where one routed expert's bytes come from.
-///
-/// Phase 2 has NO cache (`phase-2-correct-engine.md`: hit rate `h = 0`), so the only implementation is a
-/// file-backed reader.  The interface exists anyway because Phase 3 replaces exactly this object with the VRAM
-/// cache, and because a test can supply an in-memory source without a 34 GB artifact.
+/// Where one routed expert's bytes come from: the resident arena (ArenaExpertSource) in the engine.
 class ExpertSource {
 public:
     virtual ~ExpertSource() = default;
@@ -200,80 +196,16 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
                            int64_t k);
 
 
-/// **PHASE 2'S ONLY SOURCE: `experts.bin`, memory-mapped, no cache.**
-///
-/// `experts.bin` is 33,973,862,400 B and `BLOB` is 1,382,400, so it holds exactly `48 x 512 = 24,576` blobs and
-/// the index is `layer * 512 + expert` with NO padding.  A mapping is therefore the whole implementation: the
-/// blob pointer is base plus a multiply, and the page fault that follows is the read.
-///
-/// **AND THAT IS NOT AS SLOW AS IT SOUNDS, WHICH IS THE POINT.**  The expert set is 34 GB and this machine has
-/// 64 GB of DDR5, so a warm OS page cache holds ALL of it - the second token onward is a DRAM read at the
-/// measured 44.14 GB/s, not a disk read.  The first token's 663.6 MB comes off the disk and is the cold-path
-/// number; `benches` should report the two separately rather than blending them.
-///
-/// IT IS NOT AN LRU, AN LFU OR A PREFETCHER.  Phase 3 replaces this object with those.  Phase 2 is hit rate
-/// `h = 0` on purpose, so that the CPU path and the host round trip are exercised on every layer of every
-/// token - which is the only way they get debugged before speed matters.
-class FileExpertSource : public ExpertSource {
-public:
-    FileExpertSource() = default;
-    ~FileExpertSource() override;
-    FileExpertSource(const FileExpertSource&) = delete;
-    FileExpertSource& operator=(const FileExpertSource&) = delete;
-
-    /// Maps `<pack_dir>/experts.bin` and checks its size against the loaded `expert_layout().total` - the
-    /// canonical `n_layers * n_expert * BLOB` for a Q2_0 pack, or the sum of a native pack's per-layer blobs.
-    ///
-    /// The size check is not a formality: a short file would fault at the END of a long sequence, and an
-    /// over-long one means the pack is not the one the geometry came from.  Refuses with the two numbers.  The
-    /// blob offsets come from the same layout, so a native (IQ4 / mixed K-quant) pack reads its real per-layer
-    /// slices rather than a fixed `BLOB` stride.
-    bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err);
-    void close();
-
-    bool mapped() const { return base_ != nullptr; }
-    int64_t blobs() const { return blobs_; }
-
-    const uint8_t* blob(int64_t layer, int64_t expert) override;
-
-    /// Blobs touched, for the driver to report.  With `h = 0` this is `48 * k` per token and the number is only
-    /// interesting once Phase 3 makes it not so.
-    int64_t reads() const override { return reads_.load(std::memory_order_relaxed); }
-
-private:
-    const uint8_t* base_ = nullptr;
-    int64_t blobs_ = 0;
-    int64_t n_layers_ = 0;
-    int64_t n_expert_ = 0;
-    uint64_t bytes_ = 0;   ///< the mapped length (`expert_layout().total`), for munmap and the bounds check
-    std::atomic<int64_t> reads_{0};   ///< (a counter only; two threads can read blobs at once)
-#if defined(_WIN32)
-    void* file_ = nullptr;
-    void* mapping_ = nullptr;
-#else
-    int fd_ = -1;
-#endif
-};
-
 // ================================ THE RESIDENT ARENA (R2.1) ================================
 //
-// **THE MMAP ABOVE IS THE REVIEW'S FINDING C1 AND IT IS WORTH 2.2x.**  Read the comment on `FileExpertSource`
-// about the page cache holding all 34 GB: that is true of the expert file ALONE, and it is not what this engine
-// does.  The PLE/n-gram shard is a 26.8 GB file that the engine also maps, so 34 GB of experts plus 26.8 GB of
-// n-gram is 60.8 GB of mapped, file-backed pages on a 63 GB machine - and file-backed pages are exactly the ones
-// the OS drops from the standby list when it wants memory.  The expert stream then re-faults from disk.
-//
-// Measured, this round: the pool runs at **~19 GB/s in the engine against 42.8 GB/s in `bench/micro/cpu_s2.cpp`
-// on the same machine, reading the same 34 GB**.  The micro does `std::fread` into a heap arena and reads
-// ordinary (anonymous, resident) memory; the engine reads `MapViewOfFile`.  That is the whole difference, and it
-// is why this class exists.
-//
-// It reads the experts once at startup into anonymous memory the OS has no cheaper reason to evict: one pinned
-// block per layer (cudaHostAlloc, portable and mapped), which the GPUs need for cache fills, the prompt path and the
-// PCIe share of the misses.  Registering one reserved range instead (cudaHostRegister) is limited to ~42 GiB on
-// Windows once a second GPU's context exists, and past that limit every CUDA allocation fails; allocated blocks reach
-// ~75 GiB with one or two GPUs.  The layers past the pinning budget share one locked, pageable range; the note says
-// how many layers were pinned.
+// A mapping of the experts' file ran the pool at ~19 GB/s against 42.8 GB/s from resident memory: mapped,
+// file-backed pages are the ones the OS drops from the standby list when it wants memory, and the expert stream then
+// re-faults from disk.  So the arena reads the experts from the model's GGUF once at startup into anonymous memory
+// the OS has no cheaper reason to evict: one pinned block per layer (cudaHostAlloc, portable and mapped), which the
+// GPUs need for cache fills, the prompt path and the PCIe share of the misses.  Registering one reserved range
+// instead (cudaHostRegister) is limited to ~42 GiB on Windows once a second GPU's context exists, and past that limit
+// every CUDA allocation fails; allocated blocks reach ~75 GiB with one or two GPUs.  The layers past the pinning
+// budget share one locked, pageable range; the note says how many layers were pinned.
 class ArenaExpertSource : public ExpertSource {
 public:
     ArenaExpertSource() = default;
@@ -281,22 +213,20 @@ public:
     ArenaExpertSource(const ArenaExpertSource&) = delete;
     ArenaExpertSource& operator=(const ArenaExpertSource&) = delete;
 
-    /// Allocates and loads `<pack_dir>/experts.bin`, or set_gguf's shards when there is none (an empty `pack_dir`:
-    /// no pack directory).  Prints nothing; the caller reports `note()` and the load rate, because those are the
-    /// two numbers that say whether the arena is the one that was asked for.
-    bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads, std::string& err);
-    /// Plan v0.3 P6: a native pack without experts.bin takes its experts from the model's GGUF shards
-    /// (strata::gguf_split_paths), found by tensor name.
+    /// Allocates the arena and reads the experts into it from set_gguf's shards.  Prints nothing; the caller reports
+    /// `note()` and the load rate, because those are the two numbers that say whether the arena is the one that was
+    /// asked for.
+    bool open(int64_t n_layers, int64_t n_expert, int threads, std::string& err);
+    /// Before open(): the model's GGUF shards (strata::gguf_split_paths), whose expert tensors are found by name.
     void set_gguf(const std::vector<std::string>& shards) { gguf_ = shards; }
     /// Before open(): the experts (n_layers x n_expert, non-zero) that live only in VRAM.  The arena leaves them
     /// out (a 119.5 GiB Q8_0 then fits a 125.7 GiB machine), blob() has none for them, and `read_file_blob` reads
-    /// one from the model for the GPU that keeps it.  A native pack read from its GGUF only.
+    /// one from the model for the GPU that keeps it.
     void set_vram_only(std::vector<uint8_t> mask) { vram_only_ = std::move(mask); }
     /// Before open(), --no-file-cache: the experts read from the GGUF past the OS file cache (Windows: unbuffered
     /// reads; Linux: the pages read dropped from the page cache), which then keeps no second copy of them.  Where
     /// the RAM holds the arena and the cached file together, the cache settles on pages the later starts' arenas
-    /// would have had (on this PC the faster ones).  Each start reads the experts from the drive.  A pack's
-    /// experts.bin is read through the cache either way.
+    /// would have had (on this PC the faster ones).  Each start reads the experts from the drive.
     void set_uncached(bool on) { uncached_ = on; }
     void close();
 

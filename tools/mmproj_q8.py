@@ -4,7 +4,7 @@ general.file_type 7 (MOSTLY_Q8_0).  The CPU image encoder reads a Q8_0 projector
 gguf-py's Q8_0 is ggml's reference rounding: every tensor comes out byte for byte llama-quantize's, the metadata
 the same (in the source's order; llama-quantize moves the file type keys to the end and orders the tensors otherwise).
 
-    python tools/mmproj_q8.py <mmproj-BF16.gguf> <out-Q8_0.gguf>   (STRATA_GGUF_PY: gguf-py's folder, as for iq_pack.py)
+    python tools/mmproj_q8.py <mmproj-BF16.gguf> <out-Q8_0.gguf>   (STRATA_GGUF_PY: gguf-py's folder, tools/_paths.py)
 """
 import os
 import sys

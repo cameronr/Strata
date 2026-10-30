@@ -39,147 +39,6 @@
 
 namespace strata::core {
 
-// ================================ THE FILE-BACKED SOURCE ================================
-
-FileExpertSource::~FileExpertSource() { close(); }
-
-bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, std::string& err) {
-    close();
-    if (n_layers <= 0 || n_expert <= 0) { err = "FileExpertSource: the geometry is empty"; return false; }
-    // plan v0.3 P6: the layout (canonical Q2_0, or a native pack's per-layer blobs) was loaded by the driver;
-    // the file's size and every blob offset come from it, exactly as `ArenaExpertSource` reads them.
-    const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
-    if (lay.n_layers != n_layers || lay.n_expert != n_expert) {
-        err = "FileExpertSource: the expert layout was loaded for a different geometry";
-        return false;
-    }
-    n_layers_ = n_layers;
-    n_expert_ = n_expert;
-    blobs_ = n_layers * n_expert;
-    const uint64_t want = lay.total;
-    const std::string path = pack_dir + "/experts.bin";
-
-#if defined(_WIN32)
-    // UTF-8 -> UTF-16: the pack may live under a path with non-ASCII characters, and `CreateFileA` would
-    // silently mangle it into a file-not-found.
-    const int wide = MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, nullptr, 0);
-    std::vector<wchar_t> wpath((size_t) (wide > 0 ? wide : 1));
-    if (wide > 0) MultiByteToWideChar(CP_UTF8, 0, path.c_str(), -1, wpath.data(), wide);
-    // **`FILE_FLAG_RANDOM_ACCESS` WAS HERE AND IT COST 14x.**
-    //
-    // The design depends on the OS page cache holding the whole 34 GB expert set, because this machine has
-    // 64 GB of DDR5 and `L9` measured the CPU path at 44.14 GB/s from DRAM.  `FILE_FLAG_RANDOM_ACCESS` tells
-    // the cache manager the opposite: it disables read-ahead AND it lets the manager drop the pages again
-    // quickly, on the assumption that a large randomly-accessed file will not be re-read.  Measured, on
-    // `strata generate --max-new 24`: **1.93 GB/s** - disk speed, 344 ms/token, and it never warmed up over 25
-    // tokens, because the pages were being evicted as fast as they were faulted in.
-    //
-    // The correct flag is NO flag.  The access pattern IS random (10 of 512 experts per layer, a different 10
-    // each layer), but every byte read is read again on the next token, so retention is the whole game.
-    HANDLE f = CreateFileW(wpath.data(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        err = "FileExpertSource: cannot open " + path;
-        return false;
-    }
-    LARGE_INTEGER sz{};
-    if (!GetFileSizeEx(f, &sz)) {
-        CloseHandle(f);
-        err = "FileExpertSource: cannot size " + path;
-        return false;
-    }
-    if ((uint64_t) sz.QuadPart != want) {
-        char buf[400];
-        std::snprintf(buf, sizeof buf,
-                      "FileExpertSource: %s is %llu B but %lld layers x %lld experts (blobs up to %llu B) make "
-                      "%llu B - this is not the pack this geometry came from",
-                      path.c_str(), (unsigned long long) sz.QuadPart, (long long) n_layers,
-                      (long long) n_expert, (unsigned long long) lay.max_blob, (unsigned long long) want);
-        CloseHandle(f);
-        err = buf;
-        return false;
-    }
-    HANDLE m = CreateFileMappingW(f, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    if (m == nullptr) {
-        CloseHandle(f);
-        err = "FileExpertSource: CreateFileMapping failed on " + path;
-        return false;
-    }
-    void* view = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
-    if (view == nullptr) {
-        CloseHandle(m);
-        CloseHandle(f);
-        err = "FileExpertSource: MapViewOfFile failed on " + path;
-        return false;
-    }
-    file_ = f;
-    mapping_ = m;
-    base_ = (const uint8_t*) view;
-#else
-    const int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) { err = "FileExpertSource: cannot open " + path; return false; }
-    struct stat st{};
-    if (fstat(fd, &st) != 0) { ::close(fd); err = "FileExpertSource: cannot stat " + path; return false; }
-    if ((uint64_t) st.st_size != want) {
-        char buf[400];
-        std::snprintf(buf, sizeof buf,
-                      "FileExpertSource: %s is %llu B but %lld layers x %lld experts (blobs up to %llu B) make "
-                      "%llu B - this is not the pack this geometry came from",
-                      path.c_str(), (unsigned long long) st.st_size, (long long) n_layers, (long long) n_expert,
-                      (unsigned long long) lay.max_blob, (unsigned long long) want);
-        ::close(fd);
-        err = buf;
-        return false;
-    }
-    void* view = mmap(nullptr, (size_t) want, PROT_READ, MAP_SHARED, fd, 0);
-    if (view == MAP_FAILED) { ::close(fd); err = "FileExpertSource: mmap failed on " + path; return false; }
-    fd_ = fd;
-    base_ = (const uint8_t*) view;
-#endif
-    bytes_ = want;
-    return true;
-}
-
-void FileExpertSource::close() {
-#if defined(_WIN32)
-    if (base_ != nullptr) UnmapViewOfFile((LPCVOID) base_);
-    if (mapping_ != nullptr) CloseHandle((HANDLE) mapping_);
-    if (file_ != nullptr) CloseHandle((HANDLE) file_);
-    mapping_ = nullptr;
-    file_ = nullptr;
-#else
-    if (base_ != nullptr) munmap((void*) base_, (size_t) bytes_);
-    if (fd_ >= 0) ::close(fd_);
-    fd_ = -1;
-#endif
-    base_ = nullptr;
-    blobs_ = 0;
-    n_layers_ = 0;
-    n_expert_ = 0;
-    bytes_ = 0;
-    reads_ = 0;
-}
-
-const uint8_t* FileExpertSource::blob(int64_t layer, int64_t expert) {
-    if (base_ == nullptr) return nullptr;
-    if (layer < 0 || expert < 0) return nullptr;
-    // **`expert >= n_expert_` IS CHECKED SEPARATELY, AND THE FLAT INDEX ALONE DOES NOT CATCH IT.**  The blob
-    // index is `layer * n_expert + expert`, so `blob(0, 512)` has flat index 512 - which is in range, and is
-    // `blob(1, 0)`.  A router id one past the end of a layer would then read the NEXT LAYER's first expert:
-    // finite, correctly sized, and wrong.  Layer and expert are separate axes and are validated as such.
-    //
-    // The layer is bounded on its own too: `layer * n_expert` overflows for a huge layer, and a native pack's
-    // offset table is indexed by it.
-    if (layer >= n_layers_ || expert >= n_expert_) return nullptr;
-    // A native pack's blobs differ in size from layer to layer, so the offset comes from the layout, not from a
-    // `BLOB` stride - which would land mid-expert from the first layer whose blob is not `BLOB` onward.
-    const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
-    const uint64_t off = lay.blob_offset(layer, expert);
-    if (off > bytes_ || lay.blob_bytes(layer) > bytes_ - off) return nullptr;
-    reads_.fetch_add(1, std::memory_order_relaxed);
-    return base_ + (size_t) off;
-}
-
 // ================================ THE ADAPTER ================================
 
 
@@ -536,7 +395,7 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
 namespace {
 // Plan v0.3 P6: the arena straight from the model's GGUF shards.  Each layer's gate, up and down tensors hold the
 // 512 experts one after another; they are read in chunks and each expert's slice lands at its place in the blob
-// [gate rows | up rows | down rows] - the layout tools/iq_pack.py would have written to experts.bin.
+// [gate rows | up rows | down rows] (expert_layout.hpp).
 struct GgufSpan {
     size_t shard = 0;
     uint64_t offset = 0;   ///< in the shard's file
@@ -774,21 +633,18 @@ void release_pageable(void* p, uint64_t bytes) {
 
 ArenaExpertSource::~ArenaExpertSource() { close(); }
 
-bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
-                             std::string& err) {
+bool ArenaExpertSource::open(int64_t n_layers, int64_t n_expert, int threads, std::string& err) {
     close();
-    if (pack_dir.empty() && gguf_.empty()) {
-        err = "ArenaExpertSource: no pack directory and no model GGUF to read the experts from";
+    if (gguf_.empty()) {
+        err = "ArenaExpertSource: no model GGUF to read the experts from";
         return false;
     }
-    const std::string path = pack_dir + "/experts.bin";
-    // plan v0.3 P6: the layout (canonical, or a native pack's per-layer blobs) was loaded by the driver
+    // plan v0.3 P6: the layout (the pack's per-layer blobs) was loaded by the driver
     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
     if (lay.n_layers != n_layers || lay.n_expert != n_expert) {
         err = "ArenaExpertSource: the expert layout was loaded for a different geometry";
         return false;
     }
-    const int64_t blob = (int64_t) lay.max_blob;
     // --vram-pin-gib: the experts only in VRAM are left out, each layer's others packed in expert order
     std::vector<int64_t> kept((size_t) n_layers, n_expert);
     if (!vram_only_.empty()) {
@@ -809,44 +665,19 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     }
     const uint64_t want = lay.total - vram_only_bytes_;
 
-    // plan v0.3 P6: no experts.bin in a native pack, or no pack directory at all (the pack computed from the GGUF)
-    // -> the experts come straight from the GGUF
-    const bool from_gguf = (pack_dir.empty() || !std::ifstream(path, std::ios::binary)) && !gguf_.empty();
-    // SIZE CHECK BEFORE THE ALLOCATION, not after.  A wrong pack should name the two numbers rather than spend
-    // 34 GB and a minute of loading first.
+    // the expert tensors found before the allocation, not after: a model that does not match the layout is refused
+    // before 34 GB and a minute of loading are spent
     std::vector<GgufSpan> spans;
-    if (!vram_only_.empty() && !from_gguf) {
-        close();
-        err = "ArenaExpertSource: experts only in VRAM (--vram-pin-gib) need a native pack read from its GGUF";
-        return false;
-    }
-    if (from_gguf) {
-        if (!locate_experts_gguf(gguf_, lay, spans, err)) return false;
-    } else {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f) { err = "ArenaExpertSource: cannot open " + path; return false; }
-        const uint64_t got = (uint64_t) f.tellg();
-        if (got != want) {
-            char buf[400];
-            std::snprintf(buf, sizeof buf,
-                          "ArenaExpertSource: %s is %llu B but %lld layers x %lld experts (blobs up to %lld B) "
-                          "make %llu B - this is not the pack this geometry came from",
-                          path.c_str(), (unsigned long long) got, (long long) n_layers, (long long) n_expert,
-                          (long long) blob, (unsigned long long) want);
-            err = buf;
-            return false;
-        }
-    }
+    if (!locate_experts_gguf(gguf_, lay, spans, err)) return false;
 
     // one pinned block per layer, each followed by room for a whole slot-sized copy (the largest blob) from its last
     // expert; the layers past the pinning budget in one pageable range, locked resident
     const uint64_t maxb = lay.max_blob;
-    std::vector<uint64_t> loff, lbytes, room;
+    std::vector<uint64_t> room;
     for (int64_t l = 0; l < n_layers; ++l) {
-        loff.push_back(lay.layer_offset(l));
-        lbytes.push_back(lay.blob_bytes(l) * (uint64_t) kept[(size_t) l]);
+        const uint64_t bytes = lay.blob_bytes(l) * (uint64_t) kept[(size_t) l];
         // (never empty: a layer whose experts are all in VRAM still registers a page)
-        room.push_back(std::max<uint64_t>(lbytes.back() + (maxb - lay.blob_bytes(l)), 4096));
+        room.push_back(std::max<uint64_t>(bytes + (maxb - lay.blob_bytes(l)), 4096));
     }
     uint64_t pinned_total = 0;
     std::string tail_note;
@@ -906,9 +737,8 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             placed(l + 1);
         }
     };
-    // From the GGUF, a layer is read as soon as its block exists: the blocks are allocated on a thread of their own
-    // (all of them first, 48 cudaHostAlloc blocks of 1-1.5 GiB, delayed the reads by 3.5 s on IQ3_S, 6 on UD-Q4_K_XL)
-    const bool overlap = !anon && from_gguf;
+    // A layer is read as soon as its block exists: the blocks are allocated on a thread of their own (all of them
+    // first, 48 cudaHostAlloc blocks of 1-1.5 GiB, delayed the reads by 3.5 s on IQ3_S, 6 on UD-Q4_K_XL)
     std::mutex placed_mu;
     std::condition_variable placed_cv;
     int64_t n_placed = 0;
@@ -923,21 +753,12 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             }
             placed_cv.notify_all();
         };
-        if (overlap) {
-            int dev0 = 0;
-            (void) cudaGetDevice(&dev0);
-            placer = std::thread([&, dev0] {
-                (void) cudaSetDevice(dev0);
-                place_layers(publish);
-            });
-        } else {
+        int dev0 = 0;
+        (void) cudaGetDevice(&dev0);
+        placer = std::thread([&, dev0] {
+            (void) cudaSetDevice(dev0);
             place_layers(publish);
-            if (reserve_failed) {
-                close();
-                err = "ArenaExpertSource: the arena could not be reserved (" + std::to_string(tail_bytes_) + " B)";
-                return false;
-            }
-        }
+        });
     }
     auto layer_ready = [&](int64_t l) {
         std::unique_lock<std::mutex> lk(placed_mu);
@@ -959,11 +780,8 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         else
             (void) cudaGetLastError();
     };
-    const LoadStats st =
-        from_gguf ? load_experts_gguf(gguf_, spans, layer_base_, lay, threads, on_layer, idx_, vram_only_bytes_,
-                                      overlap ? std::function<bool(int64_t)>(layer_ready) : nullptr, uncached_)
-                  : load_experts_ranges(path, layer_base_, loff, lbytes, threads, /*chunk=*/8u << 20,
-                                        [&](uint64_t l) { on_layer((int64_t) l); });
+    const LoadStats st = load_experts_gguf(gguf_, spans, layer_base_, lay, threads, on_layer, idx_, vram_only_bytes_,
+                                           anon ? nullptr : std::function<bool(int64_t)>(layer_ready), uncached_);
     if (placer.joinable()) placer.join();
     if (!anon) pinned_layers_ = (int64_t) blocks_.size();
     if (reserve_failed) {
@@ -1012,20 +830,14 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
                 const int64_t at_e = idx_.empty() ? e : idx_[(size_t) (l * n_expert + e)];
                 if (at_e < 0) continue;   // only in VRAM: the fill compares its slot with the file
                 want_b.assign((size_t) b, 0);
-                if (from_gguf) {
-                    const auto& fm = lay.fmt[(size_t) l];
-                    const uint64_t per[3] = {fm.up_off, fm.up_off, b - fm.down_off};
-                    const uint64_t at[3] = {0, fm.up_off, fm.down_off};
-                    for (int r = 0; r < 3; ++r) {
-                        const GgufSpan& sp = spans[(size_t) (3 * l + r)];
-                        std::ifstream f(gguf_[sp.shard], std::ios::binary);
-                        f.seekg((std::streamoff) (sp.offset + (uint64_t) e * per[r]));
-                        f.read((char*) want_b.data() + at[r], (std::streamsize) per[r]);
-                    }
-                } else {
-                    std::ifstream f(path, std::ios::binary);
-                    f.seekg((std::streamoff) (loff[(size_t) l] + (uint64_t) e * b));
-                    f.read((char*) want_b.data(), (std::streamsize) b);
+                const auto& fm = lay.fmt[(size_t) l];
+                const uint64_t per[3] = {fm.up_off, fm.up_off, b - fm.down_off};
+                const uint64_t at[3] = {0, fm.up_off, fm.down_off};
+                for (int r = 0; r < 3; ++r) {
+                    const GgufSpan& sp = spans[(size_t) (3 * l + r)];
+                    std::ifstream f(gguf_[sp.shard], std::ios::binary);
+                    f.seekg((std::streamoff) (sp.offset + (uint64_t) e * per[r]));
+                    f.read((char*) want_b.data() + at[r], (std::streamsize) per[r]);
                 }
                 if (std::memcmp(want_b.data(), layer_base_[(size_t) l] + (uint64_t) at_e * b, (size_t) b) != 0) {
                     close();
@@ -1041,7 +853,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     note_ = std::to_string(pinned_layers_) + " of " + std::to_string(n_layers) + " layers pinned (" +
             std::to_string(pinned_total >> 30) + (anon ? " GiB, page-locked as each layer loaded)" : " GiB, a cudaHostAlloc block each)");
     if (tail_ != nullptr || anon_lock_ != nullptr) note_ += "; the others pageable: " + tail_note;
-    if (uncached_ && from_gguf) note_ += "; read past the file cache";
+    if (uncached_) note_ += "; read past the file cache";
     if (vram_only_bytes_ > 0) {
         char buf[160];
         int64_t n = 0;
@@ -1131,8 +943,7 @@ const uint8_t* ArenaExpertSource::blob(int64_t layer, int64_t expert) {
     const int64_t at = idx_.empty() ? expert : idx_[i];
     if (at < 0) return nullptr;   // only in VRAM
     reads_.fetch_add(1, std::memory_order_relaxed);
-    // Pointer arithmetic into resident memory.  No fault, no copy, no mapping - which is the entire point of
-    // this class over `FileExpertSource`.
+    // Pointer arithmetic into resident memory: no fault, no copy, no mapping.
     return layer_base_[blk_.empty() ? (size_t) layer : (size_t) blk_[i]] +
            (uint64_t) at * strata::kernels::cpu::expert_layout().blob_bytes(layer);
 }

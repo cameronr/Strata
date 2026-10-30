@@ -15,7 +15,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <string>
 #include <vector>
 
@@ -50,32 +49,13 @@ struct PinnedArena {
     uint8_t* data() const { return (uint8_t*) base; }
 };
 
+/// What the expert arena's load read, and how fast.
 struct LoadStats {
     double seconds = 0.0;
     uint64_t bytes = 0;
     uint64_t layers = 0;
-    std::vector<uint64_t> layer_checksums;      // one FNV-1a per layer
     double gib_per_second() const { return seconds > 0 ? (double) bytes / (1024.0 * 1024 * 1024) / seconds : 0.0; }
 };
-
-// Load `layers` layers of the expert arena into `dst` with `threads` readers, `chunk` bytes at a time.
-// Each thread opens its OWN handle and seeks, which is the portable form of parallel pread: a shared handle
-// needs a lock around the seek and defeats the parallelism on Windows.
-LoadStats load_experts(const std::string& path, uint8_t* dst, uint64_t blob_bytes, uint64_t blobs_per_layer,
-                       uint64_t layers, int threads, uint64_t chunk);
-/// Plan v0.3 P6: the same with one byte range per layer (`layer_off[L]`, `layer_bytes[L]`).
-/// Layer L's `layer_bytes[L]` bytes at file offset `layer_off[L]` go to `layer_dst[L]`.
-/// `done(L)`, when given, runs on the reading thread once layer L is in place.
-LoadStats load_experts_ranges(const std::string& path, const std::vector<uint8_t*>& layer_dst,
-                              const std::vector<uint64_t>& layer_off, const std::vector<uint64_t>& layer_bytes, int threads,
-                              uint64_t chunk, const std::function<void(uint64_t)>& done = nullptr);
-LoadStats load_experts_ranges(const std::string& path, uint8_t* dst, const std::vector<uint64_t>& layer_off,
-                              const std::vector<uint64_t>& layer_bytes, int threads, uint64_t chunk);
-
-// FNV-1a 64.  Per layer, so a corrupt or short read names WHICH layer rather than just failing a whole-file
-// comparison - the same reason the Phase 1 tools report the first differing element.
-uint64_t fnv1a64(const uint8_t* p, uint64_t n, uint64_t seed = 1469598103934665603ull);
-
 
 
 }  // namespace strata::core

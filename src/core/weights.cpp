@@ -2,7 +2,6 @@
 #include "strata/core/weights.hpp"
 
 #include "strata/kernels/f16_bits.hpp"
-#include "strata/platform/memory.hpp"
 
 #include <cinttypes>
 #include <cuda_runtime.h>
@@ -12,12 +11,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-#if defined(_WIN32)
-#include <io.h>
-#else
-#include <unistd.h>
-#endif
 
 namespace strata::core {
 namespace {
@@ -63,37 +56,11 @@ struct Seg {
     Conv conv = Conv::Copy;
 };
 
-const char* file_name(int id) {
-    switch (id) {
-        case 0: return "dense.bin";
-        case 1: return "embd.bin";
-        case 2: return "experts.bin";
-        case 3: return "extra.bin";   // plan v0.3 P6: a native pack's float tensors that the base pack quantized
-        default: return nullptr;
-    }
-}
-
-/// UTF-16 path for CreateFile-free portability: the loader uses `std::fopen`, which on Windows takes an ANSI
-/// path.  The pack lives beside the executable in practice, but a pack under a user directory with a
-/// non-ASCII name would silently fail to open, so the caller gets the errno rather than a null pointer.
-bool read_at(std::FILE* f, uint64_t off, void* dst, size_t n, std::string& err, const char* what) {
-#if defined(_WIN32)
-    if (_fseeki64(f, (long long) off, SEEK_SET) != 0) { err = std::string(what) + ": seek failed"; return false; }
-#else
-    if (fseeko(f, (off_t) off, SEEK_SET) != 0) { err = std::string(what) + ": seek failed"; return false; }
-#endif
-    if (std::fread(dst, 1, n, f) != n) { err = std::string(what) + ": short read"; return false; }
-    return true;
-}
-
-/// index.txt's lines as `std::fgets` gives them (up to `cap - 1` bytes, through the newline), from the pack's file
-/// or from a pack in memory's text, so both parse alike.
+/// index.txt's lines as `std::fgets` would give them (up to `cap - 1` bytes, through the newline).
 class IndexLines {
 public:
-    explicit IndexLines(std::FILE* f) : f_(f) {}
     explicit IndexLines(const std::string& text) : text_(&text) {}
     bool next(char* line, int cap) {
-        if (f_ != nullptr) return std::fgets(line, cap, f_) != nullptr;
         if (at_ >= text_->size() || cap < 2) return false;
         size_t n = 0;
         while (n + 1 < (size_t) cap && at_ < text_->size()) {
@@ -106,56 +73,8 @@ public:
     }
 
 private:
-    std::FILE* f_ = nullptr;
     const std::string* text_ = nullptr;
     size_t at_ = 0;
-};
-
-/// Where the rows' bytes come from: the pack directory's files, one open at a time as the rows ask for them, or a
-/// pack in memory, which has dense.bin only.
-class PackFiles {
-public:
-    PackFiles(const std::string& dir, const PackContents* pack) : dir_(dir), pack_(pack) {}
-    ~PackFiles() { close(); }
-    PackFiles(const PackFiles&) = delete;
-    PackFiles& operator=(const PackFiles&) = delete;
-
-    void close() {
-        if (cur_) std::fclose(cur_);
-        cur_ = nullptr;
-        cur_id_ = -1;
-    }
-
-    /// Makes pack file `id` the one `read` reads.  `opened`: a directory's file was opened for it (another was the
-    /// current one).
-    bool use(int id, bool& opened, std::string& err) {
-        opened = false;
-        const char* fn = file_name(id);
-        if (pack_ != nullptr) {
-            if (id == 0) return true;
-            err = pack_->where() + " has no " + (fn ? fn : "?");
-            return false;
-        }
-        if (id == cur_id_) return true;
-        if (cur_) std::fclose(cur_);
-        const std::string p = dir_ + "/" + (fn ? fn : "?");
-        cur_ = std::fopen(p.c_str(), "rb");
-        cur_id_ = cur_ ? id : -1;
-        if (!cur_) { err = "cannot open " + p; return false; }
-        opened = true;
-        return true;
-    }
-    /// The open file of a directory's pack (null for a pack in memory).
-    std::FILE* file() const { return cur_; }
-    bool read(uint64_t off, void* dst, size_t n, std::string& err, const char* what) const {
-        return pack_ != nullptr ? pack_->read(off, n, dst, err) : read_at(cur_, off, dst, n, err, what);
-    }
-
-private:
-    const std::string& dir_;
-    const PackContents* pack_;
-    std::FILE* cur_ = nullptr;
-    int cur_id_ = -1;
 };
 
 bool pool_from(IndexLines& lines, const std::string& where, uint64_t& out, std::string& err,
@@ -205,32 +124,10 @@ void code_bits_from(IndexLines& lines, const std::string& name, int& code_bits) 
 
 }  // namespace
 
-bool WeightTable::pool_bytes(const std::string& pack_dir, uint64_t& out, std::string& err,
-                             const std::set<std::string>* skip) {
-    const std::string path = pack_dir + "/index.txt";
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) { err = "cannot open " + path; return false; }
-    IndexLines lines(f);
-    const bool ok = pool_from(lines, path, out, err, skip);
-    std::fclose(f);
-    return ok;
-}
-
 bool WeightTable::pool_bytes(const PackContents& pack, uint64_t& out, std::string& err,
                              const std::set<std::string>* skip) {
     IndexLines lines(pack.index_text());
     return pool_from(lines, pack.where() + "'s index.txt", out, err, skip);
-}
-
-bool WeightTable::index_code_bits(const std::string& pack_dir, const std::string& name, int& code_bits,
-                                  std::string& err) {
-    const std::string path = pack_dir + "/index.txt";
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) { err = "cannot open " + path; return false; }
-    IndexLines lines(f);
-    code_bits_from(lines, name, code_bits);
-    std::fclose(f);
-    return true;
 }
 
 bool WeightTable::index_code_bits(const PackContents& pack, const std::string& name, int& code_bits,
@@ -244,23 +141,22 @@ bool WeightTable::read_bf16_host(const std::string& name, std::vector<uint16_t>&
     const auto it = table_.find(name);
     if (it == table_.end()) { err = name + ": no such tensor"; return false; }
     const WeightRef& r = it->second;
-    const char* fn = file_name(r.file_id);
-    if (fn == nullptr || r.kind != WeightKind::Bf16InF32) { err = name + ": not a bf16 row of a pack file"; return false; }
+    if (pack_ == nullptr || r.file_id != 0 || r.kind != WeightKind::Bf16InF32) {
+        err = name + ": not a bf16 row of the pack's dense.bin";
+        return false;
+    }
     const uint64_t elems = (uint64_t) r.elements;
     const bool raw16 = r.src_bytes == elems * 2;
     if (!raw16 && r.src_bytes != elems * 4) { err = name + ": unexpected source size"; return false; }
-    PackFiles files(pack_dir_, pack_);
-    bool opened = false;
-    if (!files.use(r.file_id, opened, err)) return false;
     out.resize((size_t) elems);
     bool ok = true;
     if (raw16) {
-        ok = files.read(r.src_off, out.data(), (size_t) (elems * 2), err, name.c_str());
+        ok = pack_->read(r.src_off, (size_t) (elems * 2), out.data(), err);
     } else {
         std::vector<uint32_t> tmp((size_t) std::min<uint64_t>(elems, 1u << 22));
         for (uint64_t done = 0; ok && done < elems;) {
             const uint64_t n = std::min<uint64_t>(tmp.size(), elems - done);
-            ok = files.read(r.src_off + done * 4, tmp.data(), (size_t) (n * 4), err, name.c_str());
+            ok = pack_->read(r.src_off + done * 4, (size_t) (n * 4), tmp.data(), err);
             for (uint64_t i = 0; ok && i < n; ++i) out[(size_t) (done + i)] = (uint16_t) (tmp[(size_t) i] >> 16);
             done += n;
         }
@@ -268,26 +164,9 @@ bool WeightTable::read_bf16_host(const std::string& name, std::vector<uint16_t>&
     return ok;
 }
 
-bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t arena_bytes, std::string& err,
-                       const std::set<std::string>* skip) {
-    return load_from(pack_dir, nullptr, arena_base, arena_bytes, err, skip);
-}
-
 bool WeightTable::load(const PackContents& pack, void* arena_base, uint64_t arena_bytes, std::string& err,
                        const std::set<std::string>* skip) {
-    return load_from(std::string(), &pack, arena_base, arena_bytes, err, skip);
-}
-
-bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pack, void* arena_base,
-                            uint64_t arena_bytes, std::string& err, const std::set<std::string>* skip) {
-    // the index: the directory's index.txt, read and closed before the rows load, or the pack in memory's text
-    std::FILE* idx = nullptr;
-    if (pack == nullptr) {
-        const std::string path = pack_dir + "/index.txt";
-        idx = std::fopen(path.c_str(), "rb");
-        if (!idx) { err = "cannot open " + path + " (run tools/pack_index.py)"; return false; }
-    }
-    IndexLines lines = idx ? IndexLines(idx) : IndexLines(pack->index_text());
+    IndexLines lines(pack.index_text());
 
     uint64_t pool = 0;
     int align = 0;
@@ -303,8 +182,8 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
         IndexRow r;
         char name[256] = {0};
         int kind = 0;
-        // The format is written by tools/pack_index.py and is space-separated with no quoting; a name with a
-        // space in it would break the parse, which is why the parser REFUSES rather than taking what it got.
+        // The format is space-separated with no quoting; a name with a space in it would break the parse, which is
+        // why the parser REFUSES rather than taking what it got.
         const int n = std::sscanf(line,
                                   "%255s %d %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNd64 " %" SCNd64 " %d %d %d %d %d %" SCNu64 " %" SCNu64 " %" SCNu64 " %d %d",
                                   name, &r.file, &kind, &r.src_off, &r.src_bytes, &r.dst_off, &r.dst_bytes,
@@ -315,12 +194,11 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
             // A malformed index line is a WRONG BYTE OFFSET waiting to happen, and a wrong offset decodes to
             // a plausible weight.  Refuse loudly instead of loading the rows that happened to parse.
             err = "index.txt: could not parse a row (" + std::to_string(n) + " of 19 fields)";
-            if (idx) std::fclose(idx);
             return false;
         }
         r.name = name;
-        // plan v0.3 P6: a standalone native pack (tools/iq_pack.py) stores 16-bit floats as they are in the GGUF:
-        // index kinds 4 (BF16) and 5 (F16) are copied and take the engine forms of kinds 1 and 3
+        // plan v0.3 P6: the pack keeps 16-bit floats as they are in the GGUF: index kinds 4 (BF16) and 5 (F16) are
+        // copied and take the engine forms of kinds 1 and 3
         if (kind == 4 || kind == 5) {
             r.raw16 = true;
             kind = kind == 4 ? (int) WeightKind::Bf16InF32 : (int) WeightKind::F16InF32;
@@ -328,7 +206,6 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
         r.kind = (WeightKind) kind;
         rows.push_back(r);
     }
-    if (idx) std::fclose(idx);
 
     if (pool == 0 || rows.empty()) { err = "index.txt has no header or no rows"; return false; }
     // Plan v0.3 P1: a skip set compacts the arena.  Kept rows are re-placed in index order at the index's
@@ -373,11 +250,9 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
     }
 
     uint8_t* dst_base = (uint8_t*) arena_base;
-    PackFiles files(pack_dir, pack);
     table_.clear();
     report_ = LoadReport{};
-    pack_dir_ = pack_dir;
-    pack_ = pack;
+    pack_ = &pack;
 
     const double t_read0 = now_ms();
     double upload_ms = 0;
@@ -415,16 +290,11 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
             cudaFreeHost(stage_in); cudaFreeHost(stage_out);
             return false;
         }
-        bool opened = false;
-        if (!files.use(r.file, opened, err)) { cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
-#if !defined(_WIN32)
-        if (opened) {
-            // ask for this file's remaining rows up front so their reads overlap
-            for (size_t j = row_i; j < rows.size(); ++j)
-                if (rows[j].file == r.file && !skipped[j])
-                    strata::platform::advise_willneed(fileno(files.file()), rows[j].src_off, rows[j].src_bytes);
+        if (r.file != 0) {
+            err = r.name + ": " + pack.where() + " has dense.bin only (file 0), not file " + std::to_string(r.file);
+            cudaFreeHost(stage_in); cudaFreeHost(stage_out);
+            return false;
         }
-#endif
 
         // ---- the segment list: what this tensor's bytes are, plane by plane, in both forms
         Seg segs[3];
@@ -433,7 +303,7 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
         uint64_t sum_src = 0, sum_dst = 0;
         if (r.codes_bytes != 0) {
             // A quantized tensor: codes, then scales, then the optional offset plane, each contiguous in the
-            // source span in that order (pack_index.py verifies the contiguity and refuses otherwise).
+            // source span in that order.
             segs[n_segs++] = Seg{0, r.codes_bytes, 0, r.codes_bytes, Conv::Copy};
             if (r.scales_bytes) {
                 const uint64_t src_scale_bytes = r.scales_fp16 ? r.scales_bytes / 2 : r.scales_bytes;
@@ -504,7 +374,7 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
                     if (n == 1) { err = r.name + ": an fp16 plane ending on a half element"; cudaFreeHost(stage_in); cudaFreeHost(stage_out); return false; }
                     n -= 1;
                 }
-                if (!files.read(r.src_off + s.src_off + done, stage_in, (size_t) n, err, r.name.c_str())) {
+                if (!pack.read(r.src_off + s.src_off + done, (size_t) n, stage_in, err)) {
                     cudaFreeHost(stage_in); cudaFreeHost(stage_out);
                     return false;
                 }
@@ -605,7 +475,6 @@ bool WeightTable::load_from(const std::string& pack_dir, const PackContents* pac
             report_.bytes_saved += r.src_bytes - r.dst_bytes;
         }
     }
-    files.close();
     cudaFreeHost(stage_in);
     cudaFreeHost(stage_out);
 
