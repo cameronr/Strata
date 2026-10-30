@@ -37,7 +37,7 @@ namespace cpu = strata::kernels::cpu;
 
 namespace {
 
-constexpr int NT = 3;
+constexpr int NT = 16;
 constexpr int64_t H = 2560, FF = 640;
 
 double rel(const std::vector<float>& a, const std::vector<float>& b) {
@@ -213,7 +213,10 @@ int check_blob(const cpu::NativeFmt& f, const std::vector<uint8_t>& blob, int se
         cudaMemcpy(dblob, blob.data(), blob.size(), cudaMemcpyHostToDevice);
         cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice);
         const unsigned long long p = (unsigned long long) dblob;
-        const int32_t st[2] = {0, NT}, one = 1, idx[NT] = {0, 1, 2};
+        int32_t st[2] = {0, NT};
+        const int32_t one = 1;
+        int32_t idx[NT];
+        for (int i = 0; i < NT; ++i) idx[i] = i;
         cudaMemcpy(dptr, &p, 8, cudaMemcpyHostToDevice);
         cudaMemcpy(dstart, st, 8, cudaMemcpyHostToDevice);
         cudaMemcpy(dn, &one, 4, cudaMemcpyHostToDevice);
