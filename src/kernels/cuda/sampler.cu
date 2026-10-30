@@ -61,22 +61,6 @@ __device__ __forceinline__ float philox_uniform(uint64_t seed, uint64_t counter)
     return (float) (c0 >> 8) * (1.0f / 16777216.0f);
 }
 
-// GUMBEL-MAX COUPLING (STRATA_SPEC_GUMBEL=1, ported from llama.cpp-lab's --spec-coupled, lab PRs #26/#30).  The pick
-// is argmax_i p_i / E_i with E_i = -log(u_i) ~ Exp(1) and u_i a hash of (seed, counter, TOKEN ID) - exactly
-// equivalent to argmax(log p_i + Gumbel_i), so it is an exact sample of p.  Unlike the inverse-CDF pick over a
-// probability-sorted list, the noise a token gets does not depend on which other tokens survived the cut, so a
-// drafter whose candidate set differs from the target's still agrees with it on the tokens they share ("support
-// invariant").  The target keys on its row's token id.
-__device__ __forceinline__ double gumbel_exp(uint64_t seed, uint64_t counter, uint32_t token) {
-    uint64_t z = seed ^ (counter * 0x9E3779B97F4A7C15ull) ^ ((uint64_t) token * 0xD1B54A32D192ED03ull);
-    z += 0x9E3779B97F4A7C15ull;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-    z ^= z >> 31;
-    const double u = ((double) (z >> 11) + 0.5) * (1.0 / 9007199254740992.0);   // (0, 1), never 0 or 1
-    return -log(u);
-}
-
 // `count_in_history` and the penalty application, transcribed from `llama_sampler_penalties_apply`.
 // The repeat penalty MULTIPLIES for non-positive logits and DIVIDES for positive ones - dividing
 // unconditionally is the natural reading of the source paper and it INVERTS the penalty on half the
@@ -412,20 +396,11 @@ __global__ void sampler_kernel(const float* __restrict__ logits, int n_vocab, in
     double sum = 0.0;
     for (int i = 0; i < n_keep; ++i) sum += exp((double) scaled(i) - (double) smx);
     int pick = sel_ids[n_keep - 1];
-    if (p.gumbel) {
-        double best = -1.0;
-        for (int i = 0; i < n_keep; ++i) {
-            const double r = exp((double) scaled(i) - (double) smx) / sum /
-                             gumbel_exp(p.seed, p.counter + (uint64_t) t, (uint32_t) sel_ids[i]);
-            if (r > best) { best = r; pick = sel_ids[i]; }
-        }
-    } else {
-        const float u = philox_uniform(p.seed, p.counter + (uint64_t) t);
-        double cum = 0.0;
-        for (int i = 0; i < n_keep; ++i) {
-            cum += exp((double) scaled(i) - (double) smx) / sum;
-            if ((double) u < cum) { pick = sel_ids[i]; break; }
-        }
+    const float u = philox_uniform(p.seed, p.counter + (uint64_t) t);
+    double cum = 0.0;
+    for (int i = 0; i < n_keep; ++i) {
+        cum += exp((double) scaled(i) - (double) smx) / sum;
+        if ((double) u < cum) { pick = sel_ids[i]; break; }
     }
     if (threadIdx.x == 0) out[t] = pick;
 }
@@ -522,19 +497,11 @@ __device__ void sampled_tail_warp(const int* sel_ids, const float* sel_logit, in
     __syncwarp();
     if (lane == 0) {
         int pick = sel_ids[n_keep > 0 ? n_keep - 1 : 0];
-        if (p.gumbel) {
-            double best = -1.0;
-            for (int i = 0; i < n_keep; ++i) {
-                const double r = ex[i] / gumbel_exp(p.seed, p.counter + (uint64_t) t, (uint32_t) sel_ids[i]);
-                if (r > best) { best = r; pick = sel_ids[i]; }
-            }
-        } else {
-            const float u = philox_uniform(p.seed, p.counter + (uint64_t) t);
-            double cum = 0.0;
-            for (int i = 0; i < n_keep; ++i) {
-                cum += ex[i];
-                if ((double) u < cum) { pick = sel_ids[i]; break; }
-            }
+        const float u = philox_uniform(p.seed, p.counter + (uint64_t) t);
+        double cum = 0.0;
+        for (int i = 0; i < n_keep; ++i) {
+            cum += ex[i];
+            if ((double) u < cum) { pick = sel_ids[i]; break; }
         }
         out[t] = pick;
     }
@@ -793,10 +760,6 @@ bool env_flag(const char* name) {
     return e != nullptr && *e != '\0' && std::strcmp(e, "0") != 0;
 }
 
-bool gumbel_env() {
-    static const bool on = env_flag("STRATA_SPEC_GUMBEL");
-    return on;
-}
 
 SampledPath sampled_path() {
     static const SampledPath path = env_flag("STRATA_OLD_SAMPLER")         ? SampledPath::Old
@@ -919,7 +882,6 @@ bool sample_greedy_cluster(const float* logits, int n_tokens, int n_vocab, int* 
 void sample_tokens(const float* logits, int n_tokens, int n_vocab, const int* history, int history_len,
                    const SamplerParams& p_in, int* out, void* stream) {
     SamplerParams p = p_in;
-    p.gumbel = p_in.gumbel || gumbel_env();            // the target's pick; greedy rows never read it
     if (n_tokens <= 0 || n_vocab <= 0) return;
     if (p.penalty_last_n > 0 && (history == nullptr || history_len <= 0)) {
         std::fprintf(stderr, "sample_tokens: penalty_last_n %d needs a history (got %p, len %d)\n",

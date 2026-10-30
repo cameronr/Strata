@@ -102,7 +102,7 @@ __global__ void swiglu_quantize_q8_0_scaled_kernel(float* __restrict__ gate_up, 
     out[2 + lane] = (uint8_t) (int8_t) v;
 }
 
-// ---- THE SAME INTEGERS FROM FEWER INSTRUCTIONS.  `STRATA_OLD_GROUPED=1` keeps the kernels above.
+// ---- THE SAME INTEGERS FROM FEWER INSTRUCTIONS.  The kernels above stay for activations that are not word-aligned.
 //
 // **INSIDE A CHUNK, WHICH CODE MEETS WHICH ACTIVATION IN A `dp4a` WORD IS FREE.**  `s = sum_e code_e * x_e` and
 // `hx = sum_e x_e` are exact integer sums (|s| <= 32 * 3 * 128), so any grouping of the 32 products into words
@@ -197,22 +197,13 @@ void check(const char* who, void* stream) {
     (void) stream;
 }
 
-// The previous kernels stay selectable for A/B - `STRATA_OLD_GROUPED=1` in the environment, read once, on first
-// use; the choice is made at each launch, so a captured graph keeps the kernels it was captured with.
-bool old_kernels() {
-    static const bool env = [] {
-        const char* e = std::getenv("STRATA_OLD_GROUPED");
-        return e != nullptr && e[0] == '1';
-    }();
-    return env;
-}
 
 // The new kernels read the activations as aligned words (`load_x_chunk`), so they need 4-byte aligned activation
 // rows - the input's and the intermediate's in `scratch`; the per-hit ones also read a blob's codes as uint2, which
 // needs an 8-byte aligned arena and slot size (the grouped kernels above already did).  Anything else keeps the
 // previous kernels rather than issuing a misaligned load.
 bool new_grouped(const void* x_q8_0, const void* scratch) {
-    return !old_kernels() && ((uintptr_t) x_q8_0 & 3) == 0 && ((uintptr_t) scratch & 3) == 0;
+    return ((uintptr_t) x_q8_0 & 3) == 0 && ((uintptr_t) scratch & 3) == 0;
 }
 
 }  // namespace
