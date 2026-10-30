@@ -97,7 +97,7 @@ def main() -> int:
             cpath = Path(tempfile.gettempdir()) / f"ab_{name}.json"
             cpath.write_text(json.dumps(cfg, indent=1))
             penv = dict(os.environ, **e)
-            proc = subprocess.Popen([sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
+            proc = subprocess.Popen([sys.executable, str(ROOT / "serve" / "server.py"), "--config",
                                      str(cpath), "--port", str(a.port)], cwd=str(ROOT), env=penv,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:

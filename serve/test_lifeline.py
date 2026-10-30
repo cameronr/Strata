@@ -122,7 +122,7 @@ class Lifeline(unittest.TestCase):
     def test_the_child_is_recorded_while_it_runs_and_forgotten_after(self):
         from serve import procs
         proc, info = self.launch("sleep")
-        base = Path(self.temp.name) / "Strata" / "procs" if not POSIX else Path(self.temp.name) / "strata" / "procs"
+        base = Path(self.temp.name) / "Lamina" / "procs" if not POSIX else Path(self.temp.name) / "lamina" / "procs"
         record = base / f"{info['child']}.json"
         deadline = time.monotonic() + 5
         while not record.exists() and time.monotonic() < deadline:

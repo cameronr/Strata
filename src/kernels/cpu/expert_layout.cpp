@@ -32,7 +32,7 @@ int cpu_isa_cap() {
         if (v == "avx2") return 2;
         if (v == "avx") return 1;
         if (v == "sse" || v == "sse4.2" || v == "none") return 0;
-        std::fprintf(stderr, "strata: STRATA_FORCE_ISA=%s is not avx2, avx or sse; ignored\n", f);
+        std::fprintf(stderr, "lamina: STRATA_FORCE_ISA=%s is not avx2, avx or sse; ignored\n", f);
         return 3;
     }();
     return cap;

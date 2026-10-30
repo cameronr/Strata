@@ -260,7 +260,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     }
     char fmts[48] = "Q2_0 blobs";
     if (nat_.gu_type >= 0) std::snprintf(fmts, sizeof fmts, "ggml types %d/%d", nat_.gu_type, nat_.d_type);
-    std::fprintf(stderr, "strata mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f as %s, dense %.0f)\n",
+    std::fprintf(stderr, "lamina mtp: draft layer loaded, %.0f MiB of VRAM (experts %.0f as %s, dense %.0f)\n",
                  (double) vram_ / 1048576.0, (double) g.n_expert * blob_ / 1048576.0, fmts,
                  (double) tensors_.back().off / 1048576.0);
     return true;
@@ -307,7 +307,7 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
             strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
             cudaDeviceSynchronize();
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
-            std::fprintf(stderr, "strata mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
+            std::fprintf(stderr, "lamina mtp: draft head over %lld tokens (%.1f MiB)\n", (long long) n_dvocab_,
                          (double) (n_dvocab_ * row_bytes) / 1048576.0);
             // its 2-bit copy finds each draft's row (STRATA_DRAFT_PROXY=0: the exact head over every row)
             const char* px = std::getenv("STRATA_DRAFT_PROXY");
@@ -324,7 +324,7 @@ bool MtpDrafter::bind_head(const NativeHead* head, std::string& err) {
                 cudaDeviceSynchronize();
                 vram_ += pb + sb;
             } else if (copy) {   // a head type or width the copy does not take
-                std::fprintf(stderr, "strata mtp: draft head over %lld tokens: the exact head (no 2-bit copy for it)\n",
+                std::fprintf(stderr, "lamina mtp: draft head over %lld tokens: the exact head (no 2-bit copy for it)\n",
                              (long long) n_dvocab_);
             }
         }

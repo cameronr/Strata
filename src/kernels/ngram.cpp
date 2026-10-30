@@ -179,7 +179,7 @@ void PleTable::Impl::load() {
     const uint64_t need = table_offset + n_rows * (uint64_t) row_bytes - a0;
     DirectFile f;
     std::string err;
-    if (!f.open(path, err)) { ram_note = "PLE table in RAM: " + err; std::fprintf(stderr, "strata: %s\n", ram_note.c_str()); return; }
+    if (!f.open(path, err)) { ram_note = "PLE table in RAM: " + err; std::fprintf(stderr, "lamina: %s\n", ram_note.c_str()); return; }
     constexpr uint32_t kChunk = 8u << 20;
     constexpr int kDepth = 4;
     uint64_t next = 0, got = 0;
@@ -209,7 +209,7 @@ void PleTable::Impl::load() {
     if (cancel.load()) return;
     if (!ok || got < need) {
         ram_note = "PLE table in RAM: the load failed" + (err.empty() ? std::string() : ": " + err) + "; rows stay on the SSD";
-        std::fprintf(stderr, "strata: %s\n", ram_note.c_str());
+        std::fprintf(stderr, "lamina: %s\n", ram_note.c_str());
         return;
     }
     ram = ram_base + (table_offset - a0);
@@ -218,7 +218,7 @@ void PleTable::Impl::load() {
     std::snprintf(buf, sizeof buf, "PLE table in RAM: %.1f GB in %.1f s", (double) need / 1e9, s);
     ram_note = buf;
     ram_ready.store(true, std::memory_order_release);
-    std::fprintf(stderr, "strata: %s\n", ram_note.c_str());
+    std::fprintf(stderr, "lamina: %s\n", ram_note.c_str());
 }
 
 PleTable::PleTable() : impl_(new Impl) {}

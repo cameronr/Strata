@@ -170,7 +170,7 @@ def main() -> int:
             cfg["log"] = str(Path(tempfile.gettempdir()) / f"agent_turns_{name}_r{rnd}.log")
             cpath = Path(tempfile.gettempdir()) / f"agent_turns_{name}.json"
             cpath.write_text(json.dumps(cfg, indent=1))
-            proc = subprocess.Popen([sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
+            proc = subprocess.Popen([sys.executable, str(ROOT / "serve" / "server.py"), "--config",
                                      str(cpath), "--port", str(a.port)], cwd=str(ROOT), env=dict(os.environ, **e),
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:

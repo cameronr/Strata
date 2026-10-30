@@ -759,7 +759,7 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
             static bool said = false;   // the guard runs several times in one process: one line
             if (!said) {
                 said = true;
-                std::fprintf(stderr, "strata: %sattention.compress_ratios is all zeros (a converter's placeholder): "
+                std::fprintf(stderr, "lamina: %sattention.compress_ratios is all zeros (a converter's placeholder): "
                                      "using the compiled pooling block of %lld cells (#2396)\n",
                              p.c_str(), (long long) g.idx_block);
             }

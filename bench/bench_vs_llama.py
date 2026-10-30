@@ -84,7 +84,7 @@ class Engine:
             scfg["exe"] = self.m["strata_exe"]
         p = Path(self.out) / ("strata-cfg-%s.json" % c["name"])
         p.write_text(json.dumps(scfg, indent=1))
-        return [sys.executable, str(Path(self.m["serve"]) / "server.py"), "--engine", "strata", "--config", str(p),
+        return [sys.executable, str(Path(self.m["serve"]) / "server.py"), "--config", str(p),
                 "--port", str(PORT)]
 
     def start(self, out):

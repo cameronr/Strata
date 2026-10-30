@@ -82,7 +82,7 @@ to BF16, the form the engine reads.
 
 Start a config with its launcher, or from the Lamina folder:
 
-    .venv\Scripts\python.exe serve\server.py --engine strata --config lamina-iq3_s.json
+    .venv\Scripts\python.exe serve\server.py --config lamina-iq3_s.json
 
 The server listens on the config's `port` (8081, 8082 and 8083; `--port` overrides it). The configs' paths are relative
 to the Lamina folder, where the server starts. On Linux the CUDA libraries come from the toolkit through the loader's

@@ -149,7 +149,7 @@ bool pool_grow(ElasticPool& p, int64_t cells, const std::function<VmmChunk()>& t
         if (fresh[a].empty()) continue;
         most = std::max(most, fresh[a].size());
         if (!p.range.map_range(c0, c1, take)) {
-            std::fprintf(stderr, "strata: the elastic K/V could not map %zu chunks (the driver has no VRAM left)\n",
+            std::fprintf(stderr, "lamina: the elastic K/V could not map %zu chunks (the driver has no VRAM left)\n",
                          fresh[a].size());
             return false;
         }
@@ -162,7 +162,7 @@ bool pool_grow(ElasticPool& p, int64_t cells, const std::function<VmmChunk()>& t
             uint8_t* dst = p.range.base() + (uint64_t) fresh[a][k] * G;
             const uint64_t lo = (uint64_t) fresh[a][k] * G - p.off[a];
             if (p.fill ? !p.fill(a, lo, lo + G, dst) : cudaMemset(dst, 0, (size_t) G) != cudaSuccess) {
-                std::fprintf(stderr, "strata: the elastic K/V could not clear or fill a chunk: %s\n",
+                std::fprintf(stderr, "lamina: the elastic K/V could not clear or fill a chunk: %s\n",
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
             }
@@ -259,7 +259,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         // the elastic K/V: each array at a chunk boundary of the state's own range, the first cells mapped
         // (then the indexer's pooled keys: a row per idx_block cells, and the spare's past the last)
         if (s.page_size % s.idx_block != 0) {
-            std::fprintf(stderr, "strata: the elastic K/V needs whole indexer blocks in a page\n");
+            std::fprintf(stderr, "lamina: the elastic K/V needs whole indexer blocks in a page\n");
             return 0;
         }
         auto pool = std::make_unique<ElasticPool>();
@@ -269,7 +269,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         const uint64_t row = (uint64_t) s.idx_dim * 4;
         pool->add((uint64_t) (s.page_size / s.idx_block) * row, 2 * row);
         if (!pool->range.reserve(pool->bytes()) || !pool_grow(*pool, g_kv_elastic_init, [] { return (VmmChunk) 0; })) {
-            std::fprintf(stderr, "strata: the elastic K/V could not reserve or map its pools\n");
+            std::fprintf(stderr, "lamina: the elastic K/V could not reserve or map its pools\n");
             return 0;
         }
         for (const uint64_t o : pool->off) a.push_back(pool->range.base() + o);
@@ -323,7 +323,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
             return cudaMemcpy(dst, (a == 0 ? hc : hs).data(), (size_t) (hi - lo), cudaMemcpyHostToDevice) == cudaSuccess;
         };
         if (!pool->range.reserve(pool->bytes()) || !pool_grow(*pool, g_kv_elastic_init, [] { return (VmmChunk) 0; })) {
-            std::fprintf(stderr, "strata: the elastic rotary tables could not reserve or map their range\n");
+            std::fprintf(stderr, "lamina: the elastic rotary tables could not reserve or map their range\n");
             return 0;
         }
         st.cos_tab = (float*) (pool->range.base() + pool->off[0]);

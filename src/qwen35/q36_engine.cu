@@ -3227,7 +3227,7 @@ struct Serve {
                 if (fin) {
                     std::printf("BDONE %d %lld %s %.1f\n", b, (long long) sl.produced, fin, ms_since(sl.t0));
                     if (sl.offered > 0)
-                        std::fprintf(stderr, "strata batch: slot %d: %lld of %lld MTP proposals accepted\n", b, sl.accepted,
+                        std::fprintf(stderr, "lamina batch: slot %d: %lld of %lld MTP proposals accepted\n", b, sl.accepted,
                                      sl.offered);
                     sl.active = false;
                     ss.active = false;
@@ -3550,7 +3550,7 @@ struct Serve {
             }
             std::printf("BADM %d %d\n", slot, cont ? 1 : 0);
             std::fflush(stdout);
-            std::fprintf(stderr, "strata batch: slot %d takes a prompt of %zu tokens = %zu reused + %lld read in %.0f ms (%.1f "
+            std::fprintf(stderr, "lamina batch: slot %d takes a prompt of %zu tokens = %zu reused + %lld read in %.0f ms (%.1f "
                          "tok/s)%s\n", slot, ids.size(), reuse, (long long) fresh, prompt_ms,
                          prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, cont ? "" : ", done at once");
             return;
@@ -3602,7 +3602,7 @@ struct Serve {
         std::printf("DONE %lld %zu %.1f %.1f %s %lld %lld %zu 0 0 0 0 0.0 %lld 0\n", produced, ids.size(), prompt_ms,
                     decode_ms, finish, accepted, offered, reuse, (long long) fresh);
         std::fflush(stdout);
-        std::fprintf(stderr, "strata serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
+        std::fprintf(stderr, "lamina serve: session %d: prompt %zu tokens = %zu reused + %lld read in %.0f ms (%.1f tok/s), "
                      "%lld generated in %.0f ms (%.1f tok/s), drafts accepted %lld of %lld (%s)\n", s, ids.size(), reuse,
                      (long long) fresh, prompt_ms, prompt_ms > 0 ? 1000.0 * (double) fresh / prompt_ms : 0.0, produced,
                      decode_ms, decode_ms > 0 ? 1000.0 * (double) produced / decode_ms : 0.0, accepted, offered, finish);

@@ -158,12 +158,12 @@ def is_same(pid: int, token: str, cmd: list[str] | tuple[str, ...] | None) -> bo
 # ---------------------------------------------------------------------------------------------- records
 
 def procs_dir(create: bool = True) -> Path:
-    """The folder of launch records, in the per-user state: %LOCALAPPDATA%/Strata/procs on Windows,
+    """The folder of launch records, in the per-user state: %LOCALAPPDATA%/Lamina/procs on Windows,
     $XDG_STATE_HOME/strata/procs (~/.local/state/strata/procs) elsewhere."""
     if WINDOWS:
-        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Strata" / "procs"
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Lamina" / "procs"
     else:
-        base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "strata" / "procs"
+        base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "lamina" / "procs"
     if create and not base.exists():
         base.mkdir(mode=0o700, parents=True, exist_ok=True)
     return base
@@ -307,7 +307,7 @@ def end_leftovers(profile: str | None = None, *, grace: float = 8.0, say=None) -
         outcome = end_one(record, grace=grace)
         result[outcome].append({"pid": record["pid"], "role": record.get("role"), "profile": record.get("profile")})
         if say is not None and outcome != "gone":
-            say(f"[strata] leftover {record.get('role', 'process')} {record['pid']} {outcome}")
+            say(f"[lamina] leftover {record.get('role', 'process')} {record['pid']} {outcome}")
     return result
 
 
@@ -361,5 +361,5 @@ def end_orphans(engine_exe: str, *, grace: float = 8.0, say=None) -> list[dict]:
         outcome = end_one(record, grace=grace)
         ended.append({"pid": ident.pid, "outcome": outcome})
         if say is not None and outcome != "gone":
-            say(f"[strata] an engine left behind by an earlier run (pid {ident.pid}) {outcome}")
+            say(f"[lamina] an engine left behind by an earlier run (pid {ident.pid}) {outcome}")
     return ended

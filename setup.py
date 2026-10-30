@@ -639,7 +639,7 @@ def write_launcher(key: str, m: Model, cfg: Path, port: int) -> Path:
         lines = ["@echo off", f"title Lamina {m.title}",
                  f"rem {m.title} on http://127.0.0.1:{port}/v1 ({cfg.name}, written by setup.py).",
                  "rem A PYTHONPATH set for another Python would mix that Python's packages into this one's.",
-                 'set "PYTHONPATH="', 'cd /d "%~dp0"', f'"{py}" serve\\server.py --engine strata --config {cfg.name} %*',
+                 'set "PYTHONPATH="', 'cd /d "%~dp0"', f'"{py}" serve\\server.py --config {cfg.name} %*',
                  "pause"]
         p.write_bytes(("\r\n".join(lines) + "\r\n").encode())
     else:
@@ -647,7 +647,7 @@ def write_launcher(key: str, m: Model, cfg: Path, port: int) -> Path:
         p = ROOT / f"run-{key}.sh"
         lines = ["#!/bin/sh", f"# {m.title} on http://127.0.0.1:{port}/v1 ({cfg.name}, written by setup.py).",
                  'cd "$(dirname "$0")" || exit 1', "unset PYTHONPATH",
-                 f'exec "{py}" serve/server.py --engine strata --config {cfg.name} "$@"']
+                 f'exec "{py}" serve/server.py --config {cfg.name} "$@"']
         p.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
         p.chmod(0o755)
     return p

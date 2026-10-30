@@ -18,4 +18,4 @@ set -- --no-build --model "$MODEL" --data-dir /data --vision "${VISION:-on}"
 # the key reaches the server through its environment, not its command line
 STRATA_API_KEY="$API_KEY"
 export STRATA_API_KEY
-exec .venv/bin/python serve/server.py --engine strata --config "lamina-$MODEL.json" --host 0.0.0.0 --port 8080
+exec .venv/bin/python serve/server.py --config "lamina-$MODEL.json" --host 0.0.0.0 --port 8080

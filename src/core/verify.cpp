@@ -396,7 +396,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             err = "verify: stream create failed";
             return false;
         }
-    std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
+    std::fprintf(stderr, "lamina verify: window up to %d tokens, %.1f MiB of device buffers\n", max_t,
                  (double) count.used / 1048576.0);
     return true;
 }
@@ -1068,7 +1068,7 @@ bool Verifier::capture(int T, std::string& err) {
     }
     const cudaError_t ue = cudaGraphUpload(exec_[T], cs_);
     const cudaError_t us = cudaStreamSynchronize(cs_);
-    std::fprintf(stderr, "strata verify: captured the %d-token window (upload %s, sync %s)\n", T,
+    std::fprintf(stderr, "lamina verify: captured the %d-token window (upload %s, sync %s)\n", T,
                  cudaGetErrorString(ue), cudaGetErrorString(us));
     return true;
 }

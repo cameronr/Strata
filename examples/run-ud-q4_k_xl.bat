@@ -6,5 +6,5 @@ rem Its --second-gpu holds more experts and may drive the display.
 rem A PYTHONPATH set for another Python would mix that Python's packages into the venv's.
 set "PYTHONPATH="
 cd /d "%~dp0.."
-".venv\Scripts\python.exe" serve\server.py --engine strata --config examples\ud-q4_k_xl.json
+".venv\Scripts\python.exe" serve\server.py --config examples\ud-q4_k_xl.json
 pause

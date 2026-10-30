@@ -696,7 +696,7 @@ def start_server(cfg_path: Path, port: int, gpu: str | None, log_path: Path):
             tmp = log_path.with_suffix(".config.json")
             tmp.write_text(json.dumps(safe), encoding="utf-8")
             cfg_path = tmp
-    cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path), "--port", str(port)]
+    cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--config", str(cfg_path), "--port", str(port)]
     if gpu:
         cmd += ["--gpu", gpu]
     logf = open(log_path, "w", encoding="utf-8", errors="replace")

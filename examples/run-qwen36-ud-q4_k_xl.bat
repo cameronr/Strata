@@ -6,5 +6,5 @@ rem its VRAM run on the CPU.
 rem A PYTHONPATH set for another Python would mix that Python's packages into the venv's.
 set "PYTHONPATH="
 cd /d "%~dp0.."
-".venv\Scripts\python.exe" serve\server.py --engine strata --config examples\qwen36-ud-q4_k_xl.json
+".venv\Scripts\python.exe" serve\server.py --config examples\qwen36-ud-q4_k_xl.json
 pause

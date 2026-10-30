@@ -2206,8 +2206,8 @@ class PrometheusMetrics(unittest.TestCase):
         self.assertEqual(m["llamacpp:tokens_predicted_total"], t["output_tokens"])
         self.assertEqual(m["llamacpp:tokens_predicted_seconds_total"], 0.4)
         self.assertEqual((m["llamacpp:requests_processing"], m["llamacpp:requests_deferred"]), (0, 0))
-        self.assertEqual((m["strata:requests_total"], m["strata:drafts_offered_total"],
-                          m["strata:drafts_accepted_total"]), (2, 17, 10))
+        self.assertEqual((m["lamina:requests_total"], m["lamina:drafts_offered_total"],
+                          m["lamina:drafts_accepted_total"]), (2, 17, 10))
 
     def test_throughput_gauges_cover_the_window_between_scrapes(self):
         """#2341: llama.cpp reads these two from a bucket it resets on every scrape, so a scrape that saw no
@@ -2529,25 +2529,18 @@ class DraftHeadHint(unittest.TestCase):
         p.write_text(before + text, encoding="utf-8")
         return str(p), len(before.encode())
 
-    def test_the_engines_hint_is_relayed(self):
-        p, off = self.log("strata mtp: the draft head over 106299 tokens needs 348 MiB of VRAM and 120 MiB is free.\n"
-                          "strata mtp: hint: a smaller draft vocabulary needs less VRAM: --draft-vocab en (...)\n"
-                          "strata serve: mtp: the draft head does not fit\n")
+    def test_the_failure_gets_the_advice(self):
+        p, off = self.log("lamina serve: mtp: the draft head does not fit\n")
         h = start_failure_hint(p, off)
         self.assertIn("the draft head does not fit", h)
-        self.assertIn("348 MiB", h)
-        self.assertIn("--draft-vocab en", h)
-
-    def test_an_older_engine_gets_the_advice_in_words(self):
-        p, off = self.log("strata serve: mtp: the draft head does not fit\n")
-        self.assertIn("--draft-vocab en", start_failure_hint(p, off))
+        self.assertIn("draft_vocab_en.bin", h)
 
     def test_other_failures_and_earlier_starts_add_nothing(self):
-        p, off = self.log("strata serve: cannot open the pack\n")
+        p, off = self.log("lamina serve: cannot open the pack\n")
         self.assertEqual(start_failure_hint(p, off), "")
         # an earlier start's failure (before this start's offset) is not this one's
-        p, off = self.log("strata serve: cannot open the pack\n",
-                          before="strata serve: mtp: the draft head does not fit\n")
+        p, off = self.log("lamina serve: cannot open the pack\n",
+                          before="lamina serve: mtp: the draft head does not fit\n")
         self.assertEqual(start_failure_hint(p, off), "")
         self.assertEqual(start_failure_hint(None, 0), "")
         self.assertEqual(start_failure_hint(str(Path(tempfile.mkdtemp()) / "missing.log"), 0), "")
@@ -2664,7 +2657,7 @@ class StartCrashReported(unittest.TestCase):
         from serve.server import transient_start_failure
         d = tempfile.mkdtemp()
         p = Path(d) / "engine.log"
-        p.write_text("[strata] 2026-10-13 17:49:15 engine started: /x/strata --serve\n", encoding="utf-8")
+        p.write_text("[lamina] 2026-10-13 17:49:15 engine started: /x/strata --serve\n", encoding="utf-8")
         self.assertTrue(transient_start_failure(str(p), 0, 3.0, 0))         # a silent plain exit: the old retry
         self.assertTrue(transient_start_failure(str(p), 0, 3.0, -6))        # SIGABRT (ROCm teardown)
         self.assertFalse(transient_start_failure(str(p), 0, 3.0, 1))        # the engine's own error exit
@@ -2674,7 +2667,7 @@ class StartCrashReported(unittest.TestCase):
             for sig in (signal.SIGILL, signal.SIGSEGV, signal.SIGBUS, signal.SIGKILL):
                 self.assertFalse(transient_start_failure(str(p), 0, 3.0, -int(sig)), sig)
         # the runtime's own words keep it a retry whatever the status
-        p.write_text("[strata] x engine started\nterminate called after throwing an instance of "
+        p.write_text("[lamina] x engine started\nterminate called after throwing an instance of "
                      "'rocr::AMD::hsa_exception'\n", encoding="utf-8")
         self.assertTrue(transient_start_failure(str(p), 0, 3.0, -6))
 
@@ -3501,7 +3494,7 @@ class WebApp(unittest.TestCase):
         try:
             props = json.loads(self.get("/props")[2])
             self.assertEqual(props["model_path"], engine.model_path)
-            self.assertEqual(props["build_info"], "Strata 0.1.21")
+            self.assertEqual(props["build_info"], "Lamina 0.1.21")
             for busy in (True, False):
                 with self.svc.status_lock:
                     self.svc.status["busy"] = busy

@@ -55,7 +55,7 @@ bool AdaptiveTier::init(ExpertCache& cache, ExpertSource& src,
     } else {
         cudaGetLastError();   // fall back to copying pageable sources directly, as before
         stage_arena_ = nullptr;
-        std::fprintf(stderr, "strata: adaptive tier staging arena unavailable, copying pageable sources directly\n");
+        std::fprintf(stderr, "lamina: adaptive tier staging arena unavailable, copying pageable sources directly\n");
         std::fflush(stderr);
     }
     if (!ok) {

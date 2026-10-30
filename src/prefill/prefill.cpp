@@ -569,7 +569,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     int64_t c0 = 0;
     for (; c0 < n; c0 += m.T) {
         if (should_stop && should_stop()) break;   // the chunks before stay: `prev` and the state hold them
-        if (trace) { std::fprintf(stderr, "strata trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
+        if (trace) { std::fprintf(stderr, "lamina trace: prompt chunk %lld of %lld\n", (long long) c0, (long long) n); std::fflush(stderr); }
         const int64_t T = std::min(m.T, n - c0), p0 = pos0 + c0;
         ++stats_.chunks;
         // ---- a sub-chunk's residual before the first layer here reads it: the embeddings broadcast to the four

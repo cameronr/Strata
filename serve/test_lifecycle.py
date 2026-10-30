@@ -148,7 +148,7 @@ class Lifecycle(unittest.TestCase):
             return response.status, data if "event-stream" in response.headers.get("Content-Type", "") else json.loads(data)
 
     def test_discover_chat_unload_and_stream_reload(self):
-        self.assertEqual(self.request("/api/health")[1]["service"], "strata")
+        self.assertEqual(self.request("/api/health")[1]["service"], "lamina")
         self.assertFalse(self.request("/v1/status")[1]["loaded"])
         self.assertEqual(self.request("/v1/models")[1]["data"][0]["status"]["value"], "unloaded")
         self.assertTrue(self.request("/props")[1]["models_autoload"])
