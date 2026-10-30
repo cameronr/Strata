@@ -1,6 +1,7 @@
 // src/prefill/experts.cpp - see include/strata/prefill/experts.hpp.
 #include "strata/prefill/experts.hpp"
 
+#include "strata/core/cuda_host.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/prefill/gemm.hpp"
@@ -30,13 +31,6 @@ constexpr int NPTR = 7;                  // per-expert device pointers: blob, xs
 // copies in submission order, whatever their stream)
 constexpr uint64_t PIECE_REMOTE = 32ull << 20, PIECE_LOCAL = 4ull << 20;   // its x16 link, the first GPU's x4
 constexpr size_t MMQ_TAIL = 4096;        // zeroed after a batch's gathered experts: MMQ reads past the last one
-
-struct OnDevice {   // a remote runner's GPU current for one call, the main one again afterwards
-    int main;
-    bool set;
-    OnDevice(int dev, int main_dev, bool remote) : main(main_dev), set(remote) { if (set) cudaSetDevice(dev); }
-    ~OnDevice() { if (set) cudaSetDevice(main); }
-};
 
 // Bump allocation from a region; without one it only counts (bytes_needed).
 struct Alloc {
@@ -166,7 +160,7 @@ ExpertRunner::ExpertRunner() : impl_(new Impl) {}
 ExpertRunner::~ExpertRunner() {
     Impl& m = *impl_;
     if (m.dev < 0) return;
-    OnDevice on(m.dev, m.main, m.remote);
+    core::DeviceScope on(m.dev, m.main, m.remote);
     if (m.s) cudaStreamSynchronize(m.s);
     if (m.copy) cudaStreamSynchronize(m.copy);
     for (int i = 0; i < SLOTS; ++i) {
@@ -209,7 +203,7 @@ bool ExpertRunner::init(int device, int main_device, void* stream, core::ExpertS
     m.mark.assign((size_t) max_chunk, -1);
     m.first.resize((size_t) max_chunk);
     m.count.resize((size_t) max_chunk);
-    OnDevice on(device, main_device, m.remote);
+    core::DeviceScope on(device, main_device, m.remote);
     bool ok = cudaEventCreate(&m.t0) == cudaSuccess && cudaEventCreate(&m.t1) == cudaSuccess;
     for (int i = 0; ok && i < 2; ++i)
         ok = cudaEventCreateWithFlags(&m.up_done[i], cudaEventDisableTiming) == cudaSuccess &&
@@ -247,7 +241,7 @@ bool ExpertRunner::init(int device, int main_device, void* stream, core::ExpertS
 
 bool ExpertRunner::bind(void* region, uint64_t bytes, int64_t chunk, std::string& err, void* area, uint64_t area_bytes) {
     Impl& m = *impl_;
-    OnDevice on(m.dev, m.main, m.remote);
+    core::DeviceScope on(m.dev, m.main, m.remote);
     m.pre_layer = -1;
     if (region == nullptr) {
         if (m.owned != nullptr) return true;
@@ -369,7 +363,7 @@ int ExpertRunner::prefetch_pending() const {
 bool ExpertRunner::prefetch_next(std::string& err) {
     Impl& m = *impl_;
     if (!prefetch_left()) return true;
-    OnDevice on(m.dev, m.main, m.remote);
+    core::DeviceScope on(m.dev, m.main, m.remote);
     const int64_t layer = m.pre_layer;
     const size_t bb = (size_t) strata::kernels::cpu::expert_layout().blob_bytes(layer);
     const size_t stride = (size_t) area_stride(layer);
@@ -423,7 +417,7 @@ cudaEvent_t ExpertRunner::piece_done(int64_t k) const { return impl_->piece_ev[(
 
 void ExpertRunner::stage_input(int64_t t0, int64_t rows, cudaEvent_t ready) {
     Impl& m = *impl_;
-    OnDevice on(m.dev, m.main, m.remote);
+    core::DeviceScope on(m.dev, m.main, m.remote);
     cudaStreamWaitEvent(m.s, ready, 0);   // behind the previous layer's sums, which pass through `input`
     cudaMemcpyAsync(m.input + t0 * N, m.h_input + t0 * N, (size_t) rows * N * 2, cudaMemcpyHostToDevice, m.s);
 }
@@ -440,7 +434,7 @@ bool ExpertRunner::run_layer(int64_t layer, int64_t T, int64_t t_begin, int64_t 
         err = "prompt experts: a layer's share is out of range";
         return false;
     }
-    OnDevice on(m.dev, m.main, m.remote);
+    core::DeviceScope on(m.dev, m.main, m.remote);
     const auto h0 = std::chrono::steady_clock::now();
     if (t_begin == 0) {
         if (m.timed && cudaEventQuery(m.t1) == cudaSuccess) {   // the previous layer (the main GPU waited for it)

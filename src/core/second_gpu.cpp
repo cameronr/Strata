@@ -1,6 +1,7 @@
 // src/core/second_gpu.cpp - see include/strata/core/second_gpu.hpp.
 #include "strata/core/second_gpu.hpp"
 
+#include "strata/core/cuda_host.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -28,12 +29,6 @@ int bucket(int groups) {
     for (int b : {1, 2, 3, 4, 6, 8, 12, 16, 24, 32}) if (groups <= b) return b;
     return groups <= 48 ? 48 : groups;
 }
-
-struct DeviceScope {   // the second GPU current for one call, the main one again afterwards
-    int main;
-    DeviceScope(int dev, int main_dev) : main(main_dev) { cudaSetDevice(dev); }
-    ~DeviceScope() { cudaSetDevice(main); }
-};
 
 }  // namespace
 

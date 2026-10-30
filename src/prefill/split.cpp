@@ -2,6 +2,7 @@
 #include "strata/prefill/split.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
+#include "strata/core/cuda_host.hpp"
 #include "strata/core/geometry.hpp"
 #include "strata/core/layer.hpp"
 #include "strata/core/layout.hpp"
@@ -20,7 +21,6 @@ namespace strata::prefill {
 namespace {
 
 using Clock = std::chrono::steady_clock;
-double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 constexpr int64_t SUB = 2048;   // the prompt path's sub-chunk (prefill.cpp): the residual goes across in these
 uint64_t up(uint64_t n) { return (n + 255) & ~255ull; }
@@ -247,7 +247,7 @@ struct PromptSplit::Impl {
             e = std::string("prompt split: copy in: ") + cudaGetErrorString(cudaGetLastError());
             return false;
         }
-        self->ms_copy_in += ms_since(t0);
+        self->ms_copy_in += core::ms_since(t0);
         return true;
     }
 
@@ -629,7 +629,7 @@ float* PromptSplit::out_begin(std::string& err) {
         err = std::string("prompt split: ") + cudaGetErrorString(cudaGetLastError());
         return nullptr;
     }
-    ms_first_waited += ms_since(t0);
+    ms_first_waited += core::ms_since(t0);
     return m.host_R;
 }
 
@@ -692,7 +692,7 @@ bool PromptSplit::finish(std::string& err) {
     cudaSetDevice(cur);
     m.p1->add_routed(m.p2.routed());
     m.p2.clear_routed();
-    ms_finish += ms_since(t0);
+    ms_finish += core::ms_since(t0);
     return ok;
 }
 

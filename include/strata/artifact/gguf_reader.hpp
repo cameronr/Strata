@@ -186,6 +186,10 @@ inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
         elems = 256;
         bytes = 210;
         return true;
+    case 15:   // Q8_K
+        elems = 256;
+        bytes = 292;
+        return true;
     case 16:
         elems = 256;
         bytes = 66;
@@ -197,6 +201,10 @@ inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
     case 18:
         elems = 256;
         bytes = 98;
+        return true;
+    case 19:   // IQ1_S
+        elems = 256;
+        bytes = 50;
         return true;
     case 20:
         elems = 32;
@@ -221,6 +229,10 @@ inline bool block_geometry(uint32_t t, int& elems, int& bytes) {
     case 24:   // I8: raw bytes (the FP8 PLE table of tools/ple_fp8_pack.py)
         elems = 1;
         bytes = 1;
+        return true;
+    case 28:   // F64
+        elems = 1;
+        bytes = 8;
         return true;
     case 40:   // NVFP4: 64 values = 4 UE4M3 sub-block scales + 32 bytes of E2M1 codes
         elems = 64;

@@ -2,6 +2,7 @@
 #include "strata/core/split_head.hpp"
 
 #include "strata/artifact/gguf_reader.hpp"
+#include "strata/core/cuda_host.hpp"
 #include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/verify_kernels.hpp"
@@ -13,12 +14,6 @@
 
 namespace strata::core {
 namespace {
-
-struct DeviceScope {   // this GPU current for one call, the main one again afterwards
-    int main;
-    DeviceScope(int dev, int main_dev) : main(main_dev) { cudaSetDevice(dev); }
-    ~DeviceScope() { cudaSetDevice(main); }
-};
 
 }  // namespace
 

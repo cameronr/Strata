@@ -1,6 +1,7 @@
 // src/core/mtp.cpp - see include/strata/core/mtp.hpp.
 #include "strata/core/mtp.hpp"
 
+#include "strata/core/cuda_host.hpp"
 #include "strata/core/native_head.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/draft_proxy.hpp"
@@ -40,33 +41,6 @@ namespace {
 constexpr float EPS = 1e-6f;
 constexpr int GGML_Q8_0 = 8;
 using Clock = std::chrono::steady_clock;
-double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
-
-struct Bump {
-    uint8_t* base = nullptr;
-    uint64_t used = 0;
-    template <typename T> T* take(uint64_t n) {
-        T* p = base ? (T*) (base + used) : nullptr;
-        used += (n * sizeof(T) + 255) & ~255ull;
-        return p;
-    }
-};
-
-bool mapped(size_t bytes, void** h, void** d) {
-    if (cudaHostAlloc(h, bytes, cudaHostAllocMapped) != cudaSuccess) return false;
-    std::memset(*h, 0, bytes);
-    return cudaHostGetDevicePointer(d, *h, 0) == cudaSuccess;
-}
-
-strata::kernels::QsaShapes shapes_of(const ModelGeometry& g) {
-    strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
-    s.n_head = g.n_head;
-    s.n_head_kv = g.n_head_kv;
-    s.head_dim = g.head_dim;
-    s.idx_n_head = g.idx_q_heads;
-    s.idx_dim = g.idx_key_dim;
-    return s;
-}
 
 bool read_file(const std::string& path, std::vector<uint8_t>& out) {
     std::ifstream f(path, std::ios::binary | std::ios::ate);
@@ -177,7 +151,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     for (const char* n : required) if (!q8(n)) { err = std::string("mtp: ") + n + " is missing (q8_0)"; return false; }
 
     // ---- the layer's own K/V (dense attention: no indexer state is read), FP16 or INT8 (qsa_draft_kv_format)
-    const strata::kernels::QsaShapes s = shapes_of(g);
+    const strata::kernels::QsaShapes s = strata::kernels::qsa_shapes(g);
     const int64_t max_cells = ss.qsa_states[0].max_cells;
     const uint64_t sb = qsa_state_bytes(g, max_cells, false, qsa_draft_kv_format());
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
@@ -346,7 +320,7 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
     using namespace strata::kernels;
     const ModelGeometry& g = *g_;
     const int64_t N = g.n_embd, HC = g.hc, NH = g.n_head, HD = g.head_dim, NKV = g.n_head_kv;
-    const QsaShapes s = shapes_of(g);
+    const QsaShapes s = strata::kernels::qsa_shapes(g);
     const int32_t* step = step_ + row0 * 4;
     const int32_t* pos = pos_ + row0 * NH;
     try {
@@ -398,7 +372,7 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
 
 void MtpDrafter::norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs) {
     using namespace strata::kernels;
-    const QsaShapes s = shapes_of(*g_);
+    const QsaShapes s = strata::kernels::qsa_shapes(*g_);
     native_qsa_rms_norm_weighted(data, gamma, data, cols, rows, EPS, cs);
     native_rope_apply(data, data, rows, cols, (int) s.n_rot, rope_scaling(), p, cs);
 }
@@ -409,7 +383,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
     SessionState& ss = *ss_;
     const int T = 1;
     const int64_t N = g.n_embd, HC = g.hc, K = ss.k, NH = g.n_head, HD = g.head_dim;
-    const QsaShapes s = shapes_of(g);
+    const QsaShapes s = strata::kernels::qsa_shapes(g);
     const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
     const int32_t* step = step_ + step_row * 4;
     const int32_t* pos = pos_ + step_row * NH;

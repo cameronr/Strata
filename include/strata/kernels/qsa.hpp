@@ -87,6 +87,8 @@
 // The RAW tail is fp32 for the same reason and because it is only `idx_block - 1` rows.
 #pragma once
 
+#include "strata/core/geometry.hpp"
+
 #include <cstdint>
 
 namespace strata::kernels {
@@ -113,6 +115,17 @@ inline QsaShapes qsa_real_shapes() {
     // one page = one indexer block (4 cells): the granule KV streaming keeps resident (kv_stream.hpp). The readers
     // resolve a row per cell anyway, so the page size costs them nothing (measured: identical output and speed).
     s.page_size = 4;
+    return s;
+}
+
+/// A model's QSA geometry: the real artifact's, with the file's heads and widths.
+inline QsaShapes qsa_shapes(const core::ModelGeometry& g) {
+    QsaShapes s = qsa_real_shapes();
+    s.n_head = g.n_head;
+    s.n_head_kv = g.n_head_kv;
+    s.head_dim = g.head_dim;
+    s.idx_n_head = g.idx_q_heads;
+    s.idx_dim = g.idx_key_dim;
     return s;
 }
 

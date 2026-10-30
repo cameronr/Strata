@@ -1,6 +1,7 @@
 // src/prefill/prefill.cpp - see include/strata/prefill/prefill.hpp.
 #include "strata/prefill/prefill.hpp"
 
+#include "strata/core/cuda_host.hpp"
 #include "strata/core/layout.hpp"
 #include "strata/kernels/dequant_bf16.hpp"
 #include "strata/kernels/kv_q4.hpp"
@@ -41,8 +42,6 @@ constexpr int64_t UPMIX_MIN = 512;
 constexpr int64_t W16 = std::max(D * N, std::max(C + ZV + ZV, 12288 + 512 + 512 + ZV) * N + 3 * 640 * N);
 constexpr size_t GEMM_WS = 32u << 20;         // cuBLAS workspace
 constexpr int GGML_Q8_0 = 8;
-
-double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 // Bump allocation from a region; without one it only counts (bytes_needed).
 struct Alloc {
@@ -164,13 +163,6 @@ void append_kv(const core::QsaState& st, const float* Kr, const float* Vr, int64
     }
 }
 
-strata::kernels::QsaShapes shapes_of(const core::ModelGeometry& g) {
-    strata::kernels::QsaShapes s = strata::kernels::qsa_real_shapes();
-    s.n_head = g.n_head; s.n_head_kv = g.n_head_kv; s.head_dim = g.head_dim; s.idx_n_head = g.idx_q_heads;
-    s.idx_dim = g.idx_key_dim;
-    return s;
-}
-
 }  // namespace
 
 struct Prefill::Impl {
@@ -252,7 +244,7 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert != NE || ss.k != K) {
         err = "prefill: geometry differs from the artifact's"; return false;
     }
-    m.s = shapes_of(g);
+    m.s = strata::kernels::qsa_shapes(g);
     m.cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, m.s);
     m.max_blocks = ss.qsa_states[0].max_cells / m.s.idx_block + 2;
     m.ev_in.assign((size_t) ((max_chunk + SUB - 1) / SUB), nullptr);
@@ -319,7 +311,7 @@ float* Prefill::residual() const { return impl_->b.R; }
 void Prefill::set_in_events(const cudaEvent_t* ev, int64_t n) { impl_->in_ev.assign(ev, ev + n); }
 
 uint64_t Prefill::bytes_needed(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk, bool offload) {
-    const strata::kernels::QsaShapes s = shapes_of(g);
+    const strata::kernels::QsaShapes s = strata::kernels::qsa_shapes(g);
     Alloc a;
     layout(a, chunk, strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s),
            ss.qsa_states[0].max_cells / s.idx_block + 2, offload);
@@ -659,7 +651,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                 cudaMemcpyAsync(b.ple_emb, m.ple_host[ple_cur], (size_t) T * N * 4, cudaMemcpyHostToDevice, m.cs);
                 if (c0 + T < n) ple_start(c0 + T, 1 - ple_cur);
                 ple_cur = 1 - ple_cur;
-                stats_.ms_ple += ms_since(tp);
+                stats_.ms_ple += core::ms_since(tp);
                 const strata::kernels::PleWeights& pw = ss.ple.w;
                 for (int64_t t0 = 0; t0 < T; t0 += SUB) {
                     const int64_t P = std::min(SUB, T - t0);
@@ -1012,7 +1004,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
     stats_.experts_prefetched = m.local.experts_prefetched;
     stats_.experts_resident = m.local.experts_resident;
     stats_.ms_experts_host = m.local.ms_host;
-    stats_.ms_total += ms_since(t_start);
+    stats_.ms_total += core::ms_since(t_start);
     processed_ = std::min(c0, n);
     if (c0 < n) {
         err = "cancelled";

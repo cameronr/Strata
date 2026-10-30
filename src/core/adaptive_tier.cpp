@@ -2,6 +2,7 @@
 #include "strata/core/adaptive_tier.hpp"
 
 #include "strata/core/adaptive_policy.hpp"
+#include "strata/core/cuda_host.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 
 #include <algorithm>
@@ -10,17 +11,8 @@
 #include <cstring>
 
 namespace strata::core {
-namespace {
-struct OnDevice {   // the tier's GPU current for one call (when it has one), the main one again afterwards
-    int main;
-    bool set;
-    OnDevice(int dev, int main_dev) : main(main_dev), set(dev >= 0) { if (set) cudaSetDevice(dev); }
-    ~OnDevice() { if (set) cudaSetDevice(main); }
-};
-}  // namespace
-
 AdaptiveTier::~AdaptiveTier() {
-    OnDevice on(dev_, main_);
+    DeviceScope on(dev_, main_, dev_ >= 0);
     if (stream_) cudaStreamSynchronize(stream_);
     for (cudaEvent_t e : evs_) if (e) cudaEventDestroy(e);
     cudaEvent_t evs[] = {t0_, t1_};
@@ -43,7 +35,7 @@ bool AdaptiveTier::init(ExpertCache& cache, ExpertSource& src,
     main_ = main_device;
     deterministic_ = deterministic_adapt;
     free_.assign((size_t) n_layers, {});
-    OnDevice on(dev_, main_);
+    DeviceScope on(dev_, main_, dev_ >= 0);
     bool ok = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking) == cudaSuccess &&
               cudaEventCreate(&t0_) == cudaSuccess && cudaEventCreate(&t1_) == cudaSuccess;
     for (cudaEvent_t& e : evs_) ok = ok && cudaEventCreateWithFlags(&e, cudaEventDisableTiming) == cudaSuccess;
@@ -162,7 +154,7 @@ bool AdaptiveTier::pump_bytes(uint64_t bytes, std::string& err) {
         if (flying_ >= (int) kMaxFlying) return true;
     }
     if (sent_ >= staged_ || bytes < (64u << 10)) return true;
-    OnDevice on(dev_, main_);
+    DeviceScope on(dev_, main_, dev_ >= 0);
     const bool timed = time_begin(bytes >= (256u << 10));
     uint64_t done = 0;
     while (sent_ < staged_ && done < bytes) {
@@ -199,7 +191,7 @@ bool AdaptiveTier::pump(uint64_t budget, uint64_t& sent, std::string& err) {
         sent += b;
     }
     if (n == 0) return true;
-    OnDevice on(dev_, main_);
+    DeviceScope on(dev_, main_, dev_ >= 0);
     // timed from when the work that may read its slots is done
     if (after_ != nullptr && cudaStreamWaitEvent(stream_, after_, 0) != cudaSuccess) {
         err = "adaptive tier: a refill copy failed";
@@ -389,7 +381,7 @@ void AdaptiveTier::apply_pending(bool wait) {
         if (!paced_) stage(UINT64_MAX);
         // a guarded pump stops at the flight cap or with the staging ring empty: then the stream is waited for, which
         // retires its batches and frees their blocks, until every move is sent (none may land in a slot lent later)
-        OnDevice on(dev_, main_);
+        DeviceScope on(dev_, main_, dev_ >= 0);
         for (;;) {
             const size_t before = sent_;
             if (!(paced_ ? pump(UINT64_MAX, sent, err) : pump_bytes(UINT64_MAX, err))) {

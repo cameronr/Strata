@@ -5,9 +5,13 @@
 #pragma once
 
 #include <cstdarg>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 namespace strata::program {
 
@@ -32,5 +36,33 @@ void serve_print(const char* fmt, ...)
 #endif
     ;
 void serve_vprint(const char* fmt, va_list ap);
+
+/// The serve loop's input reader at the loop's end: in-process the reader holds the loop's state, so its input ends
+/// and it is joined before that state goes; stdin's reader ends with the process.
+struct ReaderEnd {
+    std::thread& t;
+    const ServeIo& io;
+    ~ReaderEnd() {
+        if (!io.in_process) {
+            t.detach();
+            return;
+        }
+        if (io.end_input) io.end_input();
+        t.join();
+    }
+};
+
+/// A picture of a GENI request's embeddings file: its rows (n = nx x ny) and where they start in the rows read.
+struct VisionImage {
+    int64_t n, nx, ny;
+    size_t off;
+};
+/// Reads a strata-vision file (one or more records: int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats, a picture
+/// each, in prompt order), appending the rows to `rows` and the pictures to `imgs`: "" or the error.
+std::string read_vision_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
+                                std::vector<VisionImage>& imgs);
+/// What the conversation cache compares: a picture is its grid and the server's key for it (`key`), or else its
+/// embeddings (FNV-1a, with the seed and byte order of upstream's conversation cache).
+uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const float* rows, int64_t n_embd);
 
 }  // namespace strata::program

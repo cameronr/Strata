@@ -66,4 +66,43 @@ void serve_print(const char* fmt, ...) {
     va_end(ap);
 }
 
+std::string read_vision_records(const std::string& path, int64_t n_embd, std::vector<float>& rows,
+                                std::vector<VisionImage>& imgs) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return "cannot open " + path;
+    std::string ve;
+    while (ve.empty()) {
+        int32_t hdr[5];
+        const size_t got = std::fread(hdr, sizeof(int32_t), 5, f);
+        if (got == 0) break;
+        if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[2] < 1 || hdr[3] < 1 ||
+            (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != (int32_t) n_embd) {
+            ve = "bad embeddings file (expected strata-vision records of width " + std::to_string((long long) n_embd) +
+                 ")";
+            break;
+        }
+        const size_t off = rows.size(), cnt = (size_t) hdr[1] * (size_t) hdr[4];
+        rows.resize(off + cnt);
+        if (std::fread(rows.data() + off, sizeof(float), cnt, f) != cnt) {
+            ve = "short embeddings file";
+            break;
+        }
+        imgs.push_back({hdr[1], hdr[2], hdr[3], off});
+    }
+    std::fclose(f);
+    return ve;
+}
+
+uint64_t vision_image_key(const VisionImage& im, const uint64_t* key, const float* rows, int64_t n_embd) {
+    auto fnv1a = [](const void* data, size_t n, uint64_t h) {
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        for (size_t i = 0; i < n; ++i) h = (h ^ p[i]) * 1099511628211ull;
+        return h;
+    };
+    const int64_t grid[3] = {im.n, im.nx, im.ny};
+    const uint64_t h = fnv1a(grid, sizeof grid, 1469598103934665603ull);
+    return key != nullptr ? fnv1a(key, sizeof(uint64_t), h)
+                          : fnv1a(rows + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
+}
+
 }  // namespace strata::program

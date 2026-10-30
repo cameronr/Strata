@@ -29,27 +29,13 @@ constexpr uint32_t kF32 = 0, kF16 = 1, kBf16 = 30, kNvfp4 = 40;
 // elements converted at a time by `read`: a multiple of every block size, so only a range's ends split a block
 constexpr uint64_t kChunk = 1ull << 20;
 
-/// Elements and bytes per block (tools/gguf_reader.py's BLOCK_GEOMETRY): the types the pack can size.
+/// Elements and bytes per block (the reader's block_geometry): false for a type it cannot size.
 bool block_of(uint32_t type, uint64_t& elems, uint64_t& bytes) {
-    struct G {
-        uint32_t type;
-        uint64_t elems, bytes;
-    };
-    static const G table[] = {
-        {0, 1, 4},      {1, 1, 2},      {30, 1, 2},     {28, 1, 8},     {2, 32, 18},    {3, 32, 20},
-        {6, 32, 22},    {7, 32, 24},    {8, 32, 34},    {9, 32, 36},    {10, 256, 84},  {11, 256, 110},
-        {12, 256, 144}, {13, 256, 176}, {14, 256, 210}, {15, 256, 292}, {16, 256, 66},  {17, 256, 74},
-        {18, 256, 98},  {19, 256, 50},  {20, 32, 18},   {21, 256, 110}, {22, 256, 82},  {23, 256, 136},
-        {29, 256, 56},  {42, 64, 18},   {39, 32, 17},   {40, 64, 36},   {144, 128, 34}, {145, 128, 26},
-        {146, 128, 30}, {143, 128, 28},
-    };
-    for (const G& g : table)
-        if (g.type == type) {
-            elems = g.elems;
-            bytes = g.bytes;
-            return true;
-        }
-    return false;
+    int be = 0, bb = 0;
+    if (!strata::block_geometry(type, be, bb)) return false;
+    elems = (uint64_t) be;
+    bytes = (uint64_t) bb;
+    return true;
 }
 
 /// A tensor's bytes: false for a type the pack cannot size or an element count that is not whole blocks.

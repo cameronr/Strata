@@ -19,6 +19,7 @@
 // Modes: --serve (lamina-server's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS or --tokens-file F
 // [--n N] [--force IDS] [--dump-full-logits F] (tools/qwen35/kl.py's reference interface), --bench-pp N / --bench-tg N.
 #include "strata/artifact/gguf_reader.hpp"
+#include "strata/core/cuda_host.hpp"
 #include "strata/core/family_layout.hpp"
 #include "strata/kernels/fused_gdn.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -158,7 +159,7 @@ void* heap_new(size_t n) {
 }
 
 using Clock = std::chrono::steady_clock;
-double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
+using strata::core::ms_since;
 
 constexpr int kThreads = 256;
 constexpr int kChunkCells = 256;   // attention split-K chunk
@@ -3627,12 +3628,6 @@ bool is_eos(int t) { return t == 248044 || t == 248046; }
 // ------------------------------------------------------------------------------------------------ pictures
 constexpr int32_t kImagePad = 248056;   // <|image_pad|>
 
-uint64_t fnv1a(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
-    const uint8_t* b = (const uint8_t*) p;
-    for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
-    return h;
-}
-
 /// A request's pictures: the encoder's rows in prompt order, each picture's cell run, and the positions.
 struct ImgReq {
     std::vector<float> rows;
@@ -3648,27 +3643,8 @@ struct ImgReq {
 /// the error.  `keys`: the server's key for each picture (img_keys=), else the embeddings' hash.
 std::string build_images(const std::string& path, const std::vector<int32_t>& ids, int64_t n_embd,
                          const std::vector<uint64_t>& keys, ImgReq& r) {
-    struct Img { int64_t n, nx, ny; size_t off; };
-    std::vector<Img> imgs;
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return "cannot open " + path;
-    std::string ve;
-    while (ve.empty()) {
-        int32_t hdr[5];
-        const size_t got = std::fread(hdr, sizeof(int32_t), 5, f);
-        if (got == 0) break;
-        if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[2] < 1 || hdr[3] < 1 || (int64_t) hdr[2] * hdr[3] != hdr[1] ||
-            hdr[4] != (int32_t) n_embd) {
-            ve = "bad embeddings file (expected strata-vision records of width " + std::to_string((long long) n_embd) + ")";
-            break;
-        }
-        const size_t off = r.rows.size(), cnt = (size_t) hdr[1] * (size_t) hdr[4];
-        r.rows.resize(off + cnt);
-        if (std::fread(r.rows.data() + off, sizeof(float), cnt, f) != cnt) { ve = "short embeddings file"; break; }
-        imgs.push_back({hdr[1], hdr[2], hdr[3], off});
-    }
-    std::fclose(f);
-    if (!ve.empty()) return ve;
+    std::vector<strata::program::VisionImage> imgs;
+    if (std::string ve = strata::program::read_vision_records(path, n_embd, r.rows, imgs); !ve.empty()) return ve;
     const int64_t n = (int64_t) ids.size();
     r.cell_row.assign((size_t) n, -1);
     r.mrope.assign((size_t) n * 3, 0);
@@ -3682,14 +3658,9 @@ std::string build_images(const std::string& path, const std::vector<int32_t>& id
     while (i < n) {
         if (ids[(size_t) i] != kImagePad) { put(i, p, p, p); ++p; ++i; continue; }
         if (k >= imgs.size()) return "the prompt has more images than the embeddings file";
-        const Img& im = imgs[k++];
-        uint64_t h;
-        {   // what the conversation cache compares: a picture is its grid and its key (or its embeddings)
-            const int64_t grid[3] = {im.n, im.nx, im.ny};
-            h = fnv1a(grid, sizeof grid);
-            if (keys.size() == imgs.size()) h = fnv1a(&keys[k - 1], sizeof(uint64_t), h);
-            else h = fnv1a(r.rows.data() + im.off, (size_t) im.n * (size_t) n_embd * sizeof(float), h);
-        }
+        const strata::program::VisionImage& im = imgs[k++];
+        const uint64_t h = strata::program::vision_image_key(im, keys.size() == imgs.size() ? &keys[k - 1] : nullptr,
+                                                             r.rows.data(), n_embd);
         r.imgs.push_back({i, im.n, h});
         for (int64_t j = 0; j < im.n; ++j)
             if (i + j >= n || ids[(size_t) (i + j)] != kImagePad)
@@ -4233,19 +4204,7 @@ struct Serve {
             eof = true;
             cv.notify_one();
         });
-        // in-process the reader holds this loop's state: its input ends and it is joined before that state goes
-        struct ReaderEnd {
-            std::thread& t;
-            const strata::program::ServeIo& io;
-            ~ReaderEnd() {
-                if (!io.in_process) {   // stdin's reader ends with the process
-                    t.detach();
-                    return;
-                }
-                if (io.end_input) io.end_input();
-                t.join();
-            }
-        } reader_end{reader, io};
+        strata::program::ReaderEnd reader_end{reader, io};
         for (;;) {
             std::string line;
             bool have = false;

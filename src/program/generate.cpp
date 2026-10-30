@@ -96,18 +96,6 @@ int64_t prompt_chunk(int64_t len, int64_t cap, bool second_gpu) {
 
 using Clock = std::chrono::steady_clock;
 
-// FNV-1a is deliberately kept local to the request parser: image identity is
-// part of prompt-cache matching, not a model/runtime checksum.  The seed and
-// byte order match the upstream conversation-cache implementation.
-uint64_t fnv1a(const void* data, size_t n, uint64_t h = 1469598103934665603ull) {
-    const uint8_t* p = static_cast<const uint8_t*>(data);
-    for (size_t i = 0; i < n; ++i) {
-        h ^= p[i];
-        h *= 1099511628211ull;
-    }
-    return h;
-}
-
 struct Options {
     std::vector<int64_t> tokens;      // the prompt, PRE-TOKENIZED
     int64_t max_new = 16;
@@ -2660,6 +2648,27 @@ int strata::program::run(int argc, char** argv) {
     };
 
 
+    // the verifier's options and the tiers' hooks into it (prefetch, the watch, the updates at the tail), set after
+    // init by the serve loop and the one-shot run alike
+    auto hook_verifier = [&](strata::core::Verifier& ver) {
+        ver.set_split(o.spec_split);
+        ver.set_profile(o.window_profile);
+        ver.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : o.pcie_mode == "kernel" ? 2
+                          : 0);   // auto: DMA
+        bool prefetching = false;
+        for (int t = 0; t < n_tiers; ++t)
+            prefetching = prefetching || (tiers[(size_t) t].gpu.prefetch_slots() > 0 && drive.d.tiers[t].prefetch_bytes > 0);
+        if (prefetching) ver.set_predict(&drive_predict, &drive, o.adapt_every > 0 && o.adapt_swaps > 0);
+        if (n_tiers > 0) {
+            ver.set_tiers(n_tiers);
+            ver.set_watch(&drive_watch, &drive);
+        }
+        if (drive.tier1 != nullptr || !drive.paced.empty()) {   // the tiers' updates start at the tail
+            ver.set_tail(&drive_tail, &drive);
+            ver.set_rows_in(&drive_rows_in, &drive, tier.guarded());
+        }
+    };
+
     // ================================ plan v0.3 P8: THE PERSISTENT ENGINE (--serve) ================================
     //
     // The weights, the expert arena and the VRAM tier load once; then requests arrive on stdin, one per line,
@@ -2983,22 +2992,7 @@ int strata::program::run(int argc, char** argv) {
             return 1;
         }
         mem_mark("the verifier and the drafter's binding");
-        ver.set_split(o.spec_split);
-        ver.set_profile(o.window_profile);
-        ver.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : o.pcie_mode == "kernel" ? 2
-                          : 0);   // auto: DMA
-        bool prefetching = false;
-        for (int t = 0; t < n_tiers; ++t)
-            prefetching = prefetching || (tiers[(size_t) t].gpu.prefetch_slots() > 0 && drive.d.tiers[t].prefetch_bytes > 0);
-        if (prefetching) ver.set_predict(&drive_predict, &drive, o.adapt_every > 0 && o.adapt_swaps > 0);
-        if (n_tiers > 0) {
-            ver.set_tiers(n_tiers);
-            ver.set_watch(&drive_watch, &drive);
-        }
-        if (drive.tier1 != nullptr || !drive.paced.empty()) {   // the tiers' updates start at the tail
-            ver.set_tail(&drive_tail, &drive);
-            ver.set_rows_in(&drive_rows_in, &drive, tier.guarded());
-        }
+        hook_verifier(ver);
         prefill.draft = &mtp;
         drive.d.plan = ver.plan_sink();
         drive.d.host_res = ver.residency();   // the snapshot the windows decide their GPU hits by
@@ -3068,19 +3062,7 @@ int strata::program::run(int argc, char** argv) {
             in_eof = true;
             in_cv.notify_one();
         });
-        // in-process the reader holds this loop's state: its input ends and it is joined before that state goes
-        struct ReaderEnd {
-            std::thread& t;
-            const strata::program::ServeIo& io;
-            ~ReaderEnd() {
-                if (!io.in_process) {   // stdin's reader ends with the process
-                    t.detach();
-                    return;
-                }
-                if (io.end_input) io.end_input();
-                t.join();
-            }
-        } reader_end{in_reader, io};
+        strata::program::ReaderEnd reader_end{in_reader, io};
         // Ctrl+C in the console ends the engine as QUIT does, before any request queued: the running one stops at its
         // next chunk or window, then the exit work runs (the learned profile).  In-process the host handles it.
         std::optional<strata::platform::ConsoleQuit> console_quit;
@@ -3365,41 +3347,18 @@ int strata::program::run(int argc, char** argv) {
                 if (!geni) {
                     for (int64_t c = 0; c < cells; ++c) put(c, c, c, c);
                 } else {
-                    struct Img { int64_t n, nx, ny; size_t off; };
-                    std::vector<Img> imgs;
+                    std::vector<strata::program::VisionImage> imgs;
                     img_rows.clear();
-                    std::FILE* f = std::fopen(emb_path.c_str(), "rb");
-                    if (!f) ve = "cannot open " + emb_path;
-                    while (f && ve.empty()) {
-                        int32_t hdr[5];
-                        const size_t got = std::fread(hdr, sizeof(int32_t), 5, f);
-                        if (got == 0) break;
-                        if (got != 5 || hdr[0] != 0x31455653 || hdr[1] < 1 || hdr[2] < 1 || hdr[3] < 1 ||
-                            (int64_t) hdr[2] * hdr[3] != hdr[1] || hdr[4] != (int32_t) g.n_embd) {
-                            ve = "bad embeddings file (expected strata-vision records of width " +
-                                 std::to_string((long long) g.n_embd) + ")";
-                            break;
-                        }
-                        const size_t off = img_rows.size(), cnt = (size_t) hdr[1] * (size_t) hdr[4];
-                        img_rows.resize(off + cnt);
-                        if (std::fread(img_rows.data() + off, sizeof(float), cnt, f) != cnt) { ve = "short embeddings file"; break; }
-                        imgs.push_back({hdr[1], hdr[2], hdr[3], off});
-                    }
-                    if (f) std::fclose(f);
+                    ve = strata::program::read_vision_records(emb_path, g.n_embd, img_rows, imgs);
                     int64_t p = 0, i = 0;
                     size_t k = 0;
                     while (ve.empty() && i < n) {
                         if (ids[(size_t) i] != kImagePad) { put(i, p, p, p); ++p; ++i; continue; }
                         if (k >= imgs.size()) { ve = "the prompt has more images than the embeddings file"; break; }
-                        const Img& im = imgs[k++];
-                        const int64_t grid[3] = {im.n, im.nx, im.ny};
-                        uint64_t image_hash = fnv1a(grid, sizeof grid);
-                        if (req_img_keys.size() == imgs.size())   // the server's key for picture k
-                            image_hash = fnv1a(&req_img_keys[k - 1], sizeof(uint64_t), image_hash);
-                        else
-                            image_hash = fnv1a(img_rows.data() + im.off,
-                                               (size_t) im.n * (size_t) g.n_embd * sizeof(float), image_hash);
-                        req_imgs.push_back({i, image_hash});
+                        const strata::program::VisionImage& im = imgs[k++];
+                        req_imgs.push_back({i, strata::program::vision_image_key(
+                                                   im, req_img_keys.size() == imgs.size() ? &req_img_keys[k - 1] : nullptr,
+                                                   img_rows.data(), g.n_embd)});
                         for (int64_t j = 0; j < im.n && ve.empty(); ++j)
                             if (i + j >= n || ids[(size_t) (i + j)] != kImagePad)
                                 ve = "image " + std::to_string(k) + " has " + std::to_string((long long) im.n) +
@@ -4060,23 +4019,8 @@ int strata::program::run(int argc, char** argv) {
             return 1;
         }
         mem_mark("the verifier and the drafter's binding");
-        ver.set_split(o.spec_split);
-        ver.set_profile(o.window_profile);
         ver.set_host_rows(!o.window_hashes.empty());
-        ver.set_pcie_mode(o.pcie_mode == "dma" ? 0 : o.pcie_mode == "direct" ? 1 : o.pcie_mode == "kernel" ? 2
-                          : 0);   // auto: DMA
-        bool prefetching = false;
-        for (int t = 0; t < n_tiers; ++t)
-            prefetching = prefetching || (tiers[(size_t) t].gpu.prefetch_slots() > 0 && drive.d.tiers[t].prefetch_bytes > 0);
-        if (prefetching) ver.set_predict(&drive_predict, &drive, o.adapt_every > 0 && o.adapt_swaps > 0);
-        if (n_tiers > 0) {
-            ver.set_tiers(n_tiers);
-            ver.set_watch(&drive_watch, &drive);
-        }
-        if (drive.tier1 != nullptr || !drive.paced.empty()) {   // the tiers' updates start at the tail
-            ver.set_tail(&drive_tail, &drive);
-            ver.set_rows_in(&drive_rows_in, &drive, tier.guarded());
-        }
+        hook_verifier(ver);
         drive.d.plan = ver.plan_sink();
         drive.d.host_res = ver.residency();   // the snapshot the windows decide their GPU hits by
         drive.d.pcie_num = (int) (o.pcie_frac * 256.0 + 0.5);
