@@ -14,6 +14,7 @@ real HTTP API, three runs each, medians reported:
                 of a file to the conversation and continuing from the model's own earlier replies - how many prompt
                 tokens the conversation cache reused, how many had to be read again, time to first token per turn
   5. --clients N   N requests at once (the server needs --batch for them to run together): total tok/s, p50/p95 latency
+                   (--client-prompt TOKENS gives each one a context prompt of about that many tokens)
   6. --long 32K    the same prompt test at about 32,768 tokens
 
 Speeds are the engine's own timings (the `timings` of the answer: prompt_per_second, predicted_per_second); time to first
@@ -222,9 +223,11 @@ def pctl(values, p):
 
 # ---------------------------------------------------------------------------------------------------- the suite
 class Suite:
-    def __init__(self, base, key, ctx, runs, think, log=print, want_clients=0, want_long=False, quick=False):
+    def __init__(self, base, key, ctx, runs, think, log=print, want_clients=0, want_long=False, quick=False,
+                 want_client_prompt=0):
         self.base, self.key, self.ctx, self.runs, self.think, self.log = base, key, ctx, runs, think, log
         self.clients, self.want_long = want_clients, want_long
+        self.client_prompt = want_client_prompt
         self.quick = quick
         self.nonce = str(int(time.time()))
         self.tokens_per_word, self.overhead = 1.1, 40
@@ -368,15 +371,22 @@ class Suite:
                              "first_turn_ttft_s": stat(s[0]["ttft_s"] for s in sessions if s and s[0]["ok"])}
 
     def run_clients(self, n: int):
-        self.log(f"concurrency: {n} requests at once x {self.runs} rounds, {BURST_MAX_TOKENS} new tokens each")
+        self.log(f"concurrency: {n} requests at once x {self.runs} rounds, {BURST_MAX_TOKENS} new tokens each"
+                 + (f", prompts of about {self.client_prompt} tokens" if self.client_prompt else ""))
         rows = []
         for rd in range(self.runs):
             res: dict = {}
             th = []
             t0 = time.perf_counter()
             for i in range(n):
+                # --client-prompt: pad each request with a unique word-list prompt of the wanted size (the tag
+                # per client and round keeps the conversation cache from reusing one prompt across the others).
+                filler = ""
+                if self.client_prompt:
+                    words = max(50, int((self.client_prompt - self.overhead) / self.tokens_per_word))
+                    filler = f"[bench {self.tag('b', n, rd, i)}]\n" + long_prompt(words)
                 t = threading.Thread(target=serve_load.one, args=(self.base, self.key, "strata", i, 400, BURST_MAX_TOKENS, res, {},
-                                                                 self.think, f" {self.tag('b', n, rd)}"))
+                                                                 self.think, f" {self.tag('b', n, rd)}", filler))
                 t.start()
                 th.append(t)
             for t in th:
@@ -936,6 +946,9 @@ def main(argv=None) -> int:
     ap.add_argument("--api-key", default=os.environ.get("STRATA_KEY", ""), help="the server's API key, if it has one (or STRATA_KEY)")
     ap.add_argument("--runs", type=int, default=3, help="runs per test (default 3)")
     ap.add_argument("--clients", type=int, default=0, metavar="N", help="also send N requests at once")
+    ap.add_argument("--client-prompt", type=int, default=0, metavar="TOKENS",
+                    help="with --clients: pad each request with a unique prompt of about TOKENS tokens "
+                         "(default 0: the bare instruction, a few dozen tokens)")
     ap.add_argument("--long", action="store_true", help="also a prompt of about 32,768 tokens")
     ap.add_argument("--think", action="store_true", help="leave thinking on (the default suite turns it off)")
     ap.add_argument("--out", help="where to write the results folder (default: bench/results)")
@@ -996,7 +1009,8 @@ def main(argv=None) -> int:
                 return 1
         t0 = time.time()
         pre = collect_machine(base, key, cfg, a.gpu)
-        suite = Suite(base, key, pre.get("context"), max(1, a.runs), a.think, log=say, want_clients=a.clients, want_long=a.long)
+        suite = Suite(base, key, pre.get("context"), max(1, a.runs), a.think, log=say, want_clients=a.clients, want_long=a.long,
+                      want_client_prompt=a.client_prompt)
         slots = pre.get("parallel_slots") or 1
         if a.clients and a.clients > slots:
             say(f"Note: the server runs {slots} request(s) at a time (--batch), so {a.clients} clients will partly wait their turn.")
@@ -1006,9 +1020,12 @@ def main(argv=None) -> int:
         if not machine.get("gpu"):
             machine["gpu"] = pre.get("gpu")
         res = {"schema": SCHEMA, "tool": "tools/strata_bench.py", "date": datetime.date.today().isoformat(),
-               "params": {"runs": suite.runs, "think": a.think, "clients": a.clients, "long": a.long, "started_server": started,
+               "params": {"runs": suite.runs, "think": a.think, "clients": a.clients, "client_prompt": a.client_prompt,
+                          "long": a.long, "started_server": started,
                           "command": "python tools/strata_bench.py" + "".join(
-                              f" {x}" for x in (f"--clients {a.clients}" if a.clients else "", "--long" if a.long else "",
+                              f" {x}" for x in (f"--clients {a.clients}" if a.clients else "",
+                                                f"--client-prompt {a.client_prompt}" if a.client_prompt else "",
+                                                "--long" if a.long else "",
                                                 "--think" if a.think else "", f"--runs {a.runs}" if a.runs != 3 else "") if x)},
                "elapsed_s": time.time() - t0, "machine": machine, "results": out}
         parent = Path(a.out) if a.out else ROOT / "bench" / "results"
