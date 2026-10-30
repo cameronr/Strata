@@ -86,7 +86,7 @@ void install_stop_handlers() {
 }
 
 [[noreturn]] void usage_error(const std::string& msg) {
-    say_err("usage: lamina-server [--config FILE] [--host HOST] [--port PORT] ... (--help)");
+    say_err("usage: lamina-server --config FILE [--host HOST] [--port PORT] ... (--help)");
     say_err("lamina-server: error: " + msg);
     std::exit(2);
 }
@@ -96,7 +96,7 @@ const char* kHelp =
     "\n"
     "  --config FILE          the run config (lamina-<model>.json, written by setup): the engine's arguments and the\n"
     "                         server's settings\n"
-    "  --engine lamina|mock   lamina (the default with --config) or mock (a scripted engine, the default without)\n"
+    "  --engine lamina|mock   lamina (the default) or mock (the tests' scripted engine, with --tokenizer)\n"
     "  --host HOST            the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other\n"
     "                         devices on your network (set an API key); also \"host\" in the config\n"
     "  --port PORT            the port (default 8095; 0: one the system picks); also \"port\" in the config\n"
@@ -125,7 +125,8 @@ const char* kHelp =
     "  --script-delay S       seconds between the mock engine's tokens\n";
 
 struct Args {
-    std::string engine, config, host, ready_file, gpu, tokenizer, api_key, mcp_config, before_load;
+    std::string engine = "lamina";
+    std::string config, host, ready_file, gpu, tokenizer, api_key, mcp_config, before_load;
     std::optional<int> port, parallel, max_queue_arg, replicas;
     std::optional<double> shutdown_timeout, queue_timeout_arg, idle_unload, script_delay;
     std::optional<int64_t> min_free_vram_mib;
@@ -204,6 +205,10 @@ Args parse_args(int argc, char** argv) {
         else if (o == "--script-delay") a.script_delay = number(to_dbl);
         else usage_error("unrecognized arguments: " + std::string(argv[i]));
     }
+    if (a.engine == "lamina" && a.config.empty())
+        usage_error("--config FILE is required: the run config (lamina-<model>.json, written by setup)");
+    if (a.engine == "mock" && a.tokenizer.empty())
+        usage_error("--engine mock needs --tokenizer <a model's .gguf> (its tokenizer and chat template)");
     return a;
 }
 
@@ -318,7 +323,6 @@ std::string items(const json& d) {
 int run(int argc, char** argv) {
     no_throttle_self();   // #691: a minimized console window must not slow the engine down
     Args a = parse_args(argc, argv);
-    if (a.engine.empty()) a.engine = a.config.empty() ? "mock" : "lamina";
     install_stop_handlers();
     if (a.shutdown_timeout && !(*a.shutdown_timeout >= 0 && *a.shutdown_timeout <= 300))
         usage_error("--shutdown-timeout must be in 0..300 seconds");
@@ -392,10 +396,7 @@ int run(int argc, char** argv) {
     }
     // the model's file: its tokenizer and chat template (and, for the engine, its weights)
     const std::string gguf = a.engine == "lamina" ? model_file(cfg) : a.tokenizer;
-    if (a.engine == "lamina" && cfg.empty()) usage_error("--engine lamina needs --config");
-    if (gguf.empty())
-        usage_error(a.engine == "lamina" ? "the config's args name no model file (--native <gguf>)"
-                                         : "--engine mock needs --tokenizer <a model's .gguf> (its tokenizer and chat template)");
+    if (gguf.empty()) usage_error("the config's args name no model file (--native <gguf>)");
     std::unique_ptr<Tokenizer> tok;
     try {
         tok = Tokenizer::from_gguf(gguf);
