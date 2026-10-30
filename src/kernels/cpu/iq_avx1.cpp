@@ -19,6 +19,7 @@
 // calls it only behind cpu_avx1_ok().  No static constructors at namespace scope (#391): the tables below
 // are constexpr, like iq_avx2.cpp's.
 #include "strata/kernels/cpu/iq_avx1.hpp"
+#include "strata/kernels/cpu/expert.hpp"
 
 #include "ggml.h"
 
@@ -302,10 +303,10 @@ void gu_rows_nt(int nt, const uint8_t* blob, size_t gu_row, size_t up_off, int n
         case 2: gu_rows<TY, 2>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 3: gu_rows<TY, 3>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
         case 4: gu_rows<TY, 4>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 5: gu_rows<TY, 5>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 6: gu_rows<TY, 6>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        case 7: gu_rows<TY, 7>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
-        default: gu_rows<TY, 8>(blob, gu_row, up_off, n, act, ff, r0, r1); break;
+        default: for (int t0 = 0; t0 < nt; t0 += 4) {   // every token's arithmetic is its own
+            const int k = nt - t0 < 4 ? nt - t0 : 4;
+            gu_rows_nt<TY>(k, blob, gu_row, up_off, n, act + t0, ff + t0, r0, r1);
+        }
     }
 }
 
@@ -418,8 +419,8 @@ void iq128_gu_rows(int type, const uint8_t* blob, size_t gu_row, size_t up_off, 
 
 void iq128_down_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt,
                      float* const* out, int r0, int r1) {
-    const block_q8_0* y[8];
-    for (int t = 0; t < nt && t < 8; ++t) y[t] = (const block_q8_0*) hq[t];
+    const block_q8_0* y[MAXT];   // one per window token (callers cap nt at MAXT)
+    for (int t = 0; t < nt; ++t) y[t] = (const block_q8_0*) hq[t];
     if (type == 20) {
         for (int t0 = 0; t0 < nt; t0 += 4) {
             const int k = nt - t0 < 4 ? nt - t0 : 4;

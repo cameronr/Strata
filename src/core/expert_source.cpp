@@ -10,6 +10,7 @@
 #include "strata/kernels/quantize_act.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/s2_expert_grouped.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
@@ -38,6 +39,9 @@
 #endif
 
 namespace strata::core {
+
+// a verify window's routed entries: every token picks top-10, so the window's stack buffers are sized by this.
+constexpr int kMaxRouteEntries = strata::kernels::kVerifyMaxT * 10;
 
 // ================================ THE FILE-BACKED SOURCE ================================
 
@@ -309,18 +313,18 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     // takes this layer, the last pcie_num/256 of the rest the PCIe share (published FIRST, so the GPU reads them while
     // the CPU works), the others the CPU's.
     const int64_t n = n_tok * k;
-    if (n > 128) {
+    if (n > kMaxRouteEntries) {
         d.failed = true;
-        d.fail = "a verify window routes more than 128 entries";
+        d.fail = "a verify window routes more entries than its buffers hold";
         d.fail_layer = d.layers;
         return;
     }
     const int32_t* res = d.host_res != nullptr ? d.host_res + (size_t) d.layers * (size_t) d.n_expert : nullptr;
     auto in_vram = [&](int32_t e) { return res != nullptr && res[e] >= 0; };   // e in range
-    int32_t kind[128];                     // per entry: -1 CPU, 0 VRAM, 1 PCIe, 2 the second GPU
+    int32_t kind[kMaxRouteEntries];                     // per entry: -1 CPU, 0 VRAM, 1 PCIe, 2 the second GPU
     // the second GPU's share: group g = the expert in its slot g2_slot[g], entries g2_ent[g2_start[g] ..)
     int n2g = 0, n2e = 0;
-    int32_t g2_slot[128], g2_start[129], g2_ent[128];
+    int32_t g2_slot[kMaxRouteEntries], g2_start[kMaxRouteEntries + 1], g2_ent[kMaxRouteEntries];
     auto slot2 = [&](int32_t e) -> int32_t {   // its slot there, -2 - p for prefetch slot p, or -1
         if (d.gpu2 == nullptr) return -1;
         const int32_t s = d.host_res2[(size_t) d.layers * (size_t) d.n_expert + (size_t) e];
@@ -329,7 +333,7 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
         return p >= 0 ? -2 - p : -1;
     };
     auto on_gpu2 = [&](int32_t e) { return slot2(e) != -1; };
-    int64_t distinct[128], first_of[128];
+    int64_t distinct[kMaxRouteEntries], first_of[kMaxRouteEntries];
     int nd = 0;
     for (int64_t i = 0; i < n; ++i) {
         first_of[i] = i;
@@ -548,10 +552,10 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
                            int64_t k) {
     if (d.failed || d.gpu2 == nullptr || d.gpu2->prefetch_slots() <= 0) return;
     // the predicted experts neither GPU holds, ranked by their summed routing weight over the window's tokens
-    int32_t cand[128];
-    float score[128];
+    int32_t cand[kMaxRouteEntries];
+    float score[kMaxRouteEntries];
     int nc = 0;
-    for (int64_t i = 0; i < n_tok * k && i < 128; ++i) {
+    for (int64_t i = 0; i < n_tok * k && i < kMaxRouteEntries; ++i) {
         const int32_t e = ids[i];
         if (e < 0 || e >= d.n_expert) continue;
         const size_t at = (size_t) layer * (size_t) d.n_expert + (size_t) e;
@@ -563,7 +567,7 @@ void expert_prefetch_multi(ExpertDispatch& d, int64_t layer, const int32_t* ids,
     }
     const int m = (int) (std::min)((uint64_t) (std::min)(nc, d.gpu2->prefetch_slots()),
                                    d.gpu2_prefetch_bytes / strata::kernels::cpu::expert_layout().blob_bytes(layer));
-    const uint8_t* src[128];
+    const uint8_t* src[kMaxRouteEntries];
     for (int q = 0; q < m; ++q) {
         int best = q;
         for (int c = q + 1; c < nc; ++c) if (score[c] > score[best]) best = c;

@@ -145,7 +145,7 @@ public:
     /// Tokens read ahead, each in a slot of its own beside issue/collect: `ahead` starts reading a token's 16 rows
     /// (a slot still holding other rows waits for them first; outside Direct mode the rows are only recorded),
     /// `ahead_holds` tells whether a slot holds exactly these rows, `ahead_collect` waits and gives the 2560 floats.
-    static constexpr int kAheadSlots = 8;
+    static constexpr int kAheadSlots = 16;
     void ahead(int slot, const uint32_t* rows16);
     bool ahead_holds(int slot, const uint32_t* rows16) const;
     bool ahead_collect(int slot, float* out2560, std::string& err);

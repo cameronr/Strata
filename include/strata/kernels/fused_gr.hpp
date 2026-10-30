@@ -53,11 +53,11 @@ struct FusedGrArgs {
 
 bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr);
 
-/// The read of `n_tok` tokens (1-8): `a[t]` is token t's arguments (its own R, pending write, lo, rs, inject,
+/// The read of `n_tok` tokens (1-16): `a[t]` is token t's arguments (its own R, pending write, lo, rs, inject,
 /// mixed, est; the weight pointers, gate_ema, est_norm, est_gates and eps must be the same for every t).
 /// `scratch` is `fused_gr_scratch_bytes()`, zeroed once when allocated (the kernels leave it zeroed); reads that share
 /// it must run in stream order.
-constexpr int kFusedGrMaxT = 8;
+constexpr int kFusedGrMaxT = 16;
 size_t fused_gr_scratch_bytes();
 void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* scratch, void* stream);
 

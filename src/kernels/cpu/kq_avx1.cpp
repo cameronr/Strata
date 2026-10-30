@@ -8,6 +8,7 @@
 // Compiled for AVX (/arch:AVX, -mavx; CMakeLists.txt sets that per source); it is only ever called behind
 // cpu_avx1_ok(), so no CPU that lacks AVX can reach it.
 #include "strata/kernels/cpu/kq_avx1.hpp"
+#include "strata/kernels/cpu/expert.hpp"
 
 #include <immintrin.h>
 
@@ -43,10 +44,10 @@ inline __m256 bf16x8_to_f32x8_avx1(const uint16_t* p) {
 }  // namespace
 
 void bf16_rows_dot_multi_avx1(const uint16_t* w, int rows, int cols, const float* x, int nt, float* out) {
-    // each row is read once for all `nt` (<= 8) tokens
+    // each row is read once for all `nt` (<= MAXT) tokens
     for (int r = 0; r < rows; ++r) {
         const uint16_t* wr = w + (size_t) r * (size_t) cols;
-        __m256 acc[8];
+        __m256 acc[MAXT];
         for (int t = 0; t < nt; ++t) acc[t] = _mm256_setzero_ps();
         int c = 0;
         for (; c + 8 <= cols; c += 8) {

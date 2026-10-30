@@ -9,7 +9,7 @@
 namespace strata::kernels {
 namespace {
 
-constexpr int kHitPlanMax = 128;
+constexpr int kHitPlanMax = 160;   // one window's entries: kVerifyMaxT tokens x top-10
 
 // A block of at least kHitPlanMax threads, thread i = routed entry i (n <= kHitPlanMax).  A group per distinct resident
 // expert, in the order of their first entries; a group's entries in routing order.  `ids` must be visible to the whole

@@ -26,6 +26,7 @@
 #include "strata/core/session.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/seg_rows.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 
 #include <cuda_runtime.h>
 
@@ -125,7 +126,7 @@ private:
     void norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs);
     bool capture_round(int T, std::string& err);
     bool capture_step(int j, std::string& err);
-    cudaGraphExec_t step_exec_[9] = {};
+    cudaGraphExec_t step_exec_[strata::kernels::kVerifyMaxT + 1] = {};   // indexed by chain step j (1..max_t-2)
     const float* f32(const char* name) const;
     const uint16_t* bf16(const char* name) const;
     const void* q8(const char* name) const;
@@ -143,7 +144,7 @@ private:
     cudaEvent_t sh_fork_ = nullptr, sh_join_ = nullptr;
     uint32_t* rseq_ = nullptr;                       // verify_router's sequence word and counter (device)
     unsigned* rcount_ = nullptr;
-    cudaGraphExec_t round_exec_[9] = {};
+    cudaGraphExec_t round_exec_[strata::kernels::kVerifyMaxT + 1] = {};   // indexed by window T (1..kVerifyMaxT)
 
     struct Tensor { std::string name, kind; int64_t rows = 0, cols = 0; uint64_t off = 0, bytes = 0; };
     std::vector<Tensor> tensors_;

@@ -21,6 +21,7 @@
 // This file is compiled for AVX2 and must not run anything before the engine's cpu_avx2_ok() check: no runtime
 // initializer at namespace scope (#391, 016ea2e), the switches are read on first use.
 #include "strata/kernels/cpu/iq_avx2.hpp"
+#include "strata/kernels/cpu/expert.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 
 #define GGML_COMMON_DECL_CPP
@@ -30,6 +31,7 @@
 #include <immintrin.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -536,7 +538,7 @@ void iq256_rows(int type, const uint8_t* w, size_t row_bytes, int n, const void*
 
 void iq4nl256_down_rows_v(int variant, const uint8_t* w, size_t row_bytes, int n, const void* const* hq, int nt,
                           float* const* out, int r0, int r1) {
-    const block_q8_0* y[8];
+    const block_q8_0* y[MAXT];   // one per window token (callers cap nt at MAXT)
     for (int t = 0; t < nt; ++t) y[t] = (const block_q8_0*) hq[t];
 #if STRATA_AVXVNNI
     if (variant & kIq256Vnni) {

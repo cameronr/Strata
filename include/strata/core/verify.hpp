@@ -287,7 +287,7 @@ private:
     int max_t_ = 0;
     int last_t_ = 0;
     int64_t last_pos0_ = 0;
-    int32_t last_tokens_[8] = {};
+    int32_t last_tokens_[strata::kernels::kVerifyMaxT] = {};
     // the batch window (`init_slots`): the slot sessions and the graphs.  Fused (the default) graphs read the
     // row -> slot map from the device segment tables at replay, so they key on S alone (`exec_bs_`).  With
     // STRATA_BATCH_FUSE=0 `record_window` records the phase-3 per-row launches instead; those bake the layout
@@ -324,7 +324,7 @@ private:
 
     int64_t n_vocab_ = 0;
     cudaStream_t cs_ = nullptr;
-    cudaGraphExec_t exec_[9] = {};
+    cudaGraphExec_t exec_[strata::kernels::kVerifyMaxT + 1] = {};   // indexed by T (1..kVerifyMaxT), like exec_bs_
     cudaGraphExec_t commit_exec_ = nullptr;
     bool commit_pending_ = false;
 
@@ -372,7 +372,7 @@ private:
     void set_plan_slot(int grp);
     bool split_ = false;   // opt-in (--spec-split): exact but slower, see the overlap study
     bool pcie_share_ = true;
-    int groups_[9] = {};
+    int groups_[strata::kernels::kVerifyMaxT + 1] = {};
     float* h_ymiss_ = nullptr;   float* m_ymiss_ = nullptr;     // T * k * n_embd
     // the FFN input as the router kernel writes it (quant_router_): Q8_K rows `xk_stride_` bytes apart for the layers
     // the pool takes them (xk_layer_), q8_1 rows for the second GPU

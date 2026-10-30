@@ -133,7 +133,7 @@ void bf16_gemv_fp32_mmvf(const float* x, const uint16_t* w, float* y,
 void bf16_gemv_fp32_mmvf_multi(const float* x, const uint16_t* w, float* y, int64_t n_in, int64_t n_out, int n_tok,
                                void* stream, const uint16_t* w2, float* y2, int64_t n_out2) {
     if (n_tok < 1 || n_tok > kMultiT)
-        throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: 1..8 activation rows");
+        throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: 1..16 activation rows");
     if (n_in <= 0 || (n_in & 1) != 0 || n_in > std::numeric_limits<int>::max() ||
         n_out <= 0 || n_out2 < 0 || n_out + n_out2 > std::numeric_limits<int>::max())
         throw std::invalid_argument("bf16_gemv_fp32_mmvf_multi: require positive even n_in and positive n_out <= INT_MAX");

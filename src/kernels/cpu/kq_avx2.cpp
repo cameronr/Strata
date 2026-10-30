@@ -201,10 +201,10 @@ void dot_rows(int type, const uint8_t* row, int n, const void* const* act, int n
 }  // namespace
 
 void bf16_rows_dot_multi(const uint16_t* w, int rows, int cols, const float* x, int nt, float* out) {
-    // each row is read once for all `nt` (<= 8) tokens: the router (2.6 MB per layer) streams once per prediction
+    // each row is read once for all `nt` (<= MAXT) tokens: the router (2.6 MB per layer) streams once per prediction
     for (int r = 0; r < rows; ++r) {
         const uint16_t* wr = w + (size_t) r * (size_t) cols;
-        __m256 acc[8];
+        __m256 acc[MAXT];
         for (int t = 0; t < nt; ++t) acc[t] = _mm256_setzero_ps();
         for (int c = 0; c + 8 <= cols; c += 8) {
             const __m256 wf = _mm256_castsi256_ps(

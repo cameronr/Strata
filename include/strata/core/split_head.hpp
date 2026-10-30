@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "strata/kernels/verify_kernels.hpp"
+
 namespace strata::core {
 
 class SplitHead {
@@ -62,7 +64,7 @@ private:
     int32_t* h_idx_ = nullptr;
     float *h_val_ = nullptr, *h_logits_ = nullptr;
     uint32_t* h_bad_ = nullptr;
-    cudaGraphExec_t exec_[9][2] = {};
+    cudaGraphExec_t exec_[strata::kernels::kVerifyMaxT + 1][2] = {};   // indexed by window T, then the logits copy
 };
 
 }  // namespace strata::core

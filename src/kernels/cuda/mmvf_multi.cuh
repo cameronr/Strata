@@ -15,7 +15,7 @@
 namespace strata::kernels {
 namespace {
 
-constexpr int kMmvfMaxRows = 8;
+constexpr int kMmvfMaxRows = 16;
 
 __device__ __forceinline__ float mmvf_warp_sum(float value) {
 #pragma unroll
