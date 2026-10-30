@@ -702,9 +702,11 @@ def main() -> int:
                 fail(f"--main-gpu {a.main_gpu}: no such GPU of compute capability 8.0 or newer")
         else:
             main_gpu = pick_main(usable)
-        others = len(usable) - 1 if m.flash_next or m.vram_gb else 0
+        example = json.loads((ROOT / "examples" / f"{a.model}.json").read_text(encoding="utf-8"))
+        others = len(usable) - 1 if "--second-gpu" in example["args"] else 0
         say(f"\n{m.title} runs on GPU {main_gpu.index}, {main_gpu.name}"
-            + (f", with {others} more as {'expert tiers' if m.flash_next else 'stages of a layer split'}" if others else ""))
+            + (f", with {others} more as expert tiers" if others and m.flash_next else
+               f", with up to {others} more for a layer split (the fewest that hold it)" if others else ""))
         if m.vram_gb and sum(g.mem_mib for g in usable) < m.vram_gb * 1024:
             warn(f"its layers need ~{m.vram_gb} GB of VRAM over every GPU, and these have "
                  f"{sum(g.mem_mib for g in usable) / 1024:.0f} GB: a shorter --context, or another GPU")

@@ -6,18 +6,20 @@ and data folder ([SETUP.md](../docs/SETUP.md)):
 
 - `iq3_s.json`: Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S (~53 GB of RAM taken).
 - `ud-q4_k_xl.json`: Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL (~81 GB of RAM taken).
-- `qwen36-ud-q4_k_xl.json`: Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL, on the engine's Qwen3.6 path.
+- `qwen36-ud-q4_k_xl.json`: Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL, on the engine's qwen35 path: its layers split over
+  the fewest GPUs that hold every expert, else on the main GPU with the CPU computing the experts it lacks.
 - `qwen38-27b-ud-q6_k_xl.json`: Qwen3.8-27B, unsloth's UD-Q6_K_XL, on the same path, its layers split over the fewest
-  GPUs that hold it (`--second-gpu auto`; the development PC's config names the 5070 Ti).
+  GPUs that hold it, at 98,304 cells (~36 GB of VRAM: a 24 GB and a 16 GB GPU).
 
 `run-<model>.bat` starts each from the clone's folder, for models in setup's data folder (`../Lamina-data`). Their
 engine options: [SETUP.md](../docs/SETUP.md#engine-options); the server's keys: [USING.md](../docs/USING.md#the-config).
 
 ## The development PC's own options
 
-The development PC's Flash-Next configs name their tiers (`--second-gpu "RTX 5070 Ti,RTX 5060 Ti"`, where the examples
-take every other GPU with `auto`) and add three options measured for its hardware, which the examples leave out. Each
-pays only where a PC has the same trait: measure it through the server before keeping it.
+The development PC's configs name their GPUs (`--second-gpu "RTX 5070 Ti,RTX 5060 Ti"`, where the examples take every
+other GPU with `auto`), its Qwen3.8-27B config takes the trained 262,144 cells over its three GPUs (~49 GB of VRAM), and
+its Flash-Next configs add three options measured for its hardware, which the examples leave out. Each pays only where
+a PC has the same trait: measure it through the server before keeping it.
 
 - **`--arena-place`** (both): for RAM whose regions read at different rates, as unpaired DIMMs make (here two 32 GB and
   two 48 GB modules leave 32 GB on one channel), the engine times its RAM arena at the start and keeps the experts the

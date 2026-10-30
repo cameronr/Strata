@@ -162,8 +162,8 @@ independent of where each expert is computed.
 ## Qwen3.6-35B-A3B and Qwen3.8-27B
 
 Qwen3.6-35B-A3B and Qwen3.8-27B, a dense model of the same family, run on a path of their own (`src/qwen35`), chosen
-from the model file's header. It reads the GGUF as it is and drafts with the file's own MTP layer. On one GPU it keeps
-every expert that fits in VRAM and computes the rest on the CPU; with `--second-gpu` it splits the layers over the
-fewest GPUs that hold the whole model, each running its layers and handing the activations to the next. With the
-config's `parallel` it runs several requests at once on one GPU
+from the model file's header. It reads the GGUF as it is and drafts with the file's own MTP layer. With `--second-gpu`
+it splits the layers over the fewest GPUs that hold the whole model, each running its layers and handing the
+activations to the next; where none do, or on one GPU, it keeps every expert that fits in VRAM and computes the rest on
+the CPU. With the config's `parallel` it runs several requests at once on one GPU
 ([SETUP.md](SETUP.md#qwen36-35b-a3b-and-qwen38-27b)).

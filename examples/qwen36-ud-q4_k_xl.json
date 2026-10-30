@@ -4,6 +4,8 @@
     "../Lamina-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
     "--main-gpu",
     "RTX 3090",
+    "--second-gpu",
+    "auto",
     "--max-context",
     "65536",
     "--prefill",

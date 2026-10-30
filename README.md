@@ -29,7 +29,7 @@ own output. Its speeds against llama.cpp and Strata on one PC are in [docs/COMPA
   | --- | --- | --- |
   | Qwen3.8-Flash-Next, ISTA-DASLab's GSQ-RCO IQ3_S | ~53 GB | ~86 GB |
   | Qwen3.8-Flash-Next, unsloth's UD-Q4_K_XL | ~81 GB | ~114 GB |
-  | Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL | ~22 GB | ~24 GB |
+  | Qwen3.6-35B-A3B, unsloth's UD-Q4_K_XL | ~22 GB on one GPU, ~2 GB split over GPUs that hold it | ~24 GB |
   | Qwen3.8-27B, unsloth's UD-Q6_K_XL | ~2 GB | ~26 GB |
 
 - **An SSD**: Flash-Next reads a 28.8 GB table of per-layer embeddings from the model file at every token.

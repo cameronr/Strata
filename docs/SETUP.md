@@ -128,16 +128,17 @@ family) on a path of its own (`src/qwen35`): `lamina` switches to it from the mo
 name the file with `--native` like the others. It reads the GGUF as it is (no expert profile; the drafts come from the
 file's own MTP block, `--mtp N` of them) and keeps K and V in fp16: ~22 KB a cell for Qwen3.6, ~68 KB for the 27B.
 
-On one GPU it keeps every Qwen3.6 expert that fits in its VRAM and computes the rest on the CPU: on a 24 GB GPU 212 of
-256 a layer at the example's 65,536 cells, every one at 8,192 (`--context` sets another). With `--second-gpu` (GPUs
-named as for `--main-gpu`, comma-separated, or `auto`: every other GPU in CUDA's order) it splits the layers instead,
-over the fewest of those GPUs, in order, that hold the whole model: each takes the layers that fit beside their K/V
-and its buffers, the last the rest with the output head and the MTP block, and each pass hands its activations from one
-GPU to the next. Every expert is then in VRAM: on the development PC Qwen3.6 over the RTX 3090 and the RTX 5070 Ti
-(4.7 GiB on the second) generates 1.6-1.7x as fast and reads prompts 1.9-3.3x as fast as on the 3090 alone
-([COMPARISON.md](COMPARISON.md#qwen36-35b-a3b)). `--layer-split N,N,..` sets each GPU's layer count. Qwen3.8-27B needs a
-split where one GPU does not hold it: its example's 98,304 cells take ~36 GB of VRAM (here the 3090 and the 5070 Ti, 46
-and 18 layers), the trained 262,144 ~49 GB (all three GPUs).
+With `--second-gpu` (GPUs named as for `--main-gpu`, comma-separated, or `auto`: every other GPU in CUDA's order; the
+examples have `auto`) the path splits the layers over the fewest of those GPUs, in order, that hold the whole model:
+each takes the layers that fit beside their K/V and its buffers, the last the rest with the output head and the MTP
+block, and each pass hands its activations from one GPU to the next. `--layer-split N,N,..` sets each GPU's layer
+count. Split, every Qwen3.6 expert is in VRAM and none takes RAM: on the development PC, over the RTX 3090 and the RTX
+5070 Ti (~4.7 GiB on the second), it generates 1.6-1.7x as fast and reads prompts 1.9-3.3x as fast as on the 3090 alone
+([COMPARISON.md](COMPARISON.md#qwen36-35b-a3b)). Where no split holds every expert, or on one GPU, the main GPU keeps
+the experts that fit in its VRAM and the CPU computes the rest: on a 24 GB GPU 212 of 256 a layer at the example's
+65,536 cells, every one at 8,192 (`--context` sets another). Qwen3.8-27B needs a split where one GPU does not hold it:
+its example's 98,304 cells take ~36 GB of VRAM (on the development PC the 3090 and the 5070 Ti, 46 and 18 layers), the
+trained 262,144 ~49 GB (its config: all three GPUs, 34, 20 and 10 layers).
 
 Not on this path yet: the prompt cache's checkpoints (a follow-up turn whose history differs from what the engine holds
 is read again from the start), `/v1/choose` and the GPU tiers. The config's `parallel` (batch slots) runs on one GPU.
