@@ -93,3 +93,38 @@ platform_memory green - the last needs `--ulimit memlock=-1`, unrelated).
 The GPU gates (digest, parity suite, decode speed, sweep) run in the next window:
 the same `docker stop strata-eddoursul; docker run --gpus all ... strata:src`
 invocation as the phase 9 gates, then `./bench-batch-ab.py --yes --rounds 2`.
+
+## As built (2026-10-30, the GPU gates) - three latent bugs surfaced by >8
+
+The first gate run NaN'd (`non-finite logits`) at feed widths >= 11 and the
+interleave gate died with a SIGSEGV inside `cuStreamSynchronize`. Both were
+pre-existing contract breaks of the 8 -> 16 bump, found with a per-layer NaN
+probe inside the captured window (env-gated, scratch) and a gdb replay of the
+interleave sequence:
+
+- **The interleaved q8_1 copy is 8 columns by contract** (`native_q8_1_il_cp`
+  caps at 8). The `ncols` 9..16 instantiations quantized columns 8.. past each
+  slot (stomping the pm/dl regions) and read `o[8..]` uninitialized: NaN at 11+,
+  silently-corrupted-but-finite values at 9..10. Fixed by routing `ncols > 8`
+  to `native_mmvq`'s multi kernels (46d552afd), guards + `static_assert`
+  enforcing the cap, and the window/split-head/shared-expert quantizing plain
+  above 8. `mmvq_multi_parity` now covers 10/12/16.
+- **`ahead_tok_` stayed `int32_t[8]`** while `ple_ahead` guards against
+  `max_t_` (16): windows >8 overflowed the stack-allocated Verifier - the
+  silent SIGSEGV (208e48ad9). The rest of the host-side widening (graph-exec
+  and groups arrays, MTP draft steps, CPU pool multi kernels chunking nt > 4
+  by 4) landed with it (fdafefb83).
+- **The verify router routed one row per warp**, so rows 8..15 of a wide
+  window were never routed (1e47e71dc).
+
+Gates (deterministic config, frozen profile): solo digests byte-identical with
+MTP off and on, GEN-vs-BGEN identical, the interleave gate 10/10 IDENTICAL,
+startup scenarios and the adapt-rhythm smoke green, ctest 47/47 with the
+extended parity suites.
+
+Sweep (medians, 2 rounds, 2026-10-30): solo 126.5 / batch 120.2 chat tok/s
+(-5%, within the old baseline's noise); 2x 82.9 -> 89.8 (+8%), 4x 86.4 -> 96.5
+(+12%); 4x TTFT p50/p95 2.5/4.8 -> 1.0/1.7 s. The 2x row did not reach the
++20-30% the plan hoped for: 2 slots x 5 rows fit the window even before this
+phase (the trim only bit at 3+ slots), and at 4 slots the draft depth, not the
+window, is the binding constraint. The window itself costs nothing on solo.
