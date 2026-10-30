@@ -4381,7 +4381,17 @@ int main(int argc, char** argv) {
                 ts[b] = Tb;
                 tot += Tb;
             }
-            while (tot > (int) strata::kernels::kVerifyMaxT) {
+            // STRATA_BATCH_WINDOW caps the batch window below kVerifyMaxT. The default is 8, not 16: measured
+            // on this rig (same binary, alternating sweeps), 4 slots x 4-row drafts in a 16-row window runs
+            // ~7% SLOWER than the 8-row trim (105 -> 98 tok/s) - windows over 8 columns lose the interleaved
+            // q8_1 fast path and the extra verification outweighs the deeper drafts, which never paid at 2
+            // slots either (88.1 vs 88.3). Raise it when the >8-column fast path exists or drafts get cheaper.
+            static const int kBatchWindow = [] {
+                const char* e = std::getenv("STRATA_BATCH_WINDOW");
+                const int v = e != nullptr ? std::atoi(e) : 0;
+                return v >= 1 && v <= (int) strata::kernels::kVerifyMaxT ? v : 8;
+            }();
+            while (tot > kBatchWindow) {
                 int drop = -1;
                 float worst = 0.0f;
                 for (int b = 0; b < (int) bs.size(); ++b)
