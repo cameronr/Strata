@@ -173,7 +173,7 @@ class Router:
 class ReplicaEngine:
     """Stands in for one engine (the interface Service uses), over several."""
 
-    NOT_HERE = {"session_file", "vram", "ctl", "slot_cv"}       # not offered: one conversation file / VRAM resize / control line
+    NOT_HERE = {"ctl", "slot_cv"}       # not offered: one engine's control line
     PROPAGATE = {"silence_s", "gpu_busy"}
 
     def __init__(self, engines: list, load_tokens: int = LOAD_TOKENS):

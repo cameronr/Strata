@@ -254,7 +254,6 @@ RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean s
 ENGINE_SILENCE_S = 300.0
 # Disk sessions: the longest allowance an engine may announce (`SWAIT <phase> <s>`) for one step that blocks in a
 # single call (a file flush, the host->device transfer); the engine's own bound is the same (session_phase_limit_s).
-SESSION_WAIT_MAX_S = 3600
 # ... except while a prompt is read: a PP line comes once per chunk (up to 32768 tokens with --prefill auto, issue
 # #282), and the slowest PCs read ~100 tok/s, so a first chunk can take minutes before the first line.  Until the first
 # PP the wait adds the chunk's tokens at PP_FLOOR_TOK_S; after one, a chunk may take PP_SLACK x the last one's time.
@@ -385,23 +384,6 @@ class EngineNonFinite(ValueError):
     engine wrote none of that window's tokens and drops every cached state that may carry the poison, so its next
     request reads the prompt from token 0.  Service.run sends a request that had produced nothing yet once more, and
     ends one that had started (as "length").  A ValueError, so a stream that has started reports it as an error event."""
-
-
-class SessionRefused(ValueError):
-    """Disk sessions: the engine refused or failed a SAVE / RESTORE and is still in step (`SERR <kind> <published>
-    <reason>`).  `kind` is the engine's category - invalid (400), storage (507), memory (503), io (500); `published`:
-    a save whose new file already replaced the old one before a later step (the folder flush) failed."""
-
-    STATUS = {"invalid": 400, "storage": 507, "memory": 503, "io": 500}
-
-    def __init__(self, kind: str, message: str, published: bool = False):
-        super().__init__(message)
-        self.kind = kind if kind in self.STATUS else "io"
-        self.published = published
-
-    @property
-    def status(self) -> int:
-        return self.STATUS[self.kind]
 
 
 class EngineStuck(RuntimeError):
@@ -939,7 +921,6 @@ class StrataEngine:
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0):
         self.spawn = (exe, list(args), cwd, log, env, False, cpus)   # to start it again after it died (issue #27)
-        self.session_save_reclaim = '--session-save-reclaim' in args
         paths = {k: v for k, v in zip(args, args[1:]) if k in ("--native", "--pack")}
         self.model_path = paths.get("--native") or paths.get("--pack", "pack/full")
         self.log_path = log
@@ -1312,37 +1293,6 @@ class StrataEngine:
                     self.last[key] = int(value)
                 except ValueError:
                     pass
-
-    def vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
-        """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
-        expert cache until that much VRAM is free, or grows it back when more is free; None: back to the reserve it
-        started with.  -> the engine's figures (expert_slots, expert_cache_mib, vram_free_mib, ...); raises ValueError
-        with the engine's reason (e.g. it was not started with --vram-elastic), EngineDied when it ended."""
-        if not self.alive():
-            raise EngineDied("the engine is not running")
-        self.proc.stdin.write("VRAM" + ("" if reserve_mib is None else f" {int(reserve_mib)}") + "\n")
-        self.proc.stdin.flush()
-        deadline = time.time() + timeout
-        while True:
-            try:
-                line = self.lines.get(timeout=max(0.1, deadline - time.time()))
-            except queue.Empty:
-                raise EngineDied("the engine did not answer the VRAM command") from None
-            if line is None:
-                raise EngineDied("the engine ended")
-            line = line.strip()
-            if line.startswith("ERR"):
-                raise ValueError(line[4:].strip() or "the engine refused the VRAM command")
-            if line.startswith("VRAM "):
-                out = {}
-                for kv in line.split()[1:]:
-                    k, _, v = kv.partition("=")
-                    out[k] = int(v) if v.lstrip("-").isdigit() else v
-                self.info.update({k: out[k] for k in ("expert_slots", "vram_free_mib") if k in out})
-                self.info["vram"] = out
-                return out
-            if time.time() > deadline:
-                raise EngineDied("the engine did not answer the VRAM command")
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -2317,105 +2267,6 @@ class StrataEngine:
             pass
         return EngineSilent(f"{what}; the server ended the engine")
 
-    def session_file(self, action: str, path: str) -> dict:
-        """Disk sessions: `SAVE <path>` / `RESTORE <path>` between requests (the caller holds the service FIFO).
-        -> {"tokens", "bytes", "ms"}.  SessionRefused (kind, published) when the engine refused or failed the file and
-        is still in step (`SERR <kind> <0|1> <reason>`).  Any line this exchange does not allow - an unknown or
-        malformed one, a bare ERR, an answer with negative counts or a non-finite time - means the two sides lost
-        step: the engine is ended (EngineDied) and the next request starts it again.  EngineDied also when it ended
-        by itself (a restore transfer that failed after the device state changed ends it on purpose: FATAL), and
-        EngineSilent (#481) when it printed nothing valid for engine_silence_s - a SESSION progress line (one per
-        block of the file moved, at most 16 MiB) counts only when its numbers are.  `SWAIT <phase> <seconds>` announces
-        a step that blocks in one call (a flush, the device transfer): until the next line the wait is that step's
-        explicit allowance (at most SESSION_WAIT_MAX_S) when it is longer than engine_silence_s - no more, so a step
-        that never ends is still ended."""
-        if action not in ("save", "restore") or any(c in path for c in "\r\n\0"):
-            raise ValueError("invalid session command")
-        try:
-            self.proc.stdin.write(f"{'SAVE' if action == 'save' else 'RESTORE'} {path}\n")
-            self.proc.stdin.flush()
-        except OSError:
-            raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
-        silence = float(self.silence_s or 0)
-        heard = time.monotonic()
-        want = "SAVED" if action == "save" else "RESTORED"
-
-        def out_of_step(line: str) -> EngineDied:
-            self.ended = True                               # not alive from now: the next request restarts it
-            try:
-                self.proc.kill()
-                self.proc.wait(timeout=20)
-            except (OSError, AttributeError, subprocess.TimeoutExpired):
-                pass
-            return EngineDied(f"the engine answered a session {action} with {line.strip()[:200]!r}; "
-                              "the server ended the engine")
-
-        def count(s: str) -> int:
-            if not s.isdigit():                             # no sign, no blank, no fraction
-                raise ValueError
-            return int(s)
-
-        last_done = -1
-        allow = 0.0                                         # the announced blocking step's allowance, seconds
-        while True:
-            limit = max(silence, allow)
-            left = limit - (time.monotonic() - heard) if silence > 0 else None
-            try:
-                if left is not None and left <= 0:
-                    raise queue.Empty
-                line = self.lines.get(timeout=left)
-            except queue.Empty:
-                raise self._silent(f"the engine said nothing for {limit:.0f} s during a session {action}"
-                                   + (f" (in a blocking step allowed {allow:.0f} s)" if allow > silence else "")) from None
-            if line is None:
-                raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})")
-            f = line.split()
-            head = f[0] if f else ""
-            if head == "SESSION":                          # a large file moving: progress, and a heartbeat
-                try:
-                    if len(f) != 3:
-                        raise ValueError
-                    done, total = count(f[1]), count(f[2])
-                    if done > total or done < last_done:
-                        raise ValueError
-                except ValueError:
-                    raise out_of_step(line) from None
-                last_done = done
-                heard, allow = time.monotonic(), 0.0
-                continue
-            if head == "SWAIT":                            # a blocking step starts: its bounded allowance
-                try:
-                    if len(f) != 3 or not f[1].isalpha() or not f[1].isascii():
-                        raise ValueError
-                    seconds = count(f[2])
-                    if not 0 < seconds <= SESSION_WAIT_MAX_S:
-                        raise ValueError
-                except ValueError:
-                    raise out_of_step(line) from None
-                heard, allow = time.monotonic(), float(seconds)
-                continue
-            if head == "FATAL":
-                raise EngineDied(line[6:].strip() or "the engine ended during a session restore")
-            if head == "SERR":
-                parts = line.rstrip("\r\n").split(" ", 3)
-                if len(parts) != 4 or parts[1] not in SessionRefused.STATUS or parts[2] not in ("0", "1"):
-                    raise out_of_step(line)
-                raise SessionRefused(parts[1], parts[3].strip(), parts[2] == "1")
-            if head == want:
-                try:
-                    if len(f) != 4:
-                        raise ValueError
-                    tokens, size, ms = count(f[1]), count(f[2]), float(f[3])
-                    if not math.isfinite(ms) or ms < 0:
-                        raise ValueError
-                except ValueError:
-                    raise out_of_step(line) from None
-                return {"tokens": tokens, "bytes": size, "ms": ms}
-            if head == "INFO" or head == "WARN":          # engine log lines may interleave; they are not answers
-                heard = time.monotonic()
-                continue
-            raise out_of_step(line)
-
     def close(self):
         """End the engine process: STOP + QUIT first (the engine frees its memory itself - unpinning tens of GB can take
         a while; ENGINE_QUIT_WAIT_S), then terminate (ENGINE_TERM_WAIT_S), then kill (ENGINE_KILL_WAIT_S).  Raises
@@ -2528,13 +2379,7 @@ class Vision:
         self.stopped = True
         self.lock = threading.Lock()
         self.cache: dict[str, tuple[Path, int]] = {}
-        # opt-in (the vision section's "elastic": true, with the config's "vram_elastic"): the encoder starts with the
-        # first picture and stops after elastic_idle_s without one; while it runs, the engine's expert cache keeps
-        # elastic_mib of VRAM free for it (Service._vision_up / _vision_idle_down)
-        self.elastic = cfg.get("elastic") is True
-        self.elastic_mib = int(cfg.get("elastic_mib") or 2048)
-        self.elastic_idle_s = float(cfg.get("elastic_idle_s") or 120)
-        if not lazy and not self.elastic:
+        if not lazy:
             self._start()
 
     @staticmethod
@@ -2967,13 +2812,6 @@ def engine_args(cfg: dict) -> list[str]:
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
     if layer_split_of(cfg) and cfg.get("split_skip_if_fits") and "--split-skip-if-fits" not in args:
         args.append("--split-skip-if-fits")
-    # #533 (opt-in): "vram_elastic": true - the expert cache in segments, so POST /v1/vram can give VRAM back to other
-    # programs and take it back; "vram_segment_mib" sets the segment size (the engine's default: 512)
-    if cfg.get("vram_elastic") is True and "--vram-elastic" not in args:
-        args.append("--vram-elastic")
-        seg = cfg.get("vram_segment_mib")
-        if isinstance(seg, int) and not isinstance(seg, bool) and seg > 0 and "--vram-segment-mib" not in args:
-            args += ["--vram-segment-mib", str(seg)]
     args += parallel_args(cfg, args)
     return learned_profile_args(cfg, args)
 
@@ -3369,48 +3207,7 @@ class StopMatcher:
 
 
 
-# Windows names that open a device whatever their extension or folder (Microsoft, "Naming Files, Paths, and Namespaces")
-_WIN_DEVICES = {"con", "prn", "aux", "nul", "conin$", "conout$", *(f"com{i}" for i in "123456789\u00b9\u00b2\u00b3"),
-                *(f"lpt{i}" for i in "123456789\u00b9\u00b2\u00b3")}
 
-
-def slot_filename_problem(name) -> str | None:
-    """/slots/0 {"filename": NAME}: why NAME is not one plain file name inside the slot save path, on Linux and on
-    Windows alike (None when it is).  No separator or drive (`D:x`), no stream (`a:b`), no device (`NUL.txt`), no
-    trailing dot or space (Windows drops them), no control character, no leading dot (temporary files use it)."""
-    if not isinstance(name, str) or not name:
-        return "must be a non-empty string"
-    if len(name.encode("utf-8", "surrogatepass")) > 200:
-        return "is too long (at most 200 bytes)"
-    if any(ord(c) < 32 or ord(c) == 127 for c in name):
-        return "must not contain control characters"
-    if any(c in name for c in '/\\:*?"<>|'):
-        return "must be a plain file name (no / \\ : * ? \" < > |)"
-    if name.startswith("."):
-        return "must not start with a dot"
-    if name.endswith((".", " ")):
-        return "must not end with a dot or a space"
-    if name.split(".")[0].rstrip(" ").lower() in _WIN_DEVICES:
-        return "names a Windows device"
-    try:
-        name.encode("utf-8")
-    except UnicodeEncodeError:
-        return "is not valid Unicode"
-    return None
-
-
-def slot_save_dir(value, base: str | None = None) -> str:
-    """The slot save path as one absolute, normalized directory (relative to `base`, else the server's working
-    directory), created private to this user when missing.  ValueError for anything else."""
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError("slot_save_path must be a directory path (a string)")
-    if any(ord(c) < 32 for c in value):
-        raise ValueError("slot_save_path must not contain control characters")
-    path = os.path.abspath(os.path.join(base, value) if base and not os.path.isabs(value) else value)
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    if not os.path.isdir(path):
-        raise ValueError(f"slot_save_path {path} is not a directory")
-    return path
 
 class Service:
     def __init__(self, engine: Engine, tokenizer, template: ChatTemplate, model_name: str = "qwen3.8-flash-next",
@@ -3431,7 +3228,6 @@ class Service:
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.fifo = threading.Lock()
-        self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
         self.api_key = ""                              # when set, /v1/* needs it (Bearer or x-api-key)
         # #458 (opt-in, the config's "effort_position": "end"): a non-default reasoning effort goes in a short system
@@ -3502,17 +3298,12 @@ class Service:
         self.before_load_ignore_failure = False          # #1997: load even when it fails, without a VRAM check
         self.vram_free_wait_s = 15.0                     # how long a full card is waited on (memory given back)
         self.before_load_strict = False                  # #1997: refuse (503) whenever it fails
-        self.vram_reserve = None                         # #533: the last POST /v1/vram reserve (None: the start's)
-        self.vram_reserve_asked = False                  # a POST /v1/vram was made (vram_reserve None is then asked)
-        self.vision_held = False                         # an elastic encoder holds VRAM the expert cache gave it
-        self.last_image_at = 0.0                         # when an image turn last ended (the elastic encoder's idle)
         self.reasoning_loop_recovery = False
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
         self.images = None                                # serve/images.py's ImageGen when the config has "images"
-        self.restore_after_load = None                    # a session file an image job saved before it unloaded
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
         # #567: a prompt re-encodes only what follows the last special token it shares with a recent prompt (the
@@ -3625,74 +3416,6 @@ class Service:
             cancel.set()
         return len(active)
 
-    def slot_action(self, slot: str, action: str, filename) -> tuple[int, dict]:
-        """llama-server's POST /slots/{id}?action=save|restore {"filename": ...}: the conversation the engine holds,
-        to or from a file in slot_save_path.  -> (HTTP status, body)."""
-        def error(code, message):
-            return code, {"error": {"code": code, "message": message,
-                                    "type": "invalid_request_error" if code < 500 else "server_error"}}
-        if not self.slot_save_path or not hasattr(self.engine, "session_file"):
-            return error(501, "slot save/restore is disabled (start the server with --slot-save-path DIR)")
-        if getattr(self.engine, "batch", 0):
-            # #465 parallel requests do not hold the FIFO and share the engine's control lines: a session file
-            # could interleave with a request being admitted, so the two are not combined (the engine refuses too)
-            return error(501, "slot save/restore is not available with parallel requests (\"parallel\" / --batch)")
-        if slot != "0":
-            return error(400, "this server has one slot: 0")
-        if action not in ("save", "restore"):
-            return error(400, "action must be save or restore")
-        why = slot_filename_problem(filename)
-        if why:
-            return error(400, f"filename {why}")
-        path = os.path.join(self.slot_save_path, filename)
-        if action == "restore":
-            try:
-                os.lstat(path)                              # the engine opens it without following a link
-            except OSError:
-                return error(404, f"no saved session named {filename}")
-        self.last_request_at = time.time()                  # the idle unload counts this as activity
-        with self.status_lock:
-            self.status["queued"] += 1
-        waiting = True
-        try:
-            with self.fifo:
-                with self.status_lock:
-                    self.status["queued"] -= 1
-                waiting = False
-                if not self.loaded():
-                    return error(503, "the model is not loaded")
-                with self.status_lock:
-                    self.status.update(busy=True, phase="saving the session" if action == "save"
-                                       else "restoring a session", started=time.time(), first_token=None,
-                                       prompt_tokens=None, generated=None, max_tokens=None)
-                try:
-                    if action == 'save' and getattr(self.engine, 'session_save_reclaim', False):
-                        from serve.session_save_retry import session_file
-                        r = session_file(self, action, path, SessionRefused)
-                    else:
-                        r = self.engine.session_file(action, path)
-                except SessionRefused as e:
-                    body = error(e.status, str(e))
-                    body[1]["error"]["kind"] = e.kind
-                    if e.published:
-                        body[1]["error"]["published"] = True
-                    return body
-                except ValueError as e:                     # the request itself (an invalid command)
-                    return error(400, str(e))
-                finally:
-                    with self.status_lock:
-                        self.status["busy"] = False
-                    self.last_request_at = time.time()
-        finally:
-            if waiting:                                     # never reached the FIFO (an exception while waiting)
-                with self.status_lock:
-                    self.status["queued"] -= 1
-        if action == "save":
-            return 200, {"id_slot": 0, "filename": filename, "n_saved": r["tokens"], "n_written": r["bytes"],
-                         "timings": {"save_ms": r["ms"]}}
-        return 200, {"id_slot": 0, "filename": filename, "n_restored": r["tokens"], "n_read": r["bytes"],
-                     "timings": {"restore_ms": r["ms"]}}
-
     def set_aliases(self, aliases) -> None:
         """#297: the config's `aliases` - a list of names (or one comma-separated string), like llama-server's --alias.
         ValueError for anything else."""
@@ -3737,80 +3460,8 @@ class Service:
         return value if value > 0 else None
 
     def _vision_down(self) -> bool:
-        """The encoder should run and does not (the engine's load starts it again).  An elastic encoder is down
-        between pictures by design: it starts in the image turn (_vision_up), not with the engine."""
-        return (self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
-                and not getattr(self.vision, "elastic", False))
-
-    def _engine_reserve(self) -> int | None:
-        """The VRAM the engine keeps free for other programs outside an elastic encoder's turn: the last POST /v1/vram
-        reserve, or 0 when none was asked (the cache grows back to its full size; None would leave the reserve the engine
-        started with, a segment or more below the size it had)."""
-        return self.vram_reserve if self.vram_reserve_asked else 0
-
-    def _vision_up(self):
-        """The image turn's start for an elastic encoder that is not running (the caller holds self.fifo): the expert
-        cache first keeps the encoder's elastic_mib of VRAM free on top of the reserve, then the encoder starts (load and
-        warm-up, a few seconds).  If the cache cannot shrink (an engine without --vram-elastic, the resident low-RAM mode)
-        the encoder starts anyway, as a non-elastic one would."""
-        v = self.vision
-        if not getattr(v, "elastic", False) or v.alive():
-            return
-        if hasattr(self.engine, "vram") and self.loaded():
-            try:
-                out = self.engine.vram((self._engine_reserve() or 0) + v.elastic_mib)
-                self.vision_held = True
-                print(f"[lamina] images: the expert cache keeps {v.elastic_mib} MiB free for the image encoder "
-                      f"({out.get('expert_cache_mib')} of {out.get('expert_cache_full_mib')} MiB left)", flush=True)
-            except ValueError as e:
-                print(f"[lamina] images: the expert cache did not make room for the image encoder ({e}); starting "
-                      "it anyway", flush=True)
-        if self.vision_held:
-            time.sleep(0.2)          # the driver's free-VRAM counter shows the cache's release a moment later
-        free0, t0 = self.free_vram_mib(), time.time()
-        v.restart()
-        free1 = self.free_vram_mib()
-        took = f", {free0 - free1} MiB of VRAM" if free0 is not None and free1 is not None else ""
-        print(f"[lamina] images: the image encoder started in {time.time() - t0:.1f} s{took}", flush=True)
-
-    def _vision_idle_down(self, force: bool = False) -> str:
-        """An elastic encoder idle for elastic_idle_s (or force) stops, and the expert cache takes its VRAM back:
-        "down", "busy" (a request holds the turn, or a picture came more recently) or "nothing" (not elastic or not
-        holding anything)."""
-        v = self.vision
-        if not getattr(v, "elastic", False) or not (self.vision_held or v.alive()):
-            return "nothing"
-        if not force and time.time() - self.last_image_at < v.elastic_idle_s:
-            return "busy"
-        if not self.fifo.acquire(blocking=False):
-            return "busy"
-        try:
-            v.unload()
-            if self.vision_held and hasattr(self.engine, "vram") and self.loaded():
-                out = self.engine.vram(self._engine_reserve())
-                print(f"[lamina] images: the image encoder stopped after {v.elastic_idle_s:g} s without a picture; "
-                      f"the expert cache took its VRAM back ({out.get('expert_cache_mib')} of "
-                      f"{out.get('expert_cache_full_mib')} MiB)", flush=True)
-            self.vision_held = False
-            return "down"
-        finally:
-            self.fifo.release()
-
-    def start_vision_idle(self):
-        v = self.vision
-        if not getattr(v, "elastic", False):
-            return
-        print(f"[lamina] images: the image encoder starts with the first picture and stops after {v.elastic_idle_s:g} s "
-              f"without one; while it runs the expert cache keeps {v.elastic_mib} MiB free for it", flush=True)
-
-        def loop():
-            while True:
-                time.sleep(max(1.0, min(30.0, v.elastic_idle_s / 4)))
-                try:
-                    self._vision_idle_down()
-                except Exception as e:                 # tried again at the next turn; the thread keeps running
-                    print(f"[lamina] images: stopping the idle image encoder: {e}", flush=True)
-        threading.Thread(target=loop, daemon=True).start()
+        """The encoder should run and does not (the engine's load starts it again)."""
+        return self.vision is not None and hasattr(self.vision, "alive") and not self.vision.alive()
 
     def free_vram_mib(self) -> int | None:
         """Free VRAM on the engine's (first) GPU, from the backend's reader - NVML, the amdgpu sysfs files (#301) or
@@ -3904,46 +3555,6 @@ class Service:
                 self.vision.unload()
             raise
         print("[lamina] the engine is running again", flush=True)
-        if self.restore_after_load:                      # an image job unloaded it: its conversation comes back
-            images_api.restore_session(self)
-        if self.vram_reserve is not None and hasattr(self.engine, "vram"):   # #533: the reserve asked for last
-            try:
-                self.engine.vram(self.vram_reserve)
-            except (ValueError, EngineDied) as e:
-                print(f"[lamina] the VRAM reserve ({self.vram_reserve} MiB) was not applied: {e}", flush=True)
-
-    vram_wait_s = 300.0                                  # #533: how long POST /v1/vram waits for a running request
-
-    def vram(self, reserve_mib: int | None) -> dict:
-        """#533, POST /v1/vram: keep `reserve_mib` of VRAM free for other programs (None: the reserve the engine
-        started with), applied between requests - a request that is running finishes first (up to wait_s).  Only an
-        engine started with --vram-elastic (the config's "vram_elastic": true) can do it; it never resizes on its own.
-        An unloaded engine applies it when it loads.  -> {"status": ..., and the engine's figures}."""
-        if not hasattr(self.engine, "vram"):
-            raise ValueError("this engine cannot resize its VRAM use")
-        if not self.fifo.acquire(timeout=self.vram_wait_s):
-            raise ModelBusy("a request is still running; try again when it has finished")
-        # parallel requests do not hold the fifo: the engine's control lines (a prompt being admitted) are taken too,
-        # and the engine refuses a resize while a slot decodes
-        ctl = getattr(self.engine, "ctl", None) if getattr(self.engine, "batch", 0) else None
-        if ctl is not None and not ctl.acquire(timeout=self.vram_wait_s):
-            self.fifo.release()
-            raise ModelBusy("a request is still running; try again when it has finished")
-        try:
-            if not self.loaded():
-                self.vram_reserve, self.vram_reserve_asked = reserve_mib, True
-                return {"status": "not loaded", "reserve_mib": reserve_mib,
-                        "note": "applied when the model loads"}
-            # an elastic encoder that runs keeps its VRAM on top of the asked reserve
-            out = self.engine.vram((reserve_mib or 0) + self.vision.elastic_mib if self.vision_held else reserve_mib)
-            self.vram_reserve, self.vram_reserve_asked = reserve_mib, True
-            print(f"[lamina] VRAM: {out.get('vram_free_mib')} MiB free, expert cache {out.get('expert_cache_mib')} of "
-                  f"{out.get('expert_cache_full_mib')} MiB ({out.get('expert_slots')} experts)", flush=True)
-            return {"status": "ok", **out}
-        finally:
-            if ctl is not None:
-                ctl.release()
-            self.fifo.release()
 
     def _say_died(self, e: Exception) -> None:
         """The server window's line for an engine that died (or was ended, #481) in the middle of a request."""
@@ -4015,7 +3626,6 @@ class Service:
             self.engine.unload()
             if self.vision is not None and hasattr(self.vision, "unload"):
                 self.vision.unload()
-            self.vision_held = False
             print(f"[lamina] model unloaded{f' after {idle_for:.0f} s idle' if idle_for else ''}; "
                   "the next request loads it again", flush=True)
             return "unloaded"
@@ -4282,8 +3892,6 @@ class Service:
                          "in_flight": running + int(s.get("queued") or 0),
                          "last_request_at": int(last_at) if last_at else None},
             "last_timings": last_t,
-            "vram": dict((getattr(self.engine, "info", {}) or {}).get("vram") or {},
-                         elastic=bool((getattr(self.engine, "info", {}) or {}).get("vram_elastic"))),
             "machine": {
                 "at": int(time.time()),
                 "gpu": {"name": static.get("gpu_name"), "used_mib": scaled(hw.get("gpu_mem_used"), 2 ** 20),
@@ -4413,12 +4021,8 @@ class Service:
             # "reading the prompt" with CPU and GPU busy, for good (reproduced).  So encoding takes its turn in the
             # same FIFO as the requests.
             with self._turn(cancel):
-                self._vision_up()
-                try:
-                    encoded = (self.vision.encode_all(images, cancel) if hasattr(self.vision, "encode_all")
-                               else [self.vision.encode(src) for src in images])
-                finally:
-                    self.last_image_at = time.time()
+                encoded = (self.vision.encode_all(images, cancel) if hasattr(self.vision, "encode_all")
+                           else [self.vision.encode(src) for src in images])
             # one <|image_pad|> per image -> one per image token.  Only the markers the template writes for an image
             # (right after <|vision_start|>) are images: the same text inside a message (an agent reading these docs,
             # #150) is kept as plain text, or it took an image's place and the counts no longer matched.
@@ -4808,7 +4412,7 @@ class Service:
                     # issue #27: it died in an earlier request (or was unloaded) - start it again instead of failing
                     # (parallel requests do not hold the fifo: one of them starts it, the others wait for that).
                     # #1603: a parallel request stays counted as queued until it is registered as running below -
-                    # waiting here for the fifo (an image encode, a /v1/vram resize) left it neither - and one on a
+                    # waiting here for the fifo (an image encode) left it neither - and one on a
                     # loaded engine has nothing to start, so it does not wait for the fifo at all
                     if not par:
                         self.ensure_loaded()
@@ -6166,9 +5770,6 @@ def make_handler(svc: Service):
             # JSON from Strata's own page only, as /settings: else a plain form POST from any site unloads the model
             if path in ("/unload", "/load") and not self._own_page("the model can be loaded or unloaded"):
                 return
-            # the same for the slot files: else any site could overwrite a saved conversation or replace the live one
-            if path.startswith("/slots/") and not self._own_page("conversations can be saved or restored"):
-                return
             if path == "/unload":                            # give the GPU back now (between requests)
                 try:
                     wait_s = unload_wait(parse_qs(urlsplit(self.path).query).get("wait", [None])[0],
@@ -6239,30 +5840,11 @@ def make_handler(svc: Service):
                         result = "loaded"
                     self._json(200, {"status": result, **svc.v1_status()})
                     return
-                if path == "/v1/vram":                       # #533: give VRAM back to other programs, or take it
-                    if not self._own_page("the VRAM reserve can be changed"):
-                        return
-                    r = req.get("reserve_mib")
-                    if r is not None and (isinstance(r, bool) or not isinstance(r, int) or r < 0):
-                        raise ValueError("reserve_mib: a whole number of MiB (0 or more), or null for the start's")
-                    try:
-                        self._json(200, svc.vram(r))
-                    except EngineDied as e:
-                        self._json(503, {"error": {"type": "server_error", "message": str(e)}})
                     return
                 if path in ("/v1/chat/completions", "/v1/messages", "/v1/responses", "/v1/choose"):
                     self.record = svc.begin_request(path, req)
                 if path == "/v1/responses":
                     self._responses(req)
-                elif path.startswith("/slots/"):
-                    query = parse_qs(self.path.partition("?")[2])
-                    try:
-                        code, body = svc.slot_action(path[len("/slots/"):], (query.get("action") or [""])[0],
-                                                     req.get("filename"))
-                    except EngineDied as e:                  # EngineSilent included: the engine was ended
-                        code, body = 500, {"error": {"code": 500, "message": str(e) + "; the next request starts "
-                                                     "the engine again", "type": "server_error"}}
-                    self._json(code, body)
                 elif path == "/v1/chat/completions":
                     self._openai(req)
                 elif path == "/v1/messages":
@@ -7541,9 +7123,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
                          "\"min_free_vram_mib\" in the config; default: always load)")
     ap.add_argument("--before-load", help="a command run before the model is loaded again (e.g. to unload another "
                                           "server's model; also \"before_load\" in the config, a string or a list)")
-    ap.add_argument("--slot-save-path", default=None, metavar="DIR",
-                    help="enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the "
-                         "conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)")
     ap.add_argument("--replicas", type=int, default=None, metavar="N",
                     help="data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on "
                          "each, requests spread over them (also \"replicas\" in the config: a number, or "
@@ -7683,18 +7262,12 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
             print(f"[lamina] sampling defaults from the config: {pretty}", flush=True)
         lazy = a.lazy or cfg.get("lazy_load") is True
         if cfg.get("vision"):
-            elastic = cfg["vision"].get("elastic") is True and cfg.get("vram_elastic") is True
-            print("the vision encoder starts with the first picture (elastic) ..." if elastic else
-                  "loading the vision encoder ..." if not lazy else
+            print("loading the vision encoder ..." if not lazy else
                   "vision encoder unloaded; it starts with the model ...", flush=True)
             # relative paths are the config's cwd's, as for the engine below
             vcfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
                         if k in ("exe", "mmproj", "model") and isinstance(v, str) and not os.path.isabs(v) else v)
                     for k, v in cfg["vision"].items()}
-            if vcfg.get("elastic") is True and cfg.get("vram_elastic") is not True:
-                print('[lamina] the vision section\'s "elastic" needs "vram_elastic": true (the expert cache gives the '
-                      "encoder its VRAM): the encoder starts with the model instead", flush=True)
-                vcfg["elastic"] = False
             vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
                             env=vision_env(cfg, env), lazy=lazy)
         print("model unloaded; the first request loads it ..." if lazy else
@@ -7835,16 +7408,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
               f"{svc.before_load_timeout_s:g} s", flush=True)
     svc.before_load_ignore_failure = cfg.get("before_load_ignore_failure") is True
     svc.before_load_strict = cfg.get("before_load_strict") is True
-    # --slot-save-path is relative to the working directory the server was started in; the config's slot_save_path
-    # to the config's "cwd" (the engine's folder) when it has one.  Either way the engine gets an absolute path.
-    if a.slot_save_path or cfg.get("slot_save_path"):
-        try:
-            svc.slot_save_path = slot_save_dir(a.slot_save_path) if a.slot_save_path else \
-                slot_save_dir(cfg["slot_save_path"], cfg.get("cwd"))
-        except (ValueError, OSError) as e:
-            raise SystemExit(f"[lamina] {e}")
-        print(f"[lamina] slot save/restore on: {svc.slot_save_path} (session files are kept until deleted: "
-              "about 1.2 GB per 63K-token conversation; restore only files this server wrote)", flush=True)
     mode = str(cfg.get("anthropic_thinking") or "model")   # #278: "on_request" = only when the request asks
     if mode not in ("model", "on_request"):
         raise SystemExit(f"[lamina] config anthropic_thinking must be \"model\" or \"on_request\", not {mode!r}")
@@ -7913,7 +7476,6 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
     httpd = serve(svc, host=a.host, port=a.port)
     bound_port = httpd.server_address[1]               # --port 0: report the port the OS actually assigned
     svc.start_idle_unload()
-    svc.start_vision_idle()
     here = "127.0.0.1" if a.host in ("0.0.0.0", "", "::") else a.host
     print(f"ready: http://{here}:{bound_port}/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, "
           f"context {engine.max_context} tokens{', images on' if vision else ''}"

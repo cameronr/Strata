@@ -111,11 +111,10 @@ class Command(unittest.TestCase):
 
 
 class FakeEngine:
-    """An engine with the parts the GPU turn uses: alive/unload/restart, vram (elastic) and session files."""
+    """An engine with the parts the GPU turn uses: alive/unload/restart."""
 
-    def __init__(self, elastic=False):
-        self.up, self.calls, self.info = True, [], {"vram_elastic": elastic}
-        self.spawn = (["strata"], ["--vram-elastic"] if elastic else [])
+    def __init__(self):
+        self.up, self.calls, self.info = True, [], {}
         self.unloaded = False
 
     def alive(self):
@@ -131,18 +130,6 @@ class FakeEngine:
     def restart(self):
         self.calls.append("restart")
         self.up, self.unloaded = True, False
-
-    def vram(self, reserve):
-        self.calls.append(("vram", reserve))
-        return {"vram_free_mib": 9000}
-
-    def session_file(self, action, path):
-        self.calls.append((action, os.path.basename(path)))
-        if action == "save":
-            Path(path).write_bytes(b"kv")
-        else:
-            assert Path(path).read_bytes() == b"kv"
-        return {"tokens": 123, "bytes": 2, "ms": 1.0}
 
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         return iter(())
@@ -164,8 +151,6 @@ class Policy(unittest.TestCase):
                 self.assertEqual(images_api.resolve_policy(svc, gen, 15000), "keep")
             with mock.patch.object(svc, "free_vram_mib", return_value=4000):
                 self.assertEqual(images_api.resolve_policy(svc, gen, 15000), "unload")
-                svc.engine = FakeEngine(elastic=True)
-                self.assertEqual(images_api.resolve_policy(svc, gen, 15000), "shrink")
                 gen.cfg["uma"] = True
                 self.assertEqual(images_api.resolve_policy(svc, gen, 15000), "keep")
                 gen.cfg["uma"] = False
@@ -175,7 +160,7 @@ class Policy(unittest.TestCase):
                 self.assertEqual(images_api.resolve_policy(svc, gen, 15000), "keep")
             self.assertEqual(images_api.resolve_policy(self.svc(MockEngine(ByteTokenizer(), "x")), gen, 1), "keep")
 
-    def test_unload_saves_and_the_next_start_restores(self):
+    def test_unload_and_the_next_start(self):
         with tempfile.TemporaryDirectory() as d:
             gen = images_api.ImageGen(image_cfg(d, gpu_policy="unload"))
             eng = FakeEngine()
@@ -188,14 +173,10 @@ class Policy(unittest.TestCase):
                 self.assertTrue(svc.status["busy"])
             self.assertFalse(svc.fifo.locked())
             self.assertFalse(svc.status["busy"])
-            self.assertEqual([c if isinstance(c, str) else c[0] for c in eng.calls], ["save", "unload"])
-            self.assertTrue(svc.restore_after_load)
+            self.assertEqual(eng.calls, ["unload"])
             with svc.fifo:
-                svc.ensure_loaded()                          # the next request: start, then the conversation back
-            self.assertEqual([c if isinstance(c, str) else c[0] for c in eng.calls],
-                             ["save", "unload", "restart", "restore"])
-            self.assertIsNone(svc.restore_after_load)
-            self.assertEqual(list(Path(gen.dir).glob("llm-session-*")), [])
+                svc.ensure_loaded()                          # the next request starts it
+            self.assertEqual(eng.calls, ["unload", "restart"])
 
     def test_eager_reload(self):
         with tempfile.TemporaryDirectory() as d:
@@ -204,20 +185,7 @@ class Policy(unittest.TestCase):
             svc = self.svc(eng)
             with images_api.gpu_turn(svc, gen, {"width": 512, "height": 512}):
                 pass
-            self.assertEqual([c if isinstance(c, str) else c[0] for c in eng.calls],
-                             ["save", "unload", "restart", "restore"])
-            self.assertTrue(eng.up)
-
-    def test_shrink_gives_the_cache_back(self):
-        with tempfile.TemporaryDirectory() as d:
-            gen = images_api.ImageGen(image_cfg(d, gpu_policy="shrink"))
-            eng = FakeEngine(elastic=True)
-            svc = self.svc(eng)
-            svc.vram_reserve = 512
-            with images_api.gpu_turn(svc, gen, {"width": 1024, "height": 1024}):
-                self.assertEqual(eng.calls[0][0], "vram")
-                self.assertEqual(eng.calls[0][1], 6 * 1024)     # 2 GiB + 4 GiB per megapixel (+ 3 KiB of files)
-            self.assertEqual(eng.calls[-1], ("vram", 512))
+            self.assertEqual(eng.calls, ["unload", "restart"])
             self.assertTrue(eng.up)
 
     def test_keep_touches_nothing(self):

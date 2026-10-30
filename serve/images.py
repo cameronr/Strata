@@ -9,11 +9,8 @@ The GPU is shared with the text engine one job at a time: an image job takes the
 request takes), so no chat turn runs on the GPU meanwhile, and the config's "gpu_policy" says what happens to the
 text engine during the job (gpu_turn):
   keep    - it stays loaded and idle (an APU's shared memory, a card with room for both)
-  shrink  - an engine started with --vram-elastic gives the image job VRAM from its expert cache and takes it back
-            afterwards (POST /v1/vram's mechanism; the conversation stays in the engine)
-  unload  - its conversation is saved to a session file, the engine is stopped, and the next start restores it
-  auto    - (default) keep when there is room for the image job next to it, else shrink when the engine can,
-            else unload
+  unload  - the engine is stopped; the next request (or, with "reload": "eager", the job's end) starts it again
+  auto    - (default) keep when there is room for the image job next to it, else unload
 The process per request keeps nothing on the GPU between images: when the job ends, all of its memory is free again.
 
 The config's "images" section (written by setup --images, tools/image/install.py):
@@ -42,7 +39,7 @@ from pathlib import Path
 TURBO_SIGMAS = "1.0,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568,0.0"
 TURBO_STEPS = 8
 MODEL_NAME = "qwen-image-2.1-turbo"
-POLICIES = ("auto", "keep", "shrink", "unload")
+POLICIES = ("auto", "keep", "unload")
 SIZE_STEP = 32                     # sd.cpp's Qwen-Image-2.1 docs: dimensions divisible by 32
 MIN_SIDE = 256
 FILE_NAME = re.compile(r"^[0-9a-f]{32}\.png$")
@@ -323,7 +320,7 @@ class ImageGen:
 
 # ------------------------------------------------------------------------------------------- the GPU turn
 def resolve_policy(svc, gen: ImageGen, need: int) -> str:
-    """auto -> keep / shrink / unload for this job (see the module's docstring); a fixed policy is kept, except that
+    """auto -> keep / unload for this job (see the module's docstring); a fixed policy is kept, except that
     an engine that is not running has nothing to give back (keep)."""
     eng = svc.engine
     running = not hasattr(eng, "alive") or eng.alive()
@@ -336,20 +333,7 @@ def resolve_policy(svc, gen: ImageGen, need: int) -> str:
     free = svc.free_vram_mib()
     if free is None or free >= need:
         return "keep"
-    if engine_elastic(eng):
-        return "shrink"
     return "unload"
-
-
-def engine_elastic(eng) -> bool:
-    """An engine that resizes its expert cache on request (--vram-elastic, #533)."""
-    if not hasattr(eng, "vram"):
-        return False
-    if (getattr(eng, "info", None) or {}).get("vram_elastic"):
-        return True
-    spawn = getattr(eng, "spawn", None)
-    args = spawn[1] if isinstance(spawn, (list, tuple)) and len(spawn) > 1 else []
-    return "--vram-elastic" in (args or [])
 
 
 def _client_gone(svc) -> Exception:
@@ -406,62 +390,19 @@ def gpu_turn(svc, gen: ImageGen, job: dict, cancel: threading.Event | None = Non
 def _make_room(svc, gen: ImageGen, policy: str, need: int):
     """Do what `policy` says before the job; -> what _give_back needs."""
     eng = svc.engine
-    if policy == "shrink":
-        try:
-            out = eng.vram(need)
-            gen._say(f"image job: the engine's expert cache gave VRAM back ({out.get('vram_free_mib')} MiB free)")
-            return "shrunk"
-        except Exception as e:                       # noqa: BLE001 - the job still runs, with what is free
-            gen._say(f"image job: the engine could not give VRAM back ({e}); the job runs with what is free")
-            return None
     if policy == "unload":
-        saved = None
-        if hasattr(eng, "session_file") and not getattr(eng, "batch", 0):
-            path = str(gen.dir / f"llm-session-{secrets.token_hex(6)}.bin")
-            try:
-                r = eng.session_file("save", path)
-                saved = path
-                gen._say(f"image job: the conversation ({r.get('tokens')} tokens) saved; unloading the model")
-            except Exception as e:                   # noqa: BLE001 - unloading still frees the GPU
-                gen._say(f"image job: the conversation could not be saved ({e}); unloading the model")
-                with contextlib.suppress(OSError):
-                    os.unlink(path)
         eng.unload()
         if svc.vision is not None and hasattr(svc.vision, "unload"):
             svc.vision.unload()
-        return saved or "unloaded"
+        return "unloaded"
     return None
 
 
 def _give_back(svc, gen: ImageGen, policy: str, restore) -> None:
-    eng = svc.engine
-    if restore == "shrunk":
-        try:
-            eng.vram(svc.vram_reserve)               # the reserve asked for last (None: the start's)
-        except Exception as e:                       # noqa: BLE001
-            gen._say(f"image job: the expert cache did not grow back ({e}); POST /v1/vram can retry")
-    elif policy == "unload" and restore:
-        if restore != "unloaded":
-            svc.restore_after_load = restore         # Service.ensure_loaded restores it after the next start
+    if policy == "unload" and restore:
         if gen.reload == "eager":
             try:
                 svc.ensure_loaded()                  # the caller still holds the FIFO
             except Exception as e:                   # noqa: BLE001 - the next request tries again
                 gen._say(f"image job: the model did not load again yet ({e}); the next request loads it")
 
-
-def restore_session(svc) -> None:
-    """After an engine start: restore the conversation an image job saved before it unloaded the engine."""
-    path = getattr(svc, "restore_after_load", None)
-    if not path:
-        return
-    svc.restore_after_load = None
-    try:
-        r = svc.engine.session_file("restore", path)
-        print(f"[lamina] the conversation from before the image job is back ({r.get('tokens')} tokens)", flush=True)
-    except Exception as e:                           # noqa: BLE001 - the engine runs, without the old cache
-        print(f"[lamina] the conversation from before the image job was not restored ({e}); the next request "
-              "reads its prompt again", flush=True)
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(path)
