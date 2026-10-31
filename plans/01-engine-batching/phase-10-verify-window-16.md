@@ -150,3 +150,20 @@ default again needs a
 verification pays; until then 16 stays an experiment knob, not the default.
 Post-cap sanity (default build, no env, 2 rounds): 4x median 104.6 tok/s
 (98.3-106.2), back on the pre-p10 distribution.
+
+## Rebase analysis (2026-10-31): why this stays a fork, and the ratio rule
+
+Niko main (1702 commits ahead of this fork point) now ships a mature batch path of its
+own (`docs/BATCHING.md`: concurrent prompt reads with stream priority, BYIELD, per-slot
+conversation caches, admission, `--adapt-async`, 16-row windows on HIP only) and
+Basalt (jesdga95/basalt, Blackwell) adds originals upstream lacks (`--relaxed-drafting`,
+a disk-tier conversation cache, `--idle-sleep`, `PROBE`). Tempting - but the nightly
+A/B (`~/strata-results.md`, `upstream_watch.py`) measures this fork at **+53.6%**
+over Niko main (geo-mean; +17% decode, +123% 4K prefill; 2026-10-31). A rebase would
+trade the speed for the features, and the features are designs, not dependencies.
+Rule: port designs onto this base (phase 11), and revisit the rebase question only if
+the nightly ratio falls to ~1.15 (it moved 1.99 -> 1.54 in one week; Niko is closing
+fast, the watch is the instrument). Two of this phase's conclusions independently match
+Niko's measured verdicts: 8 rows as the CUDA window cap (they cite kernel-load cost and
+nothing gained below 9 rows), and batching as a latency win where experts mostly run
+from the CPU.
