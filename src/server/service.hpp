@@ -55,7 +55,9 @@ public:
 
     // ---- configuration (main sets these)
     std::vector<std::string> aliases;
-    bool answer_room = true, reasoning_close_retry = false, codex_compaction_cache = false, codex_thread_titles = false;
+    bool answer_room = true, reasoning_close_retry = false, literal_markers = true, codex_compaction_cache = false,
+         codex_thread_titles = false;
+    int64_t short_opening_tokens = 0;
     bool effort_end = false, api_monitor = false, offline = false, anthropic_think_unasked = true;
     bool tool_call_recovery = false, fit_max_tokens = true, before_load_strict = false, before_load_ignore_failure = false;
     std::string reasoning_loop_recovery;   ///< "", "stop" or "recover"
@@ -149,6 +151,7 @@ public:
     std::string prometheus();
     json v1_status();
     std::string render_prompt(const json& messages, const json& tools, const json& kwargs);
+    bool short_opening(const json& messages) const;
     std::vector<int32_t> encode_prompt(const json& messages, const json& tools, const json& kwargs, bool store = true);
     void forget_prompt(const std::vector<int32_t>& ids);
     Prepared prepare(json& messages, const json& tools, const json& kwargs, std::optional<int64_t> max_new,

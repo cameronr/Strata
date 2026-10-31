@@ -5,6 +5,7 @@
 #include "service.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -20,6 +21,44 @@ constexpr double kLoopCoverage = 0.25;
 const char* kReasoningClose = "\n</think>\n\n";
 const char* kReasoningWrapUp = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n";
 const char* kPrefixEnd = "\x01lamina-prefix-end\x01";   // where a message's shared part ends in the rendered prompt
+constexpr int kMarkerNames = 64;         // the stop markers a reply may name in its text before one ends it
+
+// Whether a stop token drawn now names the marker in the reply's text rather than ending the turn: the vocabulary has
+// the marker as that one token, so a model quoting it draws the id that ends a turn. `text`: the reply so far. A turn
+// does not end inside a code span or fence, after an opening quote, in a chat turn the text opened, in a call's open
+// parameter, nor, while thinking, anywhere but after a sentence or a line.
+bool names_stop_marker(std::string_view text, const std::string& state) {
+    constexpr size_t none = std::string_view::npos;
+    const auto opened = [&](std::string_view open, std::string_view close) {
+        const size_t i = text.rfind(open), j = text.rfind(close);
+        return i != none && (j == none || j < i);
+    };
+    if (state == "call" || state == "rcall") return opened("<parameter=", "</parameter>");
+    if (state != "reasoning" && state != "content") return false;
+    const bool thinking = state == "reasoning";
+    if (const size_t e = text.rfind(kThinkEnd); !thinking && e != none) text = text.substr(e + kThinkEnd.size());
+    bool fence = false;
+    size_t line = 0;
+    for (size_t nl; (nl = text.find('\n', line)) != none; line = nl + 1) {
+        const size_t c = text.find_first_not_of(" \t", line);
+        if (c < nl && text.compare(c, 3, "```") == 0) fence = !fence;
+    }
+    const std::string_view last = text.substr(line);
+    const size_t first = last.find_first_not_of(" \t");
+    if (first != none && last.compare(first, 3, "```") == 0) return false;   // the line of a fence: a real end can follow
+    if (opened("<|im_start|>", "<|im_end|>") || (fence && (thinking || !last.empty()))) return true;
+    if (std::count(last.begin(), last.end(), '`') % 2 == 1) return true;
+    if (const std::string_view q[] = {"(", "[", "\xE2\x80\x9C", "\xE2\x80\x98", "\xC2\xAB"};   // ( [ left quotes
+        std::any_of(std::begin(q), std::end(q), [&](std::string_view o) { return ends_with(last, o); }))
+        return true;
+    if (ends_with(last, "\"") && std::count(last.begin(), last.end(), '"') % 2 == 1) return true;
+    if (ends_with(last, "'") && (last.size() == 1 || !std::isalnum((unsigned char) last[last.size() - 2]))) return true;
+    const size_t end = last.find_last_not_of(" \t");
+    if (!thinking || end == none) return false;
+    const std::string_view written = last.substr(0, end + 1);
+    const std::string_view sentence[] = {".", "!", "?", "\xE3\x80\x82", "\xEF\xBC\x81", "\xEF\xBC\x9F", "\xE2\x80\xA6"};   // . ! ? and CJK, ...
+    return std::none_of(std::begin(sentence), std::end(sentence), [&](std::string_view o) { return ends_with(written, o); });
+}
 
 bool is_url(const std::string& s) { return starts_with(s, "http://") || starts_with(s, "https://"); }
 
@@ -434,7 +473,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
     std::string tail;   // the last characters written (the newlines before a call)
     bool answered = false, close_retried = false, nf_retried = false, leaving = false, timed_out = false;
     json timings = nullptr;
-    int recovery_count = 0;
+    int recovery_count = 0, marker_names = 0;
     std::string reasoning_text;
     double repeat_coverage = 0.0;
     bool looped = false;
@@ -673,6 +712,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
             const uint64_t dones_before = engine->done_count();
             const size_t segments_before = segments.size();
             std::optional<std::vector<int32_t>> recover_prompt;
+            std::optional<int32_t> named_marker;
             std::vector<int32_t> seg;
             bool wrap = false, nonfinite = false, opens = false;
             double last_out = mono_s();
@@ -691,6 +731,12 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 if (stop_ids.count(t)) {
                     if (force && parser.state() == "reasoning" && parser.buf() == kThinkEnd) {
                         opens = true;   // #537: the held </think> was the end: the call opens there
+                        return false;
+                    }
+                    if (literal_markers && marker_names < kMarkerNames && parser.buf() != kThinkEnd &&
+                        names_stop_marker(tok.decode(raw_ids), parser.state())) {
+                        --n;   // its text comes in plain tokens
+                        named_marker = t;
                         return false;
                     }
                     finish = "stop";
@@ -783,6 +829,25 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                     if (note) say(*note);
                 }
             };
+            // tokens the engine did not draw this pass join the reply, and the next pass's prompt, as if it had
+            auto join_tokens = [&](const std::vector<int32_t>& tokens) {
+                for (const int32_t t : tokens) {
+                    ++n;
+                    raw_ids.push_back(t);
+                    seg.push_back(t);
+                    thinking_n += parser.state() == "reasoning" || parser.state() == "rcall";
+                    const std::string piece = detok.push(t);
+                    tail = tail + piece;
+                    if (tail.size() > 2) tail = tail.substr(tail.size() - 2);
+                    std::vector<Event> evs = cut(parser.feed(piece));
+                    note(n, evs, st, rt);
+                    for (const Event& ev : evs) {
+                        if (!reasoning_loop_recovery.empty() && ev.kind == "reasoning") reasoning_text += ev.text;
+                        if (ev.kind == "content" || ev.kind == "tool_start" || ev.kind == "tool_call") answered = true;
+                        if (!sink("event", nullptr, &ev)) leaving = true;
+                    }
+                }
+            };
             try {
                 engine->generate(prompt, max_new - n, sampling, cancel, emb, on_token, on_beat);
             } catch (const EngineNonFinite&) {
@@ -853,6 +918,20 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 say(buf);
                 continue;
             }
+            if (named_marker && !cancel.is_set()) {
+                // the marker's text in plain tokens, as a message's text reads it; the engine continues from what it holds
+                const std::vector<int32_t> extra = tok.encode(tok.decode({*named_marker}), false);
+                if (max_new - n - (int64_t) extra.size() < 1) break;   // no room left: "length"
+                ++marker_names;
+                say("[lamina] the reply named " + tok.decode({*named_marker}) + " in its text: continuing past it (literal_markers)");
+                join_tokens(extra);
+                if (stops && stops->hit) {
+                    finish = "stop";
+                    break;
+                }
+                prompt.insert(prompt.end(), seg.begin(), seg.end());
+                continue;
+            }
             if (reasoning_close_retry && thinking && finish == "stop" && !close_retried && !answered && !wrap && !opens &&
                 parser.state() == "reasoning" && parser.buf() != kThinkEnd && !(stops && stops->hit) && !cancel.is_set()) {
                 // #1053: the model wrote its reasoning and stopped before </think>: close the thinking once and let it answer
@@ -887,21 +966,7 @@ void Service::run_inner(const std::vector<int32_t>& ids, bool thinking, const js
                 max_new - n - (int64_t) spill.size() > 1) {
                 // the engine generated these past the budget's stop before the STOP reached it, and its session holds
                 // them: they join the thinking, so the wrap-up continuation extends the engine's state
-                for (const int32_t t : spill) {
-                    ++n;
-                    raw_ids.push_back(t);
-                    seg.push_back(t);
-                    thinking_n += parser.state() == "reasoning" || parser.state() == "rcall";
-                    const std::string piece = detok.push(t);
-                    tail = tail + piece;
-                    if (tail.size() > 2) tail = tail.substr(tail.size() - 2);
-                    std::vector<Event> evs = cut(parser.feed(piece));
-                    note(n, evs, st, rt);
-                    for (const Event& ev : evs) {
-                        if (!reasoning_loop_recovery.empty() && ev.kind == "reasoning") reasoning_text += ev.text;
-                        if (!sink("event", nullptr, &ev)) leaving = true;
-                    }
-                }
+                join_tokens(spill);
             }
             std::string text;
             if (wrap) {

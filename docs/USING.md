@@ -148,6 +148,14 @@ engine's arguments.
   retries the request once if nothing was sent yet. `"reasoning_close_retry": true` closes a thinking that ended with
   no answer and continues once; `"reasoning_loop_recovery": "stop"` or `"recover"` ends or restarts a reply whose
   reasoning repeats whole passages. A request the engine stays silent on for `"engine_silence_s"` (default 300) ends.
+  The model writes `<|im_end|>` and `<|endoftext|>` as the one token that ends a turn, also when it means to quote them:
+  drawn inside a code span or fence, after an opening quote, in a tool call's open parameter or in the middle of its
+  thinking, the token becomes the marker's text and the reply goes on, up to 64 times a reply (`"literal_markers": false`
+  ends the turn there).
+- **A greeting**: a tool-using agent's prompt and an opening message with no task ("hello") can make the model invent
+  instructions in its thinking, and act on them, at the top reasoning effort (on llama.cpp too).
+  `"short_opening_tokens": 4` reads a conversation's first message of up to that many tokens as at `medium`, which has no
+  effort sentence; the next turn's prompt starts differently, so it is read again.
 - **JSON output**: `response_format` with `json_object` or `json_schema` (an object at the schema's root) asks the model
   for JSON and validates the answer: one generation, no hidden retry, a 502 (`structured_output_failed`) when it does
   not hold. The schema is checked with the `jsonschema` package when it is installed; without it, only that the answer
@@ -293,7 +301,8 @@ The server reads `lamina-<model>.json` at its start. Setup's keys: [SETUP.md](SE
 | `cors_origins`, `trusted_origins`, `allowed_hosts` | browsers and host names ([above](#from-other-devices)) |
 | `sampling`, `reasoning_effort`, `reasoning_budget_tokens`, `answer_room` | the defaults for requests ([above](#thinking)) |
 | `fit_max_tokens`, `anthropic_thinking`, `effort_position`, `aliases` | [above](#behaviour) |
-| `tool_call_recovery`, `repeat_stop_tokens`, `reasoning_close_retry`, `reasoning_loop_recovery`, `engine_silence_s` | [above](#behaviour) |
+| `tool_call_recovery`, `repeat_stop_tokens`, `reasoning_close_retry`, `literal_markers`, `short_opening_tokens`, `reasoning_loop_recovery`, `engine_silence_s` | [above](#behaviour) |
+| `chat_template_file` | a chat template file in place of the model file's |
 | `codex_compaction_cache`, `codex_thread_titles`, `env_to_user` | Codex's compaction and titles; opencode's `<env>` block moved to the first user message, so the system turn stays the same between sessions |
 | `idle_unload_s`, `min_free_vram_mib`, `before_load`, `lazy_load` | [sharing the GPU](#sharing-the-gpu) |
 | `mcp_servers`, `images`, `replicas`, `parallel` | MCP tools, image generation, replicas; `parallel`: the batch slots of Qwen3.6 and Qwen3.8-27B (`--batch`, one GPU) |

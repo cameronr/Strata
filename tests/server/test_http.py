@@ -314,6 +314,105 @@ def answers(gguf, exe=None, log_dir=None):
     return out
 
 
+def mock_server(test, *args):
+    """A mock server for one test, stopped at its end: its port, and the file holding its output."""
+    port = free_port()
+    log = Path(os.environ.get("TEMP", "/tmp")) / "lamina_http_test_single.log"
+    with open(log, "w", encoding="utf-8") as f:
+        proc = subprocess.Popen([str(server_exe()), "--engine", "mock", "--port", str(port), "--tokenizer",
+                                 os.environ["LAMINA_TEST_GGUF"], *args], cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
+    test.addCleanup(proc.wait, 10)
+    test.addCleanup(proc.terminate)
+    return port, proc, log
+
+
+def config_file(**keys):
+    path = Path(os.environ.get("TEMP", "/tmp")) / "lamina_http_test_single.json"
+    path.write_text(json.dumps(keys), encoding="utf-8")
+    return str(path)
+
+
+@unittest.skipUnless(os.environ.get("LAMINA_TEST_GGUF"), "LAMINA_TEST_GGUF names no model file")
+class TemplateFile(unittest.TestCase):
+    def test_it_replaces_the_files_template(self):
+        tpl = Path(os.environ.get("TEMP", "/tmp")) / "lamina_http_test_template.jinja"
+        tpl.write_text("X{{ messages[-1].content }}", encoding="utf-8")
+        port, proc, log = mock_server(self, "--config", config_file(chat_template_file=str(tpl)))
+        wait_ready(port, proc, "lamina-server", log)
+        status, ctype, raw = call(port, "POST", "/apply-template", chat(), {})
+        self.assertEqual((status, parse_body(ctype, raw)["prompt"]), (200, "XHi"))
+
+    def test_a_missing_file_stops_the_start(self):
+        _, proc, log = mock_server(self, "--config", config_file(chat_template_file="no/such/template.jinja"))
+        self.assertEqual(proc.wait(60), 1)
+        self.assertIn("chat_template_file", Path(log).read_text(errors="replace"))
+
+
+@unittest.skipUnless(os.environ.get("LAMINA_TEST_GGUF"), "LAMINA_TEST_GGUF names no model file")
+class ShortOpening(unittest.TestCase):
+    """A conversation's opening message of a few tokens is read without the top effort's sentence."""
+    TOP = "Reasoning effort is set to xhigh."
+
+    def prompts(self, *extra):
+        port, proc, log = mock_server(self, *extra)
+        wait_ready(port, proc, "lamina-server", log)
+
+        def prompt(**body):
+            status, ctype, raw = call(port, "POST", "/apply-template", {"model": "m", **body}, {})
+            self.assertEqual(status, 200, raw)
+            return parse_body(ctype, raw)["prompt"]
+        return prompt
+
+    def test_on(self):
+        prompt = self.prompts("--config", config_file(short_opening_tokens=4))
+        self.assertNotIn(self.TOP, prompt(messages=msgs("hello")))
+        self.assertNotIn(self.TOP, prompt(messages=msgs("hello"), reasoning_effort="high"))
+        self.assertNotIn(self.TOP, prompt(messages=[{"role": "user", "content": [{"type": "text", "text": "hello"}]}]))
+        # a longer message, a later turn, another effort
+        self.assertIn(self.TOP, prompt(messages=msgs("Add a docblock to the PostCreator class.")))
+        later = msgs("hello") + [{"role": "assistant", "content": "Hi."}, {"role": "user", "content": "ok"}]
+        self.assertIn(self.TOP, prompt(messages=later))
+        self.assertIn("effort is set to low", prompt(messages=msgs("hello"), reasoning_effort="low"))
+
+    def test_off_by_default(self):
+        self.assertIn(self.TOP, self.prompts()(messages=msgs("hello")))
+
+
+@unittest.skipUnless(os.environ.get("LAMINA_TEST_GGUF"), "LAMINA_TEST_GGUF names no model file")
+class MarkerNames(unittest.TestCase):
+    """A stop token drawn while the reply quotes the marker is the marker's text; elsewhere it ends the turn."""
+    # one script per engine pass: a pass ends at the marker, and the server's next pass takes the next script
+    SCRIPTS = ["The marker is `<|im_end|>", "` in its text. Also \"<|endoftext|>", "\" here.</think>\n\nThe `<|im_end|>",
+               "` token ends a turn.",
+               "A thought.</think>\n\nHe said \"hello\"",
+               "A last sentence.",
+               "Fenced:\n```\nhello<|im_end|>", "\n```\nDone.</think>\n\nA block:\n```\nx\n```"]
+
+    def serve(self, *extra):
+        port, proc, log = mock_server(self, *sum((["--script", s] for s in self.SCRIPTS), []), *extra)
+        wait_ready(port, proc, "lamina-server", log)
+
+        def ask():
+            status, ctype, raw = call(port, "POST", "/v1/chat/completions", chat(), {})
+            self.assertEqual(status, 200, raw)
+            choice = parse_body(ctype, raw)["choices"][0]
+            return choice["finish_reason"], choice["message"].get("reasoning_content"), choice["message"].get("content")
+        return ask
+
+    def test_named_in_thinking_and_in_the_answer(self):
+        ask = self.serve()
+        self.assertEqual(ask(), ("stop", "The marker is `<|im_end|>` in its text. Also \"<|endoftext|>\" here.",
+                                 "The `<|im_end|>` token ends a turn."))
+        # a closing quote and a sentence's end are real ends
+        self.assertEqual(ask(), ("stop", "A thought.", "He said \"hello\""))
+        self.assertEqual(ask(), ("stop", "A last sentence.", None))
+        # in a fence, while thinking; a fence's closing line in the answer is a real end
+        self.assertEqual(ask(), ("stop", "Fenced:\n```\nhello<|im_end|>\n```\nDone.", "A block:\n```\nx\n```"))
+
+    def test_off(self):
+        self.assertEqual(self.serve("--config", config_file(literal_markers=False))(), ("stop", "The marker is `", None))
+
+
 @unittest.skipUnless(os.environ.get("LAMINA_TEST_GGUF"), "LAMINA_TEST_GGUF names no model file")
 class HttpGolden(unittest.TestCase):
     def test_answers(self):

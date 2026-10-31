@@ -476,6 +476,17 @@ int run(int argc, char** argv) {
         say_err(std::string("[lamina] ") + e.what());
         return 1;
     }
+    if (const std::string file = jstr(cfg, "chat_template_file"); !file.empty()) {   // in place of the GGUF's
+        std::filesystem::path path = u8_path(file);
+        if (!path.is_absolute()) path = u8_path(jstr(cfg, "cwd", ".")) / path;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            say_err("[lamina] config \"chat_template_file\": cannot read " + u8_str(path));
+            return 1;
+        }
+        tok->chat_template.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        say("[lamina] chat template: " + u8_str(path));
+    }
     auto tpl = std::make_shared<ChatTemplate>(tok->chat_template);
     const bool fit = a.fit || (!a.no_fit && jget(cfg, "fit_max_tokens") != false);
     Service svc(engine, *tok, tpl, default_model_name(cfg, tok->architecture), vision, sampling_defaults, fit);
@@ -501,6 +512,12 @@ int run(int argc, char** argv) {
         }
         svc.answer_room = jget(cfg, "answer_room") != false;
         svc.reasoning_close_retry = jget(cfg, "reasoning_close_retry") == true;   // #1053: opt-in
+        svc.literal_markers = jget(cfg, "literal_markers") != false;
+        if (const json& n = jget(cfg, "short_opening_tokens"); !n.is_null()) {
+            if (!n.is_number_integer() || n.get<int64_t>() < 0)
+                throw ConfigError("\"short_opening_tokens\" must be a whole number, 0 or more, not " + py_repr_value(n));
+            svc.short_opening_tokens = n.get<int64_t>();
+        }
         if (truthy(jget(cfg, "images"))) {   // image generation, set up by setup --images
             json icfg = cfg["images"];
             for (const char* k : {"exe", "diffusion_model", "vae", "llm", "out_dir"})

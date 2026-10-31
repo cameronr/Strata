@@ -1041,13 +1041,41 @@ json Service::v1_status() {
             {"last_timings", last_t}, {"machine", machine}};
 }
 
+bool Service::short_opening(const json& messages) const {
+    // the only user message so far, of text alone, too short to hold a task
+    const json* user = nullptr;
+    for (const auto& m : messages) {
+        const std::string role = jstr(m, "role");
+        if (role == "system") continue;
+        if (user != nullptr || role != "user") return false;
+        user = &m;
+    }
+    if (user == nullptr) return false;
+    const json& content = jget(*user, "content");
+    std::string text;
+    if (content.is_string()) text = content.get<std::string>();
+    else if (content.is_array())
+        for (const auto& part : content) {
+            if (jstr(part, "type") != "text") return false;
+            text += jstr(part, "text");
+        }
+    return (int64_t) tok.encode(text, false).size() <= short_opening_tokens;
+}
+
 std::string Service::render_prompt(const json& messages, const json& tools, const json& kwargs) {
     // #458: with effort_end, a request with a non-default effort is rendered as a default one up to the answer (the
     // same prompt start, so the conversation cache keeps it) and its effort follows in a short system turn
     const json& effort = jget(kwargs, "reasoning_effort");
     const bool off = jget(kwargs, "enable_thinking").is_boolean() && !kwargs["enable_thinking"].get<bool>();
     const std::string e = effort.is_string() ? effort.get<std::string>() : "";
-    if (!effort_end || (!off && (effort.is_null() || e.empty() || e == "xhigh" || e == "high")))
+    const bool top = !off && (effort.is_null() || e.empty() || e == "xhigh" || e == "high");
+    if (top && short_opening_tokens > 0 && !effort_end && short_opening(messages)) {
+        // the top effort's sentence on a message with no task: the model goes looking for one and invents instructions
+        json medium = kwargs;
+        medium["reasoning_effort"] = "medium";
+        return tpl->render(messages, tools, true, medium);
+    }
+    if (!effort_end || top)
         return tpl->render(messages, tools, true, kwargs);
     json base = json::object();
     for (auto it = kwargs.begin(); it != kwargs.end(); ++it)
