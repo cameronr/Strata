@@ -84,8 +84,8 @@ The server renders prompts with the chat template in the model's file. Lamina al
 
 A relative path starts at the config's `cwd`. The server's log then says
 `[lamina] chat template: ...data/chat-template-froggeric-v22.5.jinja`. Remove the key to go back to the model's own
-template. A conversation's history renders as it does under the model's template, so only its system turn changes and a
-cached conversation is read again once. It has been tested on Qwen3.8-Flash-Next, on both model files.
+template. A conversation's history renders as it does under the model's template but for its system turn and the warnings
+below, and a cached conversation is read again once. It has been tested on Qwen3.8-Flash-Next, on both model files.
 
 What it changes:
 
