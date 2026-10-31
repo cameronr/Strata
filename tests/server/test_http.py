@@ -342,6 +342,33 @@ class TemplateFile(unittest.TestCase):
         status, ctype, raw = call(port, "POST", "/apply-template", chat(), {})
         self.assertEqual((status, parse_body(ctype, raw)["prompt"]), (200, "XHi"))
 
+    def test_the_shipped_template(self):
+        port, proc, log = mock_server(self, "--script", "Plain answer.", "--config",
+                                      config_file(chat_template_file="data/chat-template-froggeric-v22.5.jinja"))
+        wait_ready(port, proc, "lamina-server", log)
+
+        def prompt(**body):
+            status, ctype, raw = call(port, "POST", "/apply-template", {"model": "m", **body}, {})
+            self.assertEqual(status, 200, raw)
+            return parse_body(ctype, raw)["prompt"]
+        sentence = "Reasoning effort is set to xhigh."
+        self.assertIn(sentence, prompt(messages=msgs(), reasoning_effort="high"))
+        self.assertNotIn(sentence, prompt(messages=msgs()))
+        self.assertTrue(prompt(messages=msgs()).endswith("<|im_start|>assistant\n<think>\n"))
+        self.assertTrue(prompt(messages=msgs(), reasoning_effort="none").endswith("<think>\n\n</think>\n\n"))
+        failed = msgs() + [{"role": "assistant", "tool_calls": [{"function": {"name": "get_time", "arguments": "{}"}}]},
+                           {"role": "tool", "content": "Error: no such zone"}]
+        self.assertIn("SYSTEM WARNING", prompt(messages=failed, tools=TOOLS))
+        # the template closes the thinking for a tag in the message: the reply is the answer
+        status, ctype, raw = call(port, "POST", "/v1/chat/completions", {"model": "m", "messages": msgs("Hi <|think_off|>")}, {})
+        message = parse_body(ctype, raw)["choices"][0]["message"]
+        self.assertEqual((status, message.get("reasoning_content"), message.get("content")), (200, None, "Plain answer."))
+        # and opens it for a tag when the request has it off: the reply is reasoning until </think>
+        status, ctype, raw = call(port, "POST", "/v1/chat/completions",
+                                  {"model": "m", "messages": msgs("Hi <|think_low|>"), "reasoning_effort": "none"}, {})
+        message = parse_body(ctype, raw)["choices"][0]["message"]
+        self.assertEqual((status, message.get("reasoning_content"), message.get("content")), (200, "Plain answer.", None))
+
     def test_a_missing_file_stops_the_start(self):
         _, proc, log = mock_server(self, "--config", config_file(chat_template_file="no/such/template.jinja"))
         self.assertEqual(proc.wait(60), 1)

@@ -71,6 +71,36 @@ The model loads in a minute or so. Then:
 How to connect clients, the config's keys, images, image generation, MCP tools and serving on a network:
 [docs/USING.md](docs/USING.md).
 
+## A fixed chat template
+
+The server renders prompts with the chat template in the model's file. Lamina also carries
+[froggeric's fixed template for Qwen 3.5, 3.6 and 3.8](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates)
+(v22.5) in `data/chat-template-froggeric-v22.5.jinja`. To enable it, add this key to the model's config,
+`lamina-<model>.json`, and start the server again:
+
+```json
+"chat_template_file": "data/chat-template-froggeric-v22.5.jinja"
+```
+
+A relative path starts at the config's `cwd`. The server's log then says
+`[lamina] chat template: ...data/chat-template-froggeric-v22.5.jinja`. Remove the key to go back to the model's own
+template. A conversation's history renders as it does under the model's template, so only its system turn changes and a
+cached conversation is read again once. It has been tested on Qwen3.8-Flash-Next, on both model files.
+
+What it changes:
+
+- **The default effort.** A request that names no reasoning effort runs at `medium` instead of `xhigh`, with no effort
+  sentence in the prompt, and thinks less. `high` still means `xhigh`. A config's `"reasoning_effort": "high"` keeps
+  `xhigh` as the default.
+- **The tool instructions.** The system turn says more about how to call tools. Under a coding agent's prompt the model
+  invents fewer instructions when a conversation opens with a greeting, though not on every prompt
+  (`"short_opening_tokens"` in [docs/USING.md](docs/USING.md#behaviour) covers that case on its own).
+- **Tool errors.** A tool result the template takes for an error (from its first 120 characters: `"error":`,
+  `command not found`, a non-zero exit code, ...) gets a `⚠️ SYSTEM WARNING` line telling the model to retry differently.
+  A tool that prints such text without failing gets the line too.
+- **Tags in a message.** `<|think_off|>`, `<|think_on|>`, `<|think_low|>`, `<|think_medium|>` and `<|think_xhigh|>` in a
+  message set the thinking for that turn and the later ones, and are removed from the text.
+
 ## Documentation
 
 - [docs/SETUP.md](docs/SETUP.md): setup, the configs, choosing the GPUs, Qwen3.6 and Qwen3.8-27B, Docker.
@@ -87,7 +117,8 @@ How to connect clients, the config's keys, images, image generation, MCP tools a
 
 Lamina is under the MIT license ([LICENSE](LICENSE)), as Strata is. Some parts carry their own: `third_party/ggml`
 (MIT, llama.cpp's), the web app's font, [Outfit](https://github.com/Outfitio/Outfit-Fonts) (SIL Open Font License 1.1,
-`src/server/web/fonts/OFL.txt`), and what lamina-server takes from llama.cpp's checkout (its Jinja engine,
+`src/server/web/fonts/OFL.txt`), froggeric's chat template (Apache-2.0, unmodified,
+`data/chat-template-froggeric-v22.5.LICENSE`), and what lamina-server takes from llama.cpp's checkout (its Jinja engine,
 cpp-httplib, nlohmann/json, stb_image: MIT). It builds on:
 
 - [Strata](https://github.com/Niko1221/Strata) by Niko1221 and its contributors: the engine Lamina grew from, with ideas

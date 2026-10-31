@@ -128,7 +128,10 @@ Prepared Service::prepare(json& messages, const json& tools, const json& kwargs,
     const json fetched = note_unreadable_tool_images(messages, cancel);
     const std::vector<int32_t> encoded_ids = encode_prompt(messages, tools, kwargs);
     std::vector<int32_t> ids = encoded_ids;
-    const bool thinking_off = jget(kwargs, "enable_thinking").is_boolean() && !kwargs["enable_thinking"].get<bool>();
+    // the prompt's end says, where a template decides for itself (a <|think_off|> or <|think_low|> in a message)
+    const std::string prompt_end = ids.size() >= 2 ? tok.decode(std::vector<int32_t>(ids.end() - 2, ids.end())) : "";
+    const bool thinking_off = prompt_end == "</think>\n\n" || (prompt_end != "<think>\n" && jget(kwargs, "enable_thinking").is_boolean() &&
+                                                               !kwargs["enable_thinking"].get<bool>());
     if (force && thinking_off) {
         const std::vector<int32_t> f = tok.encode(*force, true);
         ids.insert(ids.end(), f.begin(), f.end());

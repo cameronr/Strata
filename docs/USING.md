@@ -302,7 +302,7 @@ The server reads `lamina-<model>.json` at its start. Setup's keys: [SETUP.md](SE
 | `sampling`, `reasoning_effort`, `reasoning_budget_tokens`, `answer_room` | the defaults for requests ([above](#thinking)) |
 | `fit_max_tokens`, `anthropic_thinking`, `effort_position`, `aliases` | [above](#behaviour) |
 | `tool_call_recovery`, `repeat_stop_tokens`, `reasoning_close_retry`, `literal_markers`, `short_opening_tokens`, `reasoning_loop_recovery`, `engine_silence_s` | [above](#behaviour) |
-| `chat_template_file` | a chat template file in place of the model file's |
+| `chat_template_file` | a chat template file in place of the model file's ([the README](../README.md#a-fixed-chat-template)) |
 | `codex_compaction_cache`, `codex_thread_titles`, `env_to_user` | Codex's compaction and titles; opencode's `<env>` block moved to the first user message, so the system turn stays the same between sessions |
 | `idle_unload_s`, `min_free_vram_mib`, `before_load`, `lazy_load` | [sharing the GPU](#sharing-the-gpu) |
 | `mcp_servers`, `images`, `replicas`, `parallel` | MCP tools, image generation, replicas; `parallel`: the batch slots of Qwen3.6 and Qwen3.8-27B (`--batch`, one GPU) |
